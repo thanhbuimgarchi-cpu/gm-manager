@@ -43,8 +43,14 @@ type DriveFolder = {
   url: string;
 };
 
+type DriveSyncConfig = {
+  scriptUrl: string;
+  token: string;
+};
+
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
+const driveSyncConfigKey = "gm-manager-apps-script";
 
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫", url: "https://drive.google.com/drive/folders/1KtXRW5p5tuY4qLC8q0hOG5dcKtnCfCu-" },
@@ -214,6 +220,10 @@ export default function Home() {
   const [renameValue, setRenameValue] = useState("");
   const [renameUnlocked, setRenameUnlocked] = useState(false);
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
+  const [driveConfigOpen, setDriveConfigOpen] = useState(false);
+  const [driveScriptUrl, setDriveScriptUrl] = useState("");
+  const [driveSyncToken, setDriveSyncToken] = useState("");
+  const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -230,11 +240,23 @@ export default function Home() {
         window.localStorage.removeItem("gm-manager-consulting");
       }
     }
+
+    const savedDriveConfig = window.localStorage.getItem(driveSyncConfigKey);
+    if (savedDriveConfig) {
+      try {
+        const config = JSON.parse(savedDriveConfig) as DriveSyncConfig;
+        setDriveScriptUrl(config.scriptUrl ?? "");
+        setDriveSyncToken(config.token ?? "");
+      } catch {
+        window.localStorage.removeItem(driveSyncConfigKey);
+      }
+    }
   }, []);
 
   const activeDriveFolder = syncedDriveFolders.find((folder) => folder.label === activeFolder);
   const activeYear = years.find((folder) => folder.year === selectedYear);
   const activeMonthFolder = activeYear?.months[selectedMonth - 1];
+  const isDriveConnected = Boolean(driveScriptUrl.trim() && driveSyncToken.trim());
   const availableModalYears = useMemo(() => {
     const currentYear = getVietnamDate().year;
     return Array.from(new Set([...years.map((folder) => folder.year), ...Array.from({ length: 9 }, (_, index) => currentYear - 3 + index)])).sort((a, b) => a - b);
@@ -395,6 +417,46 @@ export default function Home() {
     updateFunctionalRoom(floorId, roomId, "room", match ?? "");
   };
 
+  const saveDriveConfig = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl.startsWith("https://script.google.com/macros/s/") || !config.token) {
+      setNotice("Hãy nhập Web app URL và mã đồng bộ từ Google Apps Script.");
+      return;
+    }
+    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
+    setDriveConfigOpen(false);
+    setNotice("Đã kết nối Google Apps Script trên thiết bị này");
+  };
+
+  const syncRecordToDrive = async (record: WorkRecord) => {
+    if (!isDriveConnected) {
+      setDriveConfigOpen(true);
+      return;
+    }
+    setSyncingRecordId(record.id);
+    try {
+      const response = await fetch("/api/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scriptUrl: driveScriptUrl.trim(),
+          token: driveSyncToken.trim(),
+          year: selectedYear,
+          month: selectedMonth,
+          record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
+        }),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo file Excel.");
+      setNotice(`Đã xuất ${record.projectId}.xlsx vào Drive`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể kết nối Drive.");
+    } finally {
+      setSyncingRecordId(null);
+    }
+  };
+
   return (
     <main className="crm-shell">
       <aside className="sidebar">
@@ -425,7 +487,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customer..." aria-label="Search customer" /></label>
-          <div className="topbar__actions"><span className="drive-status"><i /> Đã nạp GM-manager</span><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
+          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (
@@ -488,6 +550,20 @@ export default function Home() {
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>
             <p className="id-preview">ID dự kiến: <b>GM{String(getVietnamDate().day).padStart(2, "0")}{String(getVietnamDate().month).padStart(2, "0")}{getVietnamDate().year}{customerName ? nameInitials(customerName) : "..."}</b></p>
             <button className="add-button" type="submit">Tạo thư mục</button>
+          </form>
+        </div>
+      )}
+
+      {driveConfigOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setDriveConfigOpen(false)}>
+          <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
+            <p className="drive-config-dialog__hint">Tạo Web app bằng mã GM-CRM, rồi dán URL và mã đồng bộ riêng của bạn vào đây.</p>
+            <a className="script-link" href="/gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
+            <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
+            <label>Mã đồng bộ<input type="password" value={driveSyncToken} onChange={(event) => setDriveSyncToken(event.target.value)} placeholder="Mã bạn đã đặt trong Script" /></label>
+            <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
         </div>
       )}
@@ -600,7 +676,7 @@ export default function Home() {
                 </table>
               </section>
             </div>
-            <footer className="record-detail__footer"><span>Tự động lưu thay đổi</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
+            <footer className="record-detail__footer"><span>{isDriveConnected ? "Sẵn sàng xuất Excel vào Drive" : "Kết nối Drive để xuất Excel"}</span><div className="record-detail__actions"><button className="export-button" onClick={() => syncRecordToDrive(selectedRecord)} disabled={syncingRecordId === selectedRecord.id}>{syncingRecordId === selectedRecord.id ? "Đang xuất…" : "Xuất Excel"}</button><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></div></footer>
           </section>
         </div>
       )}
