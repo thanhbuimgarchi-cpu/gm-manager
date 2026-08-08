@@ -68,6 +68,7 @@ function writeWorkbook_(spreadsheet, record) {
     ["5. H\u1ec7 th\u1ed1ng", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["D", "\u0110i\u1ec7n"], ["N", "N\u01b0\u1edbc"], ["E", "N\u0103ng l\u01b0\u1ee3ng"], ["EL", "Thang m\u00e1y"], ["DR", "C\u1eeda"],
     ]],
+    ["6. Th\u00f4ng tin ghi \u00e2m", ["M\u1ed1c th\u1eddi gian", "N\u1ed9i dung \u0111\u00e3 chuy\u1ec3n", "\u00dd ch\u00ednh"], null],
   ];
 
   sheetDefinitions.forEach(function(definition, index) {
@@ -86,6 +87,17 @@ function writeWorkbook_(spreadsheet, record) {
           if (room.room || room.quantity || room.description) rows.push([floor.floor || "T\u1ea7ng 1", room.room || "", room.quantity || "", room.description || ""]);
         });
       });
+      if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    } else if (name === "6. Th\u00f4ng tin ghi \u00e2m") {
+      const note = record.audioNote || {};
+      const segments = note.segments || [];
+      const points = note.keyPoints || [];
+      const rows = [];
+      const count = Math.max(segments.length, points.length);
+      for (let rowIndex = 0; rowIndex < count; rowIndex++) {
+        const segment = segments[rowIndex] || {};
+        rows.push([segment.time || "", segment.text || "", points[rowIndex] || ""]);
+      }
       if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
     } else {
       const rows = fieldRows.map(function(field) {

@@ -1,6 +1,19 @@
 "use client";
 
-import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+
+type AudioSegment = {
+  time: string;
+  text: string;
+};
+
+type AudioNote = {
+  fileName: string;
+  language: string;
+  updatedAt: string;
+  segments: AudioSegment[];
+  keyPoints: string[];
+};
 
 type WorkRecord = {
   id: string;
@@ -9,6 +22,7 @@ type WorkRecord = {
   projectId: string;
   createdAt: string;
   details: Record<string, string>;
+  audioNote?: AudioNote;
   functionalFloors?: FunctionalFloor[];
   functionalRows?: LegacyFunctionalRow[];
 };
@@ -226,6 +240,7 @@ export default function Home() {
   const [driveScriptUrl, setDriveScriptUrl] = useState("");
   const [driveSyncToken, setDriveSyncToken] = useState("");
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
+  const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const driveSyncTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -382,6 +397,53 @@ export default function Home() {
     });
     persist(nextYears);
     queueDriveSync(updatedRecord);
+  };
+
+  const importAudioNote = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !selectedRecord) return;
+    if (!file.type.startsWith("audio/")) {
+      setNotice("Hãy chọn đúng file ghi âm.");
+      return;
+    }
+    if (file.size > 18 * 1024 * 1024) {
+      setNotice("File ghi âm tối đa 18 MB. Hãy chia file ngắn hơn rồi nhập lại.");
+      return;
+    }
+
+    const recordId = selectedRecord.id;
+    setAudioProcessingId(recordId);
+    try {
+      const formData = new FormData();
+      formData.append("audio", file);
+      const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
+      const result = await response.json() as { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
+      if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
+
+      const audioNote: AudioNote = {
+        fileName: file.name,
+        language: result.language || "Tiếng Việt",
+        updatedAt: new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
+        segments: result.segments,
+        keyPoints: result.keyPoints ?? [],
+      };
+      const updatedRecord = { ...selectedRecord, audioNote };
+      const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
+        ...yearFolder,
+        months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
+          ...monthFolder,
+          records: monthFolder.records.map((record) => record.id === recordId ? updatedRecord : record),
+        }),
+      });
+      persist(nextYears);
+      queueDriveSync(updatedRecord);
+      setNotice("Đã chuyển ghi âm thành văn bản và lưu ý chính.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể xử lý file ghi âm.");
+    } finally {
+      setAudioProcessingId(null);
+    }
   };
 
   const functionalFloors = selectedRecord ? normalizeFunctionalFloors(selectedRecord) : [createFunctionalFloor()];
@@ -703,6 +765,36 @@ export default function Home() {
                     <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>
                   ))}</tbody>
                 </table>
+              </section>
+
+              <section className="dynamic-information system-information audio-information">
+                <div className="audio-information__heading">
+                  <div>
+                    <h3>6. Thông tin ghi âm</h3>
+                    <p>Nhập MP3, WAV, M4A, AAC, OGG hoặc FLAC (tối đa 18 MB). Gemini sẽ chuyển thành văn bản theo đoạn và rút các ý chính.</p>
+                  </div>
+                  <label className={`audio-import-button ${audioProcessingId === selectedRecord.id ? "audio-import-button--busy" : ""}`}>
+                    <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} disabled={audioProcessingId === selectedRecord.id} />
+                    {audioProcessingId === selectedRecord.id ? "Đang xử lý…" : "Import ghi âm"}
+                  </label>
+                </div>
+                {selectedRecord.audioNote && (
+                  <div className="audio-note">
+                    <p className="audio-note__meta">{selectedRecord.audioNote.fileName} · {selectedRecord.audioNote.language} · {selectedRecord.audioNote.updatedAt}</p>
+                    <h4>Ý chính</h4>
+                    {selectedRecord.audioNote.keyPoints.length > 0 ? (
+                      <ul>{selectedRecord.audioNote.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul>
+                    ) : <p className="audio-note__empty">Chưa rút được ý chính từ bản ghi âm này.</p>}
+                    {selectedRecord.audioNote.segments.length > 0 && (
+                      <details>
+                        <summary>Văn bản đã chuyển ({selectedRecord.audioNote.segments.length} đoạn)</summary>
+                        <div className="audio-transcript">
+                          {selectedRecord.audioNote.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                )}
               </section>
             </div>
             <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel vào Drive…" : isDriveConnected ? "Tự động đồng bộ Excel sau mỗi thay đổi" : "Kết nối Drive để tự động đồng bộ Excel"}</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
