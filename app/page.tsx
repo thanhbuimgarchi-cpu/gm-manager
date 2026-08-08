@@ -116,6 +116,30 @@ const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "S
 
 const createFunctionalRow = (floor = "Tầng 1"): FunctionalRow => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, room: "", quantity: "", description: "" });
 
+const normalizeSearchText = (value: string) => value
+  .toLocaleLowerCase("vi")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .replaceAll("đ", "d")
+  .trim();
+
+const getRoomSuggestions = (query: string) => {
+  const normalizedQuery = normalizeSearchText(query);
+  if (normalizedQuery.length < 2 || query.trim().startsWith("@")) return [];
+
+  return roomOptions
+    .map((room, index) => {
+      const normalizedRoom = normalizeSearchText(room);
+      const matches = normalizedRoom.includes(normalizedQuery) || normalizedQuery.split(/\s+/).every((word) => normalizedRoom.includes(word));
+      const score = normalizedRoom.startsWith(normalizedQuery) ? 0 : normalizedRoom.includes(normalizedQuery) ? 1 : 2;
+      return { room, index, matches, score };
+    })
+    .filter((result) => result.matches)
+    .sort((a, b) => a.score - b.score || a.index - b.index)
+    .slice(0, 8)
+    .map((result) => result.room);
+};
+
 function getVietnamDate() {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -157,6 +181,7 @@ export default function Home() {
   const [accessCode, setAccessCode] = useState("");
   const [renameValue, setRenameValue] = useState("");
   const [renameUnlocked, setRenameUnlocked] = useState(false);
+  const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -482,15 +507,35 @@ export default function Home() {
 
               <section className="dynamic-information">
                 <h3>4. Thông tin công năng</h3>
-                <p>Gõ tên phòng để tìm trong danh sách, hoặc bắt đầu bằng <b>@</b> để nhập phòng mới.</p>
-                <datalist id="room-options">{roomOptions.map((room) => <option key={room} value={room} />)}</datalist>
+                <p>Gõ tối thiểu 2 ký tự để xem gợi ý gần đúng, hoặc bắt đầu bằng <b>@</b> để nhập phòng mới.</p>
                 <table className="functional-table">
                   <thead><tr><th>Tầng</th><th>Công năng</th><th>Số lượng</th><th>Mô tả chi tiết</th></tr></thead>
                   <tbody>
                     {functionalRows.map((row) => (
                       <tr key={row.id}>
                         <td><div className="floor-cell"><input value={row.floor} onChange={(event) => updateFunctionalRow(row.id, "floor", event.target.value)} /><span><button type="button" onClick={addFunctionalRow} aria-label="Thêm hàng">+</button><button type="button" onClick={() => removeFunctionalRow(row.id)} disabled={functionalRows.length === 1} aria-label="Xóa hàng">−</button></span></div></td>
-                        <td><input list="room-options" value={row.room} onChange={(event) => updateFunctionalRow(row.id, "room", event.target.value)} onBlur={(event) => validateRoom(row.id, event.target.value)} placeholder="Chọn hoặc @Phòng mới" /></td>
+                        <td>
+                          <div className="room-autocomplete">
+                            <input
+                              value={row.room}
+                              onChange={(event) => { updateFunctionalRow(row.id, "room", event.target.value); setRoomSuggestionFor(row.id); }}
+                              onBlur={(event) => { window.setTimeout(() => setRoomSuggestionFor(null), 120); validateRoom(row.id, event.target.value); }}
+                              onKeyDown={(event) => { if (event.key === "Escape") setRoomSuggestionFor(null); }}
+                              placeholder="Gõ để tìm hoặc @Phòng mới"
+                              aria-autocomplete="list"
+                              aria-expanded={roomSuggestionFor === row.id && getRoomSuggestions(row.room).length > 0}
+                            />
+                            {roomSuggestionFor === row.id && getRoomSuggestions(row.room).length > 0 && (
+                              <div className="room-suggestions" role="listbox" aria-label="Gợi ý công năng">
+                                {getRoomSuggestions(row.room).map((room) => (
+                                  <button key={room} type="button" role="option" onMouseDown={(event) => event.preventDefault()} onClick={() => { updateFunctionalRow(row.id, "room", room); setRoomSuggestionFor(null); }}>
+                                    {room}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </td>
                         <td><input inputMode="numeric" value={row.quantity} onChange={(event) => updateFunctionalRow(row.id, "quantity", event.target.value)} placeholder="0" /></td>
                         <td><input value={row.description} onChange={(event) => updateFunctionalRow(row.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
                       </tr>
