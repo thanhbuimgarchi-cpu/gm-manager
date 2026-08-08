@@ -5,6 +5,7 @@ import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react
 type WorkRecord = {
   id: string;
   name: string;
+  houseId?: string;
   projectId: string;
   createdAt: string;
   details: Record<string, string>;
@@ -212,6 +213,7 @@ export default function Home() {
   const [modalMonth, setModalMonth] = useState(now.month);
   const [modalYear, setModalYear] = useState(now.year);
   const [customerName, setCustomerName] = useState("");
+  const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
@@ -265,7 +267,7 @@ export default function Home() {
   const visibleRecords = useMemo(() => {
     const term = search.trim().toLowerCase();
     const records = activeMonthFolder?.records ?? [];
-    return term ? records.filter((record) => `${record.name} ${record.projectId}`.toLowerCase().includes(term)) : records;
+    return term ? records.filter((record) => `${record.name} ${record.houseId ?? ""} ${record.projectId}`.toLowerCase().includes(term)) : records;
   }, [activeMonthFolder, search]);
 
   const persist = (nextYears: YearFolder[]) => {
@@ -278,12 +280,14 @@ export default function Home() {
     setModalMonth(currentDate.month);
     setModalYear(currentDate.year);
     setCustomerName("");
+    setHouseId("");
     setAddOpen(true);
   };
 
   const addCustomer = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = customerName.trim();
+    const normalizedHouseId = houseId.trim();
     const targetYear = years.find((folder) => folder.year === modalYear);
     if (!name) return;
     if (!targetYear) {
@@ -296,6 +300,7 @@ export default function Home() {
     const record: WorkRecord = {
       id: `${Date.now()}-${projectId}`,
       name,
+      houseId: normalizedHouseId,
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
@@ -539,7 +544,7 @@ export default function Home() {
                 {visibleRecords.length ? visibleRecords.map((record) => (
                   <article className="project-folder" key={record.id} onClick={() => setSelectedRecordId(record.id)}>
                     <span className="project-folder__icon">▰</span>
-                    <div><b>{record.projectId}</b><small>{record.name}</small><em>Khởi tạo {record.createdAt}</em></div>
+                    <div><b>{record.projectId}</b><small>{record.name}{record.houseId && <span className="house-id"> · {record.houseId}</span>}</small><em>Khởi tạo {record.createdAt}</em></div>
                     <div className="project-actions">
                       <button className="more-button" onClick={(event) => { event.stopPropagation(); setOpenMenuId(openMenuId === record.id ? null : record.id); }} aria-label={`Tùy chọn ${record.projectId}`}>…</button>
                       {openMenuId === record.id && (
@@ -571,6 +576,7 @@ export default function Home() {
             <label>Tháng<select value={modalMonth} onChange={(event) => setModalMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
             <label>Năm<select value={modalYear} onChange={(event) => setModalYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>
+            <label>Mã nhà <span className="field-code">(IDH)</span><input value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
             <p className="id-preview">ID dự kiến: <b>GM{String(getVietnamDate().day).padStart(2, "0")}{String(getVietnamDate().month).padStart(2, "0")}{getVietnamDate().year}{customerName ? nameInitials(customerName) : "..."}</b></p>
             <button className="add-button" type="submit">Tạo thư mục</button>
           </form>
