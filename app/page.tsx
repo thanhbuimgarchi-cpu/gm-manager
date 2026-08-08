@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 
 type WorkRecord = {
   id: string;
@@ -224,6 +224,7 @@ export default function Home() {
   const [driveScriptUrl, setDriveScriptUrl] = useState("");
   const [driveSyncToken, setDriveSyncToken] = useState("");
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
+  const driveSyncTimer = useRef<number | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -305,6 +306,7 @@ export default function Home() {
       months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
     });
     persist(nextYears);
+    queueDriveSync(record, modalYear, modalMonth);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
     setAddOpen(false);
@@ -349,42 +351,48 @@ export default function Home() {
   const renameRecord = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!protectedAction || !renameValue.trim()) return;
+    const updatedRecord = { ...protectedAction.record, name: renameValue.trim() };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
         ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === protectedAction.record.id ? { ...record, name: renameValue.trim() } : record),
+        records: monthFolder.records.map((record) => record.id === protectedAction.record.id ? updatedRecord : record),
       }),
     });
     persist(nextYears);
+    queueDriveSync(updatedRecord);
     setProtectedAction(null);
     setNotice("Đã đổi tên hồ sơ");
   };
 
   const updateRecordDetail = (key: string, value: string) => {
     if (!selectedRecord) return;
+    const updatedRecord = { ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: value } };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
         ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, details: { ...(record.details ?? {}), [key]: value } } : record),
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
       }),
     });
     persist(nextYears);
+    queueDriveSync(updatedRecord);
   };
 
   const functionalFloors = selectedRecord ? normalizeFunctionalFloors(selectedRecord) : [createFunctionalFloor()];
 
   const updateFunctionalFloors = (nextFloors: FunctionalFloor[]) => {
     if (!selectedRecord) return;
+    const updatedRecord = { ...selectedRecord, functionalFloors: nextFloors, functionalRows: undefined };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
         ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, functionalFloors: nextFloors, functionalRows: undefined } : record),
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
       }),
     });
     persist(nextYears);
+    queueDriveSync(updatedRecord);
   };
 
   const updateFunctionalFloor = (floorId: string, value: string) => {
@@ -427,10 +435,12 @@ export default function Home() {
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
     setNotice("Đã kết nối Google Apps Script trên thiết bị này");
+    if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
   };
 
-  const syncRecordToDrive = async (record: WorkRecord) => {
-    if (!isDriveConnected) {
+  const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) {
       setDriveConfigOpen(true);
       return;
     }
@@ -440,10 +450,10 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scriptUrl: driveScriptUrl.trim(),
-          token: driveSyncToken.trim(),
-          year: selectedYear,
-          month: selectedMonth,
+          scriptUrl: config.scriptUrl,
+          token: config.token,
+          year,
+          month,
           record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
         }),
       });
@@ -456,6 +466,19 @@ export default function Home() {
       setSyncingRecordId(null);
     }
   };
+
+  const queueDriveSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+    if (!isDriveConnected) return;
+    if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
+    driveSyncTimer.current = window.setTimeout(() => {
+      driveSyncTimer.current = null;
+      void syncRecordToDrive(record, year, month);
+    }, 900);
+  };
+
+  useEffect(() => () => {
+    if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
+  }, []);
 
   return (
     <main className="crm-shell">
@@ -676,7 +699,7 @@ export default function Home() {
                 </table>
               </section>
             </div>
-            <footer className="record-detail__footer"><span>{isDriveConnected ? "Sẵn sàng xuất Excel vào Drive" : "Kết nối Drive để xuất Excel"}</span><div className="record-detail__actions"><button className="export-button" onClick={() => syncRecordToDrive(selectedRecord)} disabled={syncingRecordId === selectedRecord.id}>{syncingRecordId === selectedRecord.id ? "Đang xuất…" : "Xuất Excel"}</button><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></div></footer>
+            <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel vào Drive…" : isDriveConnected ? "Tự động đồng bộ Excel sau mỗi thay đổi" : "Kết nối Drive để tự động đồng bộ Excel"}</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
           </section>
         </div>
       )}
