@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Orbit CRM | Customer pipeline",
-  description: "A calm, focused CRM dashboard for managing customer relationships.",
+  title: "GM-CRM | Quản lý dự án",
+  description: "GM-CRM quản lý hồ sơ và thư mục dự án theo tháng, năm.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
