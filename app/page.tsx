@@ -8,6 +8,15 @@ type WorkRecord = {
   projectId: string;
   createdAt: string;
   details: Record<string, string>;
+  functionalRows: FunctionalRow[];
+};
+
+type FunctionalRow = {
+  id: string;
+  floor: string;
+  room: string;
+  quantity: string;
+  description: string;
 };
 
 type MonthFolder = {
@@ -53,40 +62,59 @@ const team = [
   ["CC", "Cara Cerr", "SEO Specialist", "sage"],
 ];
 
-const detailSections = [
+type DetailField = {
+  code: string;
+  label: string;
+  options?: readonly string[];
+};
+
+const detailSections: Array<{ title: string; fields: DetailField[] }> = [
   {
     title: "1. Thông tin chủ đầu tư",
     fields: [
-      ["HVT", "Họ và tên (HVT)"],
-      ["NS", "Ngày tháng năm sinh (NS)"],
-      ["DC", "Địa chỉ (DC)"],
-      ["SDT", "Số điện thoại/Zalo (SDT)"],
-      ["EMA", "Email (EMA)"],
+      { code: "HVT", label: "Họ và tên" },
+      { code: "NS", label: "Ngày tháng năm sinh" },
+      { code: "DC", label: "Địa chỉ" },
+      { code: "SDT", label: "Số điện thoại/Zalo" },
+      { code: "EMA", label: "Email" },
     ],
   },
   {
     title: "2. Thông tin nhu cầu",
     fields: [
-      ["NCT-KT", "Nhu cầu thiết kế kiến trúc (NCT-KT)"],
-      ["NCT-NT", "Nhu cầu thiết kế nội thất (NCT-NT)"],
-      ["NCC-KT", "Nhu cầu thi công kiến trúc (NCC-KT)"],
-      ["NCC-NT", "Nhu cầu thi công nội thất (NCC-NT)"],
-      ["PC-KT", "Phong cách kiến trúc (PC-KT)"],
-      ["PC-NT", "Phong cách nội thất (PC-NT)"],
+      { code: "NCT-KT", label: "Nhu cầu thiết kế kiến trúc" },
+      { code: "NCT-NT", label: "Nhu cầu thiết kế nội thất" },
+      { code: "NCC-KT", label: "Nhu cầu thi công kiến trúc" },
+      { code: "NCC-NT", label: "Nhu cầu thi công nội thất" },
+      { code: "PC-KT", label: "Phong cách kiến trúc" },
+      { code: "PC-NT", label: "Phong cách nội thất" },
+      { code: "QCTC", label: "Quy cách thi công", options: ["Cải tạo", "Xây mới"] },
     ],
   },
   {
     title: "3. Thông tin thửa đất",
     fields: [
-      ["QM", "Quy mô (QM)"],
-      ["VTR", "Vị trí công trình (VTR)"],
-      ["HNH", "Hướng nhà (HNH)"],
-      ["DTD", "Diện tích đất (DTD)"],
-      ["DTX", "Diện tích xây dựng (DTX)"],
-      ["VTMD", "Vị trí so với mặt đường (VTMD)"],
+      { code: "QM", label: "Quy mô", options: ["Nhà lô", "Biệt thự", "Shophouse", "Kinh doanh", "Chung cư", "Dinh thự", "Tòa nhà"] },
+      { code: "VTR", label: "Vị trí công trình" },
+      { code: "HNH", label: "Hướng nhà", options: ["Đông", "Tây", "Nam", "Bắc", "Đông Bắc", "Đông Nam", "Tây Bắc", "Tây Nam"] },
+      { code: "DTD", label: "Diện tích đất" },
+      { code: "DTX", label: "Diện tích xây dựng" },
+      { code: "VTMD", label: "Vị trí so với mặt đường" },
     ],
   },
-] as const;
+];
+
+const systemFields: DetailField[] = [
+  { code: "D", label: "Điện" },
+  { code: "N", label: "Nước" },
+  { code: "E", label: "Năng lượng" },
+  { code: "EL", label: "Thang máy" },
+  { code: "DR", label: "Cửa" },
+];
+
+const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "Sân trước", "Sân sau", "Giếng trời", "Phòng thay đồ", "WC", "Sân phơi", "Sân thượng", "Phòng thờ", "Thang bộ", "Thang máy", "Phòng sinh hoạt chung", "Phòng xem phim", "Phòng xông hơi", "Phòng làm việc", "Phòng học", "Khu vực kinh doanh", "Phòng kho", "Phòng ngủ master", "WC master", "Phòng giúp việc"];
+
+const createFunctionalRow = (floor = "Tầng 1"): FunctionalRow => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, room: "", quantity: "", description: "" });
 
 function getVietnamDate() {
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -191,6 +219,7 @@ export default function Home() {
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
+      functionalRows: [createFunctionalRow()],
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
       ...yearFolder,
@@ -263,6 +292,43 @@ export default function Home() {
       }),
     });
     persist(nextYears);
+  };
+
+  const functionalRows = selectedRecord?.functionalRows?.length ? selectedRecord.functionalRows : [createFunctionalRow()];
+
+  const updateFunctionalRows = (nextRows: FunctionalRow[]) => {
+    if (!selectedRecord) return;
+    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
+      ...yearFolder,
+      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
+        ...monthFolder,
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, functionalRows: nextRows } : record),
+      }),
+    });
+    persist(nextYears);
+  };
+
+  const updateFunctionalRow = (id: string, key: keyof Omit<FunctionalRow, "id">, value: string) => {
+    updateFunctionalRows(functionalRows.map((row) => row.id === id ? { ...row, [key]: value } : row));
+  };
+
+  const addFunctionalRow = () => {
+    updateFunctionalRows([...functionalRows, createFunctionalRow(functionalRows[functionalRows.length - 1]?.floor || "Tầng 1")]);
+  };
+
+  const removeFunctionalRow = (id: string) => {
+    if (functionalRows.length === 1) return;
+    updateFunctionalRows(functionalRows.filter((row) => row.id !== id));
+  };
+
+  const validateRoom = (id: string, value: string) => {
+    const input = value.trim();
+    if (!input) return;
+    if (input.startsWith("@")) {
+      return;
+    }
+    const match = roomOptions.find((room) => room.toLocaleLowerCase("vi").replaceAll(" ", "") === input.toLocaleLowerCase("vi").replaceAll(" ", ""));
+    updateFunctionalRow(id, "room", match ?? "");
   };
 
   return (
@@ -397,17 +463,51 @@ export default function Home() {
                 <tbody>
                   {detailSections.map((section) => (
                     <Fragment key={section.title}>
-                      <tr className="information-table__section" key={section.title}><th colSpan={2}>{section.title}</th></tr>
-                      {section.fields.map(([key, label]) => (
-                        <tr key={key}>
-                          <td>{label}</td>
-                          <td><input aria-label={label} value={selectedRecord.details?.[key] ?? ""} onChange={(event) => updateRecordDetail(key, event.target.value)} placeholder="Nhập kết quả thu thập" /></td>
+                      <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
+                      {section.fields.map((field) => (
+                        <tr key={field.code}>
+                          <td>{field.label} <span className="field-code">({field.code})</span></td>
+                          <td>{field.options ? (
+                            <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                              <option value="">Chọn giá trị</option>
+                              {field.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                            </select>
+                          ) : <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                         </tr>
                       ))}
                     </Fragment>
                   ))}
                 </tbody>
               </table>
+
+              <section className="dynamic-information">
+                <h3>4. Thông tin công năng</h3>
+                <p>Gõ tên phòng để tìm trong danh sách, hoặc bắt đầu bằng <b>@</b> để nhập phòng mới.</p>
+                <datalist id="room-options">{roomOptions.map((room) => <option key={room} value={room} />)}</datalist>
+                <table className="functional-table">
+                  <thead><tr><th>Tầng</th><th>Công năng</th><th>Số lượng</th><th>Mô tả chi tiết</th></tr></thead>
+                  <tbody>
+                    {functionalRows.map((row) => (
+                      <tr key={row.id}>
+                        <td><div className="floor-cell"><input value={row.floor} onChange={(event) => updateFunctionalRow(row.id, "floor", event.target.value)} /><span><button type="button" onClick={addFunctionalRow} aria-label="Thêm hàng">+</button><button type="button" onClick={() => removeFunctionalRow(row.id)} disabled={functionalRows.length === 1} aria-label="Xóa hàng">−</button></span></div></td>
+                        <td><input list="room-options" value={row.room} onChange={(event) => updateFunctionalRow(row.id, "room", event.target.value)} onBlur={(event) => validateRoom(row.id, event.target.value)} placeholder="Chọn hoặc @Phòng mới" /></td>
+                        <td><input inputMode="numeric" value={row.quantity} onChange={(event) => updateFunctionalRow(row.id, "quantity", event.target.value)} placeholder="0" /></td>
+                        <td><input value={row.description} onChange={(event) => updateFunctionalRow(row.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+
+              <section className="dynamic-information system-information">
+                <h3>5. Thông tin hệ thống</h3>
+                <table className="information-table">
+                  <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
+                  <tbody>{systemFields.map((field) => (
+                    <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>
+                  ))}</tbody>
+                </table>
+              </section>
             </div>
             <footer className="record-detail__footer"><span>Tự động lưu thay đổi</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
           </section>
