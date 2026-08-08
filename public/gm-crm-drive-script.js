@@ -77,7 +77,7 @@ function writeWorkbook_(spreadsheet, record) {
     const sheet = index === 0 ? spreadsheet.getSheets()[0] : spreadsheet.insertSheet();
     sheet.setName(name);
     sheet.clear();
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight("bold").setBackground("#eee9e2");
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontFamily("Roboto").setFontWeight("bold").setBackground("#eee9e2");
 
     if (name === "4. C\u00f4ng n\u0103ng") {
       const rows = [];
@@ -93,6 +93,7 @@ function writeWorkbook_(spreadsheet, record) {
       });
       sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
     }
+    sheet.getDataRange().setFontFamily("Roboto").setWrap(true);
     sheet.setFrozenRows(1);
     sheet.autoResizeColumns(1, headers.length);
   });
