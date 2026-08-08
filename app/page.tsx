@@ -1,12 +1,13 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
 
 type WorkRecord = {
   id: string;
   name: string;
   projectId: string;
   createdAt: string;
+  details: Record<string, string>;
 };
 
 type MonthFolder = {
@@ -52,6 +53,41 @@ const team = [
   ["CC", "Cara Cerr", "SEO Specialist", "sage"],
 ];
 
+const detailSections = [
+  {
+    title: "1. Thông tin chủ đầu tư",
+    fields: [
+      ["HVT", "Họ và tên (HVT)"],
+      ["NS", "Ngày tháng năm sinh (NS)"],
+      ["DC", "Địa chỉ (DC)"],
+      ["SDT", "Số điện thoại/Zalo (SDT)"],
+      ["EMA", "Email (EMA)"],
+    ],
+  },
+  {
+    title: "2. Thông tin nhu cầu",
+    fields: [
+      ["NCT-KT", "Nhu cầu thiết kế kiến trúc (NCT-KT)"],
+      ["NCT-NT", "Nhu cầu thiết kế nội thất (NCT-NT)"],
+      ["NCC-KT", "Nhu cầu thi công kiến trúc (NCC-KT)"],
+      ["NCC-NT", "Nhu cầu thi công nội thất (NCC-NT)"],
+      ["PC-KT", "Phong cách kiến trúc (PC-KT)"],
+      ["PC-NT", "Phong cách nội thất (PC-NT)"],
+    ],
+  },
+  {
+    title: "3. Thông tin thửa đất",
+    fields: [
+      ["QM", "Quy mô (QM)"],
+      ["VTR", "Vị trí công trình (VTR)"],
+      ["HNH", "Hướng nhà (HNH)"],
+      ["DTD", "Diện tích đất (DTD)"],
+      ["DTX", "Diện tích xây dựng (DTX)"],
+      ["VTMD", "Vị trí so với mặt đường (VTMD)"],
+    ],
+  },
+] as const;
+
 function getVietnamDate() {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -87,6 +123,12 @@ export default function Home() {
   const [modalYear, setModalYear] = useState(now.year);
   const [customerName, setCustomerName] = useState("");
   const [notice, setNotice] = useState("");
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+  const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
+  const [accessCode, setAccessCode] = useState("");
+  const [renameValue, setRenameValue] = useState("");
+  const [renameUnlocked, setRenameUnlocked] = useState(false);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -148,6 +190,7 @@ export default function Home() {
       name,
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
+      details: {},
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
       ...yearFolder,
@@ -167,6 +210,59 @@ export default function Home() {
     });
     persist(nextYears);
     setNotice("Đã xóa dữ liệu — danh sách được cập nhật ngay");
+  };
+
+  const selectedRecord = activeMonthFolder?.records.find((record) => record.id === selectedRecordId) ?? null;
+
+  const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
+    setOpenMenuId(null);
+    setProtectedAction({ type, record });
+    setAccessCode("");
+    setRenameValue(record.name);
+    setRenameUnlocked(false);
+  };
+
+  const confirmAccessCode = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!protectedAction) return;
+    if (accessCode !== "010101") {
+      setNotice("Khóa không đúng");
+      return;
+    }
+    if (protectedAction.type === "delete") {
+      deleteRecord(protectedAction.record.id);
+      setProtectedAction(null);
+      setNotice(`Đã xóa ${protectedAction.record.projectId}`);
+      return;
+    }
+    setRenameUnlocked(true);
+  };
+
+  const renameRecord = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!protectedAction || !renameValue.trim()) return;
+    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
+      ...yearFolder,
+      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
+        ...monthFolder,
+        records: monthFolder.records.map((record) => record.id === protectedAction.record.id ? { ...record, name: renameValue.trim() } : record),
+      }),
+    });
+    persist(nextYears);
+    setProtectedAction(null);
+    setNotice("Đã đổi tên hồ sơ");
+  };
+
+  const updateRecordDetail = (key: string, value: string) => {
+    if (!selectedRecord) return;
+    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
+      ...yearFolder,
+      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
+        ...monthFolder,
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, details: { ...(record.details ?? {}), [key]: value } } : record),
+      }),
+    });
+    persist(nextYears);
   };
 
   return (
@@ -226,10 +322,18 @@ export default function Home() {
               </header>
               <div className="record-grid">
                 {visibleRecords.length ? visibleRecords.map((record) => (
-                  <article className="project-folder" key={record.id}>
+                  <article className="project-folder" key={record.id} onClick={() => setSelectedRecordId(record.id)}>
                     <span className="project-folder__icon">▰</span>
                     <div><b>{record.projectId}</b><small>{record.name}</small><em>Khởi tạo {record.createdAt}</em></div>
-                    <button onClick={() => deleteRecord(record.id)} aria-label={`Xóa ${record.projectId}`}>×</button>
+                    <div className="project-actions">
+                      <button className="more-button" onClick={(event) => { event.stopPropagation(); setOpenMenuId(openMenuId === record.id ? null : record.id); }} aria-label={`Tùy chọn ${record.projectId}`}>…</button>
+                      {openMenuId === record.id && (
+                        <div className="project-menu" onClick={(event) => event.stopPropagation()}>
+                          <button onClick={() => startProtectedAction("rename", record)}>Rename</button>
+                          <button className="project-menu__delete" onClick={() => startProtectedAction("delete", record)}>Delete</button>
+                        </div>
+                      )}
+                    </div>
                   </article>
                 )) : <div className="empty-records"><span>▱</span><h2>Chưa có thư mục dự án</h2><p>Nhấn Add customer để tạo hồ sơ trong tháng đang chọn.</p><button onClick={openAddDialog}>Thêm hồ sơ đầu tiên</button></div>}
               </div>
@@ -255,6 +359,58 @@ export default function Home() {
             <p className="id-preview">ID dự kiến: <b>GM{String(getVietnamDate().day).padStart(2, "0")}{String(getVietnamDate().month).padStart(2, "0")}{getVietnamDate().year}{customerName ? nameInitials(customerName) : "..."}</b></p>
             <button className="add-button" type="submit">Tạo thư mục</button>
           </form>
+        </div>
+      )}
+
+      {protectedAction && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setProtectedAction(null)}>
+          {!renameUnlocked ? (
+            <form className="security-dialog" onSubmit={confirmAccessCode} onMouseDown={(event) => event.stopPropagation()}>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <p className="eyebrow">{protectedAction.type === "delete" ? "Delete" : "Rename"} · {protectedAction.record.projectId}</p>
+              <h2>Nhập khóa bảo vệ</h2>
+              <label>Khóa truy cập<input type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} autoFocus placeholder="••••••" /></label>
+              <button className="add-button" type="submit">Xác nhận</button>
+            </form>
+          ) : (
+            <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <p className="eyebrow">{protectedAction.record.projectId}</p>
+              <h2>Rename hồ sơ</h2>
+              <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
+              <button className="add-button" type="submit">Lưu tên mới</button>
+            </form>
+          )}
+        </div>
+      )}
+
+      {selectedRecord && (
+        <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
+          <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="record-detail__heading">
+              <div><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.projectId}</h2><span>{selectedRecord.name}</span></div>
+              <button className="dialog-close" onClick={() => setSelectedRecordId(null)} aria-label="Đóng">×</button>
+            </header>
+            <div className="detail-scroll">
+              <table className="information-table">
+                <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
+                <tbody>
+                  {detailSections.map((section) => (
+                    <Fragment key={section.title}>
+                      <tr className="information-table__section" key={section.title}><th colSpan={2}>{section.title}</th></tr>
+                      {section.fields.map(([key, label]) => (
+                        <tr key={key}>
+                          <td>{label}</td>
+                          <td><input aria-label={label} value={selectedRecord.details?.[key] ?? ""} onChange={(event) => updateRecordDetail(key, event.target.value)} placeholder="Nhập kết quả thu thập" /></td>
+                        </tr>
+                      ))}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <footer className="record-detail__footer"><span>Tự động lưu thay đổi</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
+          </section>
         </div>
       )}
     </main>
