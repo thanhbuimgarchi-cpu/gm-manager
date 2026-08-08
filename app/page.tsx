@@ -8,16 +8,24 @@ type WorkRecord = {
   projectId: string;
   createdAt: string;
   details: Record<string, string>;
-  functionalRows: FunctionalRow[];
+  functionalFloors?: FunctionalFloor[];
+  functionalRows?: LegacyFunctionalRow[];
 };
 
-type FunctionalRow = {
+type FunctionalRoom = {
   id: string;
-  floor: string;
   room: string;
   quantity: string;
   description: string;
 };
+
+type FunctionalFloor = {
+  id: string;
+  floor: string;
+  rooms: FunctionalRoom[];
+};
+
+type LegacyFunctionalRow = FunctionalRoom & { floor: string };
 
 type MonthFolder = {
   label: string;
@@ -114,7 +122,31 @@ const systemFields: DetailField[] = [
 
 const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "Sân trước", "Sân sau", "Giếng trời", "Phòng thay đồ", "WC", "Sân phơi", "Sân thượng", "Phòng thờ", "Thang bộ", "Thang máy", "Phòng sinh hoạt chung", "Phòng xem phim", "Phòng xông hơi", "Phòng làm việc", "Phòng học", "Khu vực kinh doanh", "Phòng kho", "Phòng ngủ master", "WC master", "Phòng giúp việc"];
 
-const createFunctionalRow = (floor = "Tầng 1"): FunctionalRow => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, room: "", quantity: "", description: "" });
+const createFunctionalRoom = (): FunctionalRoom => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, room: "", quantity: "", description: "" });
+const createFunctionalFloor = (floor = "Tầng 1"): FunctionalFloor => ({ id: `floor-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, rooms: [createFunctionalRoom()] });
+const isBlankRoom = (room: FunctionalRoom) => !room.room.trim() && !room.quantity.trim() && !room.description.trim();
+const withReadyRoom = (rooms: FunctionalRoom[]) => {
+  const emptyRoom = rooms.find(isBlankRoom);
+  return [...rooms.filter((room) => !isBlankRoom(room)), emptyRoom ?? createFunctionalRoom()];
+};
+
+const normalizeFunctionalFloors = (record: WorkRecord): FunctionalFloor[] => {
+  if (record.functionalFloors?.length) {
+    return record.functionalFloors.map((floor) => ({ ...floor, rooms: withReadyRoom(floor.rooms ?? []) }));
+  }
+
+  const legacyRows = record.functionalRows ?? [];
+  if (!legacyRows.length) return [createFunctionalFloor()];
+  const floors = legacyRows.reduce<FunctionalFloor[]>((groups, row) => {
+    const floorName = row.floor?.trim() || "Tầng 1";
+    const group = groups.find((item) => item.floor === floorName);
+    const room = { id: row.id, room: row.room ?? "", quantity: row.quantity ?? "", description: row.description ?? "" };
+    if (group) group.rooms.push(room);
+    else groups.push({ id: `floor-${row.id}`, floor: floorName, rooms: [room] });
+    return groups;
+  }, []);
+  return floors.map((floor) => ({ ...floor, rooms: withReadyRoom(floor.rooms) }));
+};
 
 const normalizeSearchText = (value: string) => value
   .toLocaleLowerCase("vi")
@@ -244,7 +276,7 @@ export default function Home() {
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
-      functionalRows: [createFunctionalRow()],
+      functionalFloors: [createFunctionalFloor()],
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
       ...yearFolder,
@@ -319,41 +351,48 @@ export default function Home() {
     persist(nextYears);
   };
 
-  const functionalRows = selectedRecord?.functionalRows?.length ? selectedRecord.functionalRows : [createFunctionalRow()];
+  const functionalFloors = selectedRecord ? normalizeFunctionalFloors(selectedRecord) : [createFunctionalFloor()];
 
-  const updateFunctionalRows = (nextRows: FunctionalRow[]) => {
+  const updateFunctionalFloors = (nextFloors: FunctionalFloor[]) => {
     if (!selectedRecord) return;
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
         ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, functionalRows: nextRows } : record),
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? { ...record, functionalFloors: nextFloors, functionalRows: undefined } : record),
       }),
     });
     persist(nextYears);
   };
 
-  const updateFunctionalRow = (id: string, key: keyof Omit<FunctionalRow, "id">, value: string) => {
-    updateFunctionalRows(functionalRows.map((row) => row.id === id ? { ...row, [key]: value } : row));
+  const updateFunctionalFloor = (floorId: string, value: string) => {
+    updateFunctionalFloors(functionalFloors.map((floor) => floor.id === floorId ? { ...floor, floor: value } : floor));
   };
 
-  const addFunctionalRow = () => {
-    updateFunctionalRows([...functionalRows, createFunctionalRow(functionalRows[functionalRows.length - 1]?.floor || "Tầng 1")]);
+  const updateFunctionalRoom = (floorId: string, roomId: string, key: keyof Omit<FunctionalRoom, "id">, value: string) => {
+    updateFunctionalFloors(functionalFloors.map((floor) => floor.id !== floorId ? floor : {
+      ...floor,
+      rooms: withReadyRoom(floor.rooms.map((room) => room.id === roomId ? { ...room, [key]: value } : room)),
+    }));
   };
 
-  const removeFunctionalRow = (id: string) => {
-    if (functionalRows.length === 1) return;
-    updateFunctionalRows(functionalRows.filter((row) => row.id !== id));
+  const addFunctionalFloor = () => {
+    updateFunctionalFloors([...functionalFloors, createFunctionalFloor(`Tầng ${functionalFloors.length + 1}`)]);
   };
 
-  const validateRoom = (id: string, value: string) => {
+  const removeFunctionalFloor = (floorId: string) => {
+    if (functionalFloors.length === 1) return;
+    updateFunctionalFloors(functionalFloors.filter((floor) => floor.id !== floorId));
+  };
+
+  const validateRoom = (floorId: string, roomId: string, value: string) => {
     const input = value.trim();
     if (!input) return;
     if (input.startsWith("@")) {
       return;
     }
     const match = roomOptions.find((room) => room.toLocaleLowerCase("vi").replaceAll(" ", "") === input.toLocaleLowerCase("vi").replaceAll(" ", ""));
-    updateFunctionalRow(id, "room", match ?? "");
+    updateFunctionalRoom(floorId, roomId, "room", match ?? "");
   };
 
   return (
@@ -511,35 +550,42 @@ export default function Home() {
                 <table className="functional-table">
                   <thead><tr><th>Tầng</th><th>Công năng</th><th>Số lượng</th><th>Mô tả chi tiết</th></tr></thead>
                   <tbody>
-                    {functionalRows.map((row) => (
-                      <tr key={row.id}>
-                        <td><div className="floor-cell"><input value={row.floor} onChange={(event) => updateFunctionalRow(row.id, "floor", event.target.value)} /><span><button type="button" onClick={addFunctionalRow} aria-label="Thêm hàng">+</button><button type="button" onClick={() => removeFunctionalRow(row.id)} disabled={functionalRows.length === 1} aria-label="Xóa hàng">−</button></span></div></td>
+                    {functionalFloors.flatMap((floor) => floor.rooms.map((room, roomIndex) => (
+                      <tr key={room.id}>
+                        {roomIndex === 0 && (
+                          <td rowSpan={floor.rooms.length} className="functional-floor">
+                            <div className="floor-cell">
+                              <input value={floor.floor} onChange={(event) => updateFunctionalFloor(floor.id, event.target.value)} aria-label="Tên tầng" />
+                              <span><button type="button" onClick={addFunctionalFloor} aria-label="Thêm tầng">+</button><button type="button" onClick={() => removeFunctionalFloor(floor.id)} disabled={functionalFloors.length === 1} aria-label="Xóa tầng">−</button></span>
+                            </div>
+                          </td>
+                        )}
                         <td>
                           <div className="room-autocomplete">
                             <input
-                              value={row.room}
-                              onChange={(event) => { updateFunctionalRow(row.id, "room", event.target.value); setRoomSuggestionFor(row.id); }}
-                              onBlur={(event) => { window.setTimeout(() => setRoomSuggestionFor(null), 120); validateRoom(row.id, event.target.value); }}
+                              value={room.room}
+                              onChange={(event) => { updateFunctionalRoom(floor.id, room.id, "room", event.target.value); setRoomSuggestionFor(room.id); }}
+                              onBlur={(event) => { window.setTimeout(() => setRoomSuggestionFor(null), 120); validateRoom(floor.id, room.id, event.target.value); }}
                               onKeyDown={(event) => { if (event.key === "Escape") setRoomSuggestionFor(null); }}
                               placeholder="Gõ để tìm hoặc @Phòng mới"
                               aria-autocomplete="list"
-                              aria-expanded={roomSuggestionFor === row.id && getRoomSuggestions(row.room).length > 0}
+                              aria-expanded={roomSuggestionFor === room.id && getRoomSuggestions(room.room).length > 0}
                             />
-                            {roomSuggestionFor === row.id && getRoomSuggestions(row.room).length > 0 && (
+                            {roomSuggestionFor === room.id && getRoomSuggestions(room.room).length > 0 && (
                               <div className="room-suggestions" role="listbox" aria-label="Gợi ý công năng">
-                                {getRoomSuggestions(row.room).map((room) => (
-                                  <button key={room} type="button" role="option" onMouseDown={(event) => event.preventDefault()} onClick={() => { updateFunctionalRow(row.id, "room", room); setRoomSuggestionFor(null); }}>
-                                    {room}
+                                {getRoomSuggestions(room.room).map((suggestion) => (
+                                  <button key={suggestion} type="button" role="option" onMouseDown={(event) => event.preventDefault()} onClick={() => { updateFunctionalRoom(floor.id, room.id, "room", suggestion); setRoomSuggestionFor(null); }}>
+                                    {suggestion}
                                   </button>
                                 ))}
                               </div>
                             )}
                           </div>
                         </td>
-                        <td><input inputMode="numeric" value={row.quantity} onChange={(event) => updateFunctionalRow(row.id, "quantity", event.target.value)} placeholder="0" /></td>
-                        <td><input value={row.description} onChange={(event) => updateFunctionalRow(row.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
+                        <td><input inputMode="numeric" value={room.quantity} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "quantity", event.target.value)} placeholder="0" /></td>
+                        <td><input value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
                       </tr>
-                    ))}
+                    )))}
                   </tbody>
                 </table>
               </section>
