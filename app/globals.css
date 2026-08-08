@@ -4,11 +4,11 @@
 :root { --ink:#151515; --muted:#777671; --cream:#f7f7f1; --paper:#fff; --soft:#f1f1ef; --line:#e7e7e2; }
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }
-body { margin: 0; background: #20201f; color: var(--ink); font-family: "Roboto", Arial, sans-serif; font-size: 13px; }
+body { margin: 0; background: var(--cream); color: var(--ink); font-family: "Roboto", Arial, sans-serif; font-size: 13px; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 
-.crm-shell { width: min(1280px, calc(100vw - 36px)); min-height: min(800px, calc(100vh - 36px)); margin: 18px auto; display: grid; grid-template-columns: 218px minmax(0, 1fr); overflow: hidden; border-radius: 18px; background: var(--cream); box-shadow: 0 24px 64px rgba(0,0,0,.28); }
+.crm-shell { width: 100%; min-height: 100vh; margin: 0; display: grid; grid-template-columns: 218px minmax(0, 1fr); overflow: hidden; background: var(--cream); }
 .sidebar { display: flex; flex-direction: column; padding: 29px 18px 17px; background: var(--paper); }
 .brand { margin: 0 0 35px 7px; font-size: 17px; font-weight: 700; letter-spacing: -.7px; }
 .brand span { margin-left: 1px; color: #8f725b; }

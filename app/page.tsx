@@ -57,11 +57,13 @@ const pipeline: PipelineColumn[] = [
 ];
 
 const menuItems: Array<[icon: string, label: string, count?: string, active?: boolean]> = [
-  ["⌂", "Dashboard"],
-  ["▣", "Tasks", "2"],
-  ["⌁", "Activity"],
-  ["♧", "Customers", "", true],
-  ["⚙", "Settings"],
+  ["⌂", "Tư vấn"],
+  ["▣", "Thiết kế"],
+  ["⌁", "Dự toán"],
+  ["♧", "Thi công", "", true],
+  ["✓", "Nghiệm thu"],
+  ["⚙", "Bảo hành"],
+  ["♙", "Nhân lực"],
 ];
 
 const projectItems = [
