@@ -682,7 +682,7 @@ export default function Home() {
                           </div>
                         </td>
                         <td><input inputMode="numeric" value={room.quantity} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "quantity", event.target.value)} placeholder="0" /></td>
-                        <td><input value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
+                        <td><textarea value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" rows={2} /></td>
                       </tr>
                     )))}
                   </tbody>
