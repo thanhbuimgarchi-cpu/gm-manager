@@ -100,6 +100,7 @@ type DriveSyncConfig = {
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
 const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
 const MAX_AUDIO_CHUNK_BYTES = 3 * 1024 * 1024;
+const MAX_DIRECT_AUDIO_BYTES = 18 * 1024 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
@@ -233,7 +234,9 @@ function chunkFileName(fileName: string, index: number) {
 }
 
 async function splitAudioForProcessing(file: File): Promise<AudioChunk[]> {
-  if (file.size <= MAX_AUDIO_CHUNK_BYTES) return [{ file, offsetSeconds: 0 }];
+  // Smaller files go through intact, retaining their original MP3/M4A quality.
+  // The route disables fetch caching, so a normal file can safely exceed 1 MB.
+  if (file.size <= MAX_DIRECT_AUDIO_BYTES) return [{ file, offsetSeconds: 0 }];
 
   const browserWindow = window as Window & { webkitAudioContext?: typeof AudioContext };
   const AudioContextConstructor = window.AudioContext ?? browserWindow.webkitAudioContext;
