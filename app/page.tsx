@@ -403,12 +403,19 @@ export default function Home() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file || !selectedRecord) return;
-    if (!file.type.startsWith("audio/")) {
-      setNotice("Hãy chọn đúng file ghi âm.");
+    const supportedAudio = file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name);
+    if (!supportedAudio) {
+      setNotice("Chỉ hỗ trợ file MP3, WAV, M4A, AAC, OGG hoặc FLAC.");
       return;
     }
     if (file.size > 18 * 1024 * 1024) {
       setNotice("File ghi âm tối đa 18 MB. Hãy chia file ngắn hơn rồi nhập lại.");
+      return;
+    }
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) {
+      setDriveConfigOpen(true);
+      setNotice("Hãy kết nối Google Apps Script trước khi nhập ghi âm.");
       return;
     }
 
@@ -417,6 +424,8 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("audio", file);
+      formData.append("scriptUrl", config.scriptUrl);
+      formData.append("token", config.token);
       const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
       const result = await response.json() as { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
       if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
