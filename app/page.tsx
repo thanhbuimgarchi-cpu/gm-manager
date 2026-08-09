@@ -359,6 +359,29 @@ function saveWorkspace(years: YearFolder[]) {
   window.localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
 }
 
+function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
+  const localByProjectId = new Map(localYears.flatMap((year) => year.months.flatMap((month) => month.records)).map((record) => [record.projectId, record]));
+  return driveYears.map((year) => ({
+    ...year,
+    months: monthLabels.map((label, index) => {
+      const driveMonth = year.months?.find((month) => month.label === label) ?? year.months?.[index] ?? { label, records: [] };
+      return {
+        label,
+        records: (driveMonth.records ?? []).map((record) => {
+          const localRecord = localByProjectId.get(record.projectId);
+          return {
+            ...record,
+            id: record.id || `drive-${record.projectId}`,
+            name: record.name || localRecord?.name || record.details?.HVT || record.projectId,
+            houseId: record.houseId || localRecord?.houseId || "",
+            details: record.details ?? {},
+          };
+        }),
+      };
+    }),
+  }));
+}
+
 export default function Home() {
   const now = getVietnamDate();
   const [activeFolder, setActiveFolder] = useState("Tư vấn");
@@ -383,6 +406,7 @@ export default function Home() {
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
   const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
+  const [isLoadingDrive, setIsLoadingDrive] = useState(false);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const driveSyncTimer = useRef<number | null>(null);
@@ -436,6 +460,44 @@ export default function Home() {
     saveWorkspace(nextYears);
   };
 
+  const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false) => {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) return;
+    setIsLoadingDrive(true);
+    try {
+      const response = await fetch("/api/drive-load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string; years?: YearFolder[] };
+      if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
+      const driveYears = preserveDriveRecordMetadata(result.years, years);
+      if (driveYears.length) {
+        persist(driveYears);
+        if (!quietly) setNotice("Đã nạp lại hồ sơ từ Excel trên Drive.");
+      }
+    } catch (error) {
+      if (!quietly) setNotice(error instanceof Error ? error.message : "Không thể nạp dữ liệu Excel từ Drive.");
+    } finally {
+      setIsLoadingDrive(false);
+    }
+  };
+
+  useEffect(() => {
+    let config = defaultDriveSyncConfig;
+    const savedDriveConfig = window.localStorage.getItem(driveSyncConfigKey);
+    if (savedDriveConfig) {
+      try {
+        const saved = JSON.parse(savedDriveConfig) as DriveSyncConfig;
+        config = { scriptUrl: saved.scriptUrl || defaultDriveSyncConfig.scriptUrl, token: saved.token || defaultDriveSyncConfig.token };
+      } catch {
+        // The default preconfigured connection is used when the saved value is invalid.
+      }
+    }
+    void loadWorkspaceFromDrive(config, true);
+  }, []);
+
   const openAddDialog = () => {
     const currentDate = getVietnamDate();
     setModalMonth(currentDate.month);
@@ -472,7 +534,7 @@ export default function Home() {
       months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
     });
     persist(nextYears);
-    queueDriveSync(record, modalYear, modalMonth);
+    void syncRecordToDrive(record, modalYear, modalMonth);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
     setAddOpen(false);
@@ -752,7 +814,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customer..." aria-label="Search customer" /></label>
-          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
+          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (

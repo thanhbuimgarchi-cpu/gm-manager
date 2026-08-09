@@ -17,6 +17,7 @@ function doPost(event) {
     const payload = JSON.parse(event.postData.contents || "{}");
     if (payload.token !== WEB_SYNC_TOKEN) throw new Error("M\u00e3 \u0111\u1ed3ng b\u1ed9 kh\u00f4ng \u0111\u00fang.");
     if (payload.action === "audio-insight") return json_(processAudioInsight_(payload));
+    if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_());
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
@@ -121,6 +122,176 @@ function splitTranscript_(text) {
   return chunks;
 }
 
+function loadConsultingWorkspace_() {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const consulting = findFolder_(root, "T\u01b0 v\u1ea5n");
+  if (!consulting) return { ok: true, years: [] };
+
+  const years = [];
+  const yearFolders = consulting.getFolders();
+  while (yearFolders.hasNext()) {
+    const yearFolder = yearFolders.next();
+    const yearName = yearFolder.getName();
+    if (yearName.indexOf("-") === 0 || !/^\d{4}$/.test(yearName)) continue;
+    const months = Array.from({ length: 12 }, function(_, index) { return { label: "T" + (index + 1), records: [] }; });
+    const monthFolders = yearFolder.getFolders();
+    while (monthFolders.hasNext()) {
+      const monthFolder = monthFolders.next();
+      const match = /^T(1[0-2]|[1-9])$/.exec(monthFolder.getName());
+      if (monthFolder.getName().indexOf("-") === 0 || !match) continue;
+      const customerFolders = monthFolder.getFolders();
+      while (customerFolders.hasNext()) {
+        const customerFolder = customerFolders.next();
+        const projectId = customerFolder.getName();
+        if (projectId.indexOf("-") === 0) continue;
+        const workbook = latestWorkbook_(customerFolder);
+        if (!workbook) continue;
+        months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId));
+      }
+    }
+    years.push({ year: Number(yearName), months: months });
+  }
+  years.sort(function(a, b) { return a.year - b.year; });
+  return { ok: true, years: years };
+}
+
+function latestWorkbook_(folder) {
+  const files = folder.getFiles();
+  let latest = null;
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!/\.xlsx$/i.test(file.getName())) continue;
+    if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
+  }
+  return latest;
+}
+
+function recordFromWorkbook_(file, projectId) {
+  const sheets = readXlsxSheets_(file);
+  const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
+  const details = {};
+  ["1. Ch\u1ee7 \u0111\u1ea7u t\u01b0", "2. Nhu c\u1ea7u", "3. Th\u1eeda \u0111\u1ea5t", "5. H\u1ec7 th\u1ed1ng"].forEach(function(name) {
+    (sheets[name] || []).slice(1).forEach(function(row) {
+      const code = String(row[0] || "").trim();
+      if (code) details[code] = String(row[2] || "");
+    });
+  });
+
+  const floorsByName = {};
+  (sheets["4. C\u00f4ng n\u0103ng"] || []).slice(1).forEach(function(row, index) {
+    const floor = String(row[0] || "T\u1ea7ng 1");
+    const room = { id: "drive-room-" + projectId + "-" + index, room: String(row[1] || ""), quantity: String(row[2] || ""), description: String(row[3] || "") };
+    if (!room.room && !room.quantity && !room.description) return;
+    if (!floorsByName[floor]) floorsByName[floor] = { id: "drive-floor-" + projectId + "-" + Object.keys(floorsByName).length, floor: floor, rooms: [] };
+    floorsByName[floor].rooms.push(room);
+  });
+
+  const segments = [];
+  const keyPoints = [];
+  (sheets["6. Th\u00f4ng tin ghi \u00e2m"] || []).slice(1).forEach(function(row) {
+    const time = String(row[0] || "");
+    const text = String(row[1] || "");
+    const point = String(row[2] || "");
+    if (text) segments.push({ time: time || "~", text: text });
+    if (point) keyPoints.push(point);
+  });
+
+  const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
+  const createdAt = metadata.createdAt || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
+  const record = {
+    id: "drive-" + projectId,
+    name: metadata.name || details.HVT || projectId,
+    houseId: metadata.houseId || "",
+    projectId: metadata.projectId || projectId,
+    createdAt: createdAt,
+    details: details,
+    functionalFloors: Object.keys(floorsByName).map(function(name) { return floorsByName[name]; }),
+  };
+  if (segments.length || keyPoints.length) {
+    record.audioNote = {
+      fileName: "Ghi \u00e2m trong " + file.getName(),
+      language: metadata.audioLanguage || "Ti\u1ebfng Vi\u1ec7t",
+      updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+      segments: segments,
+      keyPoints: keyPoints,
+    };
+  }
+  return record;
+}
+
+function readXlsxSheets_(file) {
+  const entries = {};
+  Utilities.unzip(file.getBlob()).forEach(function(blob) { entries[blob.getName()] = blob.getDataAsString("UTF-8"); });
+  const sharedStrings = readSharedStrings_(entries["xl/sharedStrings.xml"]);
+  const workbook = XmlService.parse(entries["xl/workbook.xml"]).getRootElement();
+  const workbookNs = workbook.getNamespace();
+  const relationshipNs = XmlService.getNamespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
+  const relationshipRoot = XmlService.parse(entries["xl/_rels/workbook.xml.rels"]).getRootElement();
+  const relationshipMap = {};
+  relationshipRoot.getChildren("Relationship", relationshipRoot.getNamespace()).forEach(function(relationship) {
+    relationshipMap[relationship.getAttribute("Id").getValue()] = relationship.getAttribute("Target").getValue();
+  });
+  const sheets = {};
+  const sheetsElement = workbook.getChild("sheets", workbookNs);
+  (sheetsElement ? sheetsElement.getChildren("sheet", workbookNs) : []).forEach(function(sheet) {
+    const relationship = sheet.getAttribute("id", relationshipNs);
+    const target = relationship && relationshipMap[relationship.getValue()];
+    if (!target) return;
+    const path = "xl/" + target.replace(/^\.\//, "");
+    sheets[sheet.getAttribute("name").getValue()] = readWorksheetRows_(entries[path], sharedStrings);
+  });
+  return sheets;
+}
+
+function readSharedStrings_(xml) {
+  if (!xml) return [];
+  const root = XmlService.parse(xml).getRootElement();
+  const ns = root.getNamespace();
+  return root.getChildren("si", ns).map(function(item) { return richText_(item, ns); });
+}
+
+function richText_(element, ns) {
+  let text = element.getChildText("t", ns) || "";
+  element.getChildren("r", ns).forEach(function(run) { text += run.getChildText("t", ns) || ""; });
+  return text;
+}
+
+function readWorksheetRows_(xml, sharedStrings) {
+  if (!xml) return [];
+  const root = XmlService.parse(xml).getRootElement();
+  const ns = root.getNamespace();
+  const data = root.getChild("sheetData", ns);
+  if (!data) return [];
+  return data.getChildren("row", ns).map(function(row) {
+    const values = [];
+    row.getChildren("c", ns).forEach(function(cell) {
+      const reference = cell.getAttribute("r") ? cell.getAttribute("r").getValue() : "A1";
+      const column = columnIndex_(reference);
+      const type = cell.getAttribute("t") ? cell.getAttribute("t").getValue() : "";
+      const value = cell.getChildText("v", ns) || "";
+      if (type === "s") values[column] = sharedStrings[Number(value)] || "";
+      else if (type === "inlineStr") values[column] = richText_(cell.getChild("is", ns), ns);
+      else values[column] = value;
+    });
+    return values;
+  });
+}
+
+function columnIndex_(reference) {
+  const letters = (reference.match(/[A-Z]+/) || ["A"])[0];
+  let value = 0;
+  for (let index = 0; index < letters.length; index += 1) value = value * 26 + letters.charCodeAt(index) - 64;
+  return value - 1;
+}
+
+function keyValueRows_(rows) {
+  const values = {};
+  rows.slice(1).forEach(function(row) {
+    if (row[0]) values[String(row[0])] = String(row[1] || "");
+  });
+  return values;
+}
+
 function exportCustomerWorkbook_(record, year, month) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const consulting = getOrCreateFolder_(root, "T\u01b0 v\u1ea5n");
@@ -148,6 +319,7 @@ function exportCustomerWorkbook_(record, year, month) {
 
 function writeWorkbook_(spreadsheet, record) {
   const sheetDefinitions = [
+    ["0. GM-CRM", ["Kh\u00f3a", "Gi\u00e1 tr\u1ecb"], null],
     ["1. Ch\u1ee7 \u0111\u1ea7u t\u01b0", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["HVT", "H\u1ecd v\u00e0 t\u00ean"], ["NS", "Ng\u00e0y th\u00e1ng n\u0103m sinh"], ["DC", "\u0110\u1ecba ch\u1ec9"], ["SDT", "S\u1ed1 \u0111i\u1ec7n tho\u1ea1i/Zalo"], ["EMA", "Email"],
     ]],
@@ -173,7 +345,11 @@ function writeWorkbook_(spreadsheet, record) {
     sheet.clear();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontFamily("Roboto").setFontWeight("bold").setBackground("#eee9e2");
 
-    if (name === "4. C\u00f4ng n\u0103ng") {
+    if (name === "0. GM-CRM") {
+      sheet.getRange(2, 1, 5, 2).setValues([
+        ["projectId", record.projectId || ""], ["name", record.name || ""], ["houseId", record.houseId || ""], ["createdAt", record.createdAt || ""], ["audioLanguage", (record.audioNote && record.audioNote.language) || ""],
+      ]);
+    } else if (name === "4. C\u00f4ng n\u0103ng") {
       const rows = [];
       (record.functionalFloors || []).forEach(function(floor) {
         (floor.rooms || []).forEach(function(room) {
@@ -202,6 +378,7 @@ function writeWorkbook_(spreadsheet, record) {
     sheet.setFrozenRows(1);
     sheet.autoResizeColumns(1, headers.length);
   });
+  spreadsheet.getSheetByName("0. GM-CRM").hideSheet();
 }
 
 function exportXlsx_(spreadsheetId) {
@@ -213,6 +390,11 @@ function exportXlsx_(spreadsheetId) {
 function getOrCreateFolder_(parent, name) {
   const matches = parent.getFoldersByName(name);
   return matches.hasNext() ? matches.next() : parent.createFolder(name);
+}
+
+function findFolder_(parent, name) {
+  const matches = parent.getFoldersByName(name);
+  return matches.hasNext() ? matches.next() : null;
 }
 
 function trashFilesByName_(folder, name) {
