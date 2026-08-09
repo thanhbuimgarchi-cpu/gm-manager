@@ -43,6 +43,7 @@ export async function POST(request: Request) {
 
     const scriptResponse = await fetch(scriptUrl, {
       method: "POST",
+      cache: "no-store",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({
         action: "audio-insight",

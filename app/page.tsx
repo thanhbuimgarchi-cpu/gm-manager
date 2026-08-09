@@ -16,6 +16,17 @@ type AudioNote = {
   keyPoints: string[];
 };
 
+type AudioInsightResult = {
+  language?: string;
+  segments: AudioSegment[];
+  keyPoints: string[];
+};
+
+type AudioChunk = {
+  file: File;
+  offsetSeconds: number;
+};
+
 type GrowingTextareaProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & {
   value: string;
   onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
@@ -87,7 +98,9 @@ type DriveSyncConfig = {
 };
 
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
-const MAX_AUDIO_UPLOAD_BYTES = 12 * 1024 * 1024;
+const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
+const MAX_AUDIO_CHUNK_BYTES = 3 * 1024 * 1024;
+const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
 const defaultDriveSyncConfig: DriveSyncConfig = {
@@ -179,6 +192,105 @@ const withReadyRoom = (rooms: FunctionalRoom[]) => {
   return [...rooms.filter((room) => !isBlankRoom(room)), emptyRoom ?? createFunctionalRoom()];
 };
 
+function writeWavLabel(view: DataView, offset: number, value: string) {
+  for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
+}
+
+function createWavChunk(source: AudioBuffer, startSeconds: number, endSeconds: number) {
+  const startFrame = Math.floor(startSeconds * source.sampleRate);
+  const endFrame = Math.min(source.length, Math.ceil(endSeconds * source.sampleRate));
+  const outputFrames = Math.max(1, Math.ceil((endFrame - startFrame) * AUDIO_OUTPUT_SAMPLE_RATE / source.sampleRate));
+  const output = new ArrayBuffer(44 + outputFrames * 2);
+  const view = new DataView(output);
+  const channels = Array.from({ length: source.numberOfChannels }, (_, index) => source.getChannelData(index));
+
+  writeWavLabel(view, 0, "RIFF");
+  view.setUint32(4, 36 + outputFrames * 2, true);
+  writeWavLabel(view, 8, "WAVE");
+  writeWavLabel(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, AUDIO_OUTPUT_SAMPLE_RATE, true);
+  view.setUint32(28, AUDIO_OUTPUT_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeWavLabel(view, 36, "data");
+  view.setUint32(40, outputFrames * 2, true);
+
+  for (let outputFrame = 0; outputFrame < outputFrames; outputFrame += 1) {
+    const sourceFrame = Math.min(endFrame - 1, startFrame + Math.floor(outputFrame * source.sampleRate / AUDIO_OUTPUT_SAMPLE_RATE));
+    const sample = channels.reduce((total, channel) => total + channel[sourceFrame], 0) / channels.length;
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(44 + outputFrame * 2, Math.round(clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff), true);
+  }
+  return new Blob([output], { type: "audio/wav" });
+}
+
+function chunkFileName(fileName: string, index: number) {
+  const stem = fileName.replace(/\.[^.]+$/, "") || "ghi-am";
+  return `${stem}-phan-${String(index + 1).padStart(2, "0")}.wav`;
+}
+
+async function splitAudioForProcessing(file: File): Promise<AudioChunk[]> {
+  if (file.size <= MAX_AUDIO_CHUNK_BYTES) return [{ file, offsetSeconds: 0 }];
+
+  const browserWindow = window as Window & { webkitAudioContext?: typeof AudioContext };
+  const AudioContextConstructor = window.AudioContext ?? browserWindow.webkitAudioContext;
+  if (!AudioContextConstructor) throw new Error("Trình duyệt này không thể tự tách file ghi âm. Hãy dùng Chrome hoặc Edge.");
+
+  const context = new AudioContextConstructor();
+  try {
+    const buffer = await context.decodeAudioData(await file.arrayBuffer());
+    const chunks: AudioChunk[] = [];
+    for (let startSeconds = 0; startSeconds < buffer.duration; startSeconds += MAX_AUDIO_CHUNK_SECONDS) {
+      const endSeconds = Math.min(buffer.duration, startSeconds + MAX_AUDIO_CHUNK_SECONDS);
+      const wav = createWavChunk(buffer, startSeconds, endSeconds);
+      chunks.push({
+        file: new File([wav], chunkFileName(file.name, chunks.length), { type: "audio/wav" }),
+        offsetSeconds: startSeconds,
+      });
+    }
+    return chunks;
+  } catch {
+    throw new Error("Không thể tách file này. Hãy dùng MP3, WAV, M4A, AAC, OGG hoặc FLAC được phát được trên trình duyệt.");
+  } finally {
+    void context.close();
+  }
+}
+
+function parseAudioTime(value: string) {
+  const parts = value.trim().split(":").map(Number);
+  if (!parts.length || parts.some((part) => !Number.isFinite(part))) return 0;
+  return parts.reduce((seconds, part) => seconds * 60 + part, 0);
+}
+
+function formatAudioTime(totalSeconds: number) {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function combineKeyPoints(results: AudioInsightResult[]) {
+  const lists = results.map((result) => result.keyPoints);
+  const seen = new Set<string>();
+  const combined: string[] = [];
+  for (let pointIndex = 0; combined.length < 12; pointIndex += 1) {
+    let added = false;
+    lists.forEach((points) => {
+      const point = points[pointIndex]?.trim();
+      const key = point?.toLocaleLowerCase("vi").replaceAll(/\s+/g, " ");
+      if (point && key && !seen.has(key) && combined.length < 12) {
+        seen.add(key);
+        combined.push(point);
+        added = true;
+      }
+    });
+    if (!added) break;
+  }
+  return combined;
+}
+
 const normalizeFunctionalFloors = (record: WorkRecord): FunctionalFloor[] => {
   if (record.functionalFloors?.length) {
     return record.functionalFloors.map((floor) => ({ ...floor, rooms: withReadyRoom(floor.rooms ?? []) }));
@@ -269,6 +381,7 @@ export default function Home() {
   const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
+  const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const driveSyncTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -438,10 +551,6 @@ export default function Home() {
       setNotice("Chỉ hỗ trợ file MP3, WAV, M4A, AAC, OGG hoặc FLAC.");
       return;
     }
-    if (file.size > MAX_AUDIO_UPLOAD_BYTES) {
-      setNotice("File ghi âm lớn hơn 12 MB. Hãy chia bản ghi thành các phần ngắn hơn rồi nhập lại.");
-      return;
-    }
     const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     if (!config.scriptUrl || !config.token) {
       setDriveConfigOpen(true);
@@ -451,30 +560,44 @@ export default function Home() {
 
     const recordId = selectedRecord.id;
     setAudioProcessingId(recordId);
+    setAudioProcessingStatus("Đang chuẩn bị bản ghi…");
     try {
-      const formData = new FormData();
-      formData.append("audio", file);
-      formData.append("scriptUrl", config.scriptUrl);
-      formData.append("token", config.token);
-      const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
-      const responseText = await response.text();
-      let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
-      try {
-        result = JSON.parse(responseText) as typeof result;
-      } catch {
-        if (response.status === 413 || /payload too large/i.test(responseText)) {
-          throw new Error("File ghi âm quá lớn để máy chủ nhận. Hãy chia file thành phần ngắn hơn rồi nhập lại.");
+      const chunks = await splitAudioForProcessing(file);
+      const results: AudioInsightResult[] = [];
+      for (let index = 0; index < chunks.length; index += 1) {
+        const chunk = chunks[index];
+        setAudioProcessingStatus(`Đang xử lý đoạn ${index + 1}/${chunks.length}…`);
+        const formData = new FormData();
+        formData.append("audio", chunk.file);
+        formData.append("scriptUrl", config.scriptUrl);
+        formData.append("token", config.token);
+        const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
+        const responseText = await response.text();
+        let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
+        try {
+          result = JSON.parse(responseText) as typeof result;
+        } catch {
+          if (response.status === 413 || /payload too large/i.test(responseText)) {
+            throw new Error("Không thể gửi một đoạn ghi âm lên máy chủ. Hãy thử lại sau.");
+          }
+          throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
         }
-        throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
+        if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
+        results.push({ language: result.language, segments: result.segments, keyPoints: result.keyPoints ?? [] });
       }
-      if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
+
+      const segments = results.flatMap((result, index) => result.segments.map((segment) => ({
+        time: formatAudioTime(chunks[index].offsetSeconds + parseAudioTime(segment.time)),
+        text: segment.text,
+      })));
+      const keyPoints = combineKeyPoints(results);
 
       const audioNote: AudioNote = {
         fileName: file.name,
-        language: result.language || "Tiếng Việt",
+        language: results.find((result) => result.language)?.language || "Tiếng Việt",
         updatedAt: new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
-        segments: result.segments,
-        keyPoints: result.keyPoints ?? [],
+        segments,
+        keyPoints,
       };
       const updatedRecord = { ...selectedRecord, audioNote };
       const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
@@ -486,11 +609,12 @@ export default function Home() {
       });
       persist(nextYears);
       queueDriveSync(updatedRecord);
-      setNotice("Đã chuyển ghi âm thành văn bản và lưu ý chính.");
+      setNotice(chunks.length > 1 ? `Đã xử lý ${chunks.length} đoạn ghi âm, tổng hợp văn bản và ý chính.` : "Đã chuyển ghi âm thành văn bản và lưu ý chính.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể xử lý file ghi âm.");
     } finally {
       setAudioProcessingId(null);
+      setAudioProcessingStatus("");
     }
   };
 
@@ -820,11 +944,11 @@ export default function Home() {
                 <div className="audio-information__heading">
                   <div>
                     <h3>6. Thông tin ghi âm</h3>
-                    <p>Nhập MP3, WAV, M4A, AAC, OGG hoặc FLAC (tối đa 18 MB). Gemini sẽ chuyển thành văn bản theo đoạn và rút các ý chính.</p>
+                    <p>Nhập MP3, WAV, M4A, AAC, OGG hoặc FLAC. Bản ghi dài sẽ tự tách thành các đoạn nhỏ, xử lý lần lượt rồi tổng hợp văn bản và ý chính.</p>
                   </div>
                   <label className={`audio-import-button ${audioProcessingId === selectedRecord.id ? "audio-import-button--busy" : ""}`}>
                     <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} disabled={audioProcessingId === selectedRecord.id} />
-                    {audioProcessingId === selectedRecord.id ? "Đang xử lý…" : "Import ghi âm"}
+                    {audioProcessingId === selectedRecord.id ? audioProcessingStatus || "Đang xử lý…" : "Import ghi âm"}
                   </label>
                 </div>
                 {selectedRecord.audioNote && (
