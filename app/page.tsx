@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
+import type { TextareaHTMLAttributes } from "react";
 
 type AudioSegment = {
   time: string;
@@ -14,6 +15,28 @@ type AudioNote = {
   segments: AudioSegment[];
   keyPoints: string[];
 };
+
+type GrowingTextareaProps = Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & {
+  value: string;
+  onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+};
+
+function GrowingTextarea({ value, onChange, className, ...props }: GrowingTextareaProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const resize = (textarea: HTMLTextAreaElement) => {
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.max(textarea.scrollHeight, 34)}px`;
+  };
+
+  useEffect(() => {
+    if (textareaRef.current) resize(textareaRef.current);
+  }, [value]);
+
+  return <textarea {...props} ref={textareaRef} rows={1} value={value} className={`growing-textarea ${className ?? ""}`.trim()} onChange={(event) => {
+    resize(event.currentTarget);
+    onChange(event);
+  }} />;
+}
 
 type WorkRecord = {
   id: string;
@@ -64,6 +87,7 @@ type DriveSyncConfig = {
 };
 
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
+const MAX_AUDIO_UPLOAD_BYTES = 12 * 1024 * 1024;
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
 const defaultDriveSyncConfig: DriveSyncConfig = {
@@ -414,8 +438,8 @@ export default function Home() {
       setNotice("Chỉ hỗ trợ file MP3, WAV, M4A, AAC, OGG hoặc FLAC.");
       return;
     }
-    if (file.size > 18 * 1024 * 1024) {
-      setNotice("File ghi âm tối đa 18 MB. Hãy chia file ngắn hơn rồi nhập lại.");
+    if (file.size > MAX_AUDIO_UPLOAD_BYTES) {
+      setNotice("File ghi âm lớn hơn 12 MB. Hãy chia bản ghi thành các phần ngắn hơn rồi nhập lại.");
       return;
     }
     const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
@@ -433,7 +457,16 @@ export default function Home() {
       formData.append("scriptUrl", config.scriptUrl);
       formData.append("token", config.token);
       const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
-      const result = await response.json() as { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
+      const responseText = await response.text();
+      let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
+      try {
+        result = JSON.parse(responseText) as typeof result;
+      } catch {
+        if (response.status === 413 || /payload too large/i.test(responseText)) {
+          throw new Error("File ghi âm quá lớn để máy chủ nhận. Hãy chia file thành phần ngắn hơn rồi nhập lại.");
+        }
+        throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
+      }
       if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
 
       const audioNote: AudioNote = {
@@ -718,7 +751,7 @@ export default function Home() {
                               <option value="">Chọn giá trị</option>
                               {field.options.map((option) => <option key={option} value={option}>{option}</option>)}
                             </select>
-                          ) : <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
+                          ) : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                         </tr>
                       ))}
                     </Fragment>
@@ -744,7 +777,8 @@ export default function Home() {
                         )}
                         <td>
                           <div className="room-autocomplete">
-                            <input
+                            <GrowingTextarea
+                              className="room-autocomplete__input"
                               value={room.room}
                               onChange={(event) => { updateFunctionalRoom(floor.id, room.id, "room", event.target.value); setRoomSuggestionFor(room.id); }}
                               onBlur={(event) => { window.setTimeout(() => setRoomSuggestionFor(null), 120); validateRoom(floor.id, room.id, event.target.value); }}
@@ -765,7 +799,7 @@ export default function Home() {
                           </div>
                         </td>
                         <td><input inputMode="numeric" value={room.quantity} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "quantity", event.target.value)} placeholder="0" /></td>
-                        <td><textarea value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" rows={2} /></td>
+                        <td><GrowingTextarea className="functional-description" value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
                       </tr>
                     )))}
                   </tbody>
@@ -777,7 +811,7 @@ export default function Home() {
                 <table className="information-table">
                   <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
                   <tbody>{systemFields.map((field) => (
-                    <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>
+                    <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>
                   ))}</tbody>
                 </table>
               </section>
