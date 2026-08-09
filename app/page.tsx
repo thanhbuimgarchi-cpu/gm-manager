@@ -427,18 +427,11 @@ export default function Home() {
       }
     }
 
-    const savedDriveConfig = window.localStorage.getItem(driveSyncConfigKey);
-    if (savedDriveConfig) {
-      try {
-        const config = JSON.parse(savedDriveConfig) as DriveSyncConfig;
-        setDriveScriptUrl(config.scriptUrl || defaultDriveSyncConfig.scriptUrl);
-        setDriveSyncToken(config.token || defaultDriveSyncConfig.token);
-      } catch {
-        window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
-      }
-    } else {
-      window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
-    }
+    // This public installation always uses the verified GM-CRM endpoint.
+    // Replacing a stale value also fixes old tabs that saved an earlier deployment URL.
+    setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
+    setDriveSyncToken(defaultDriveSyncConfig.token);
+    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
   }, []);
 
   const activeDriveFolder = syncedDriveFolders.find((folder) => folder.label === activeFolder);
@@ -485,17 +478,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    let config = defaultDriveSyncConfig;
-    const savedDriveConfig = window.localStorage.getItem(driveSyncConfigKey);
-    if (savedDriveConfig) {
-      try {
-        const saved = JSON.parse(savedDriveConfig) as DriveSyncConfig;
-        config = { scriptUrl: saved.scriptUrl || defaultDriveSyncConfig.scriptUrl, token: saved.token || defaultDriveSyncConfig.token };
-      } catch {
-        // The default preconfigured connection is used when the saved value is invalid.
-      }
-    }
-    void loadWorkspaceFromDrive(config, true);
+    void loadWorkspaceFromDrive(defaultDriveSyncConfig, true);
   }, []);
 
   const openAddDialog = () => {
@@ -608,20 +591,19 @@ export default function Home() {
   };
 
   const importAudioNote = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || !selectedRecord) return;
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file || !selectedRecord) {
+      input.value = "";
+      return;
+    }
     const supportedAudio = file.type.startsWith("audio/") || /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name);
     if (!supportedAudio) {
       setNotice("Chỉ hỗ trợ file MP3, WAV, M4A, AAC, OGG hoặc FLAC.");
+      input.value = "";
       return;
     }
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) {
-      setDriveConfigOpen(true);
-      setNotice("Hãy kết nối Google Apps Script trước khi nhập ghi âm.");
-      return;
-    }
+    const config = defaultDriveSyncConfig;
 
     const recordId = selectedRecord.id;
     setAudioProcessingId(recordId);
@@ -680,6 +662,7 @@ export default function Home() {
     } finally {
       setAudioProcessingId(null);
       setAudioProcessingStatus("");
+      input.value = "";
     }
   };
 
