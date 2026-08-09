@@ -66,6 +66,10 @@ type DriveSyncConfig = {
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
+const defaultDriveSyncConfig: DriveSyncConfig = {
+  scriptUrl: "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
+  token: "010101",
+};
 
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫", url: "https://drive.google.com/drive/folders/1KtXRW5p5tuY4qLC8q0hOG5dcKtnCfCu-" },
@@ -237,8 +241,8 @@ export default function Home() {
   const [renameUnlocked, setRenameUnlocked] = useState(false);
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
   const [driveConfigOpen, setDriveConfigOpen] = useState(false);
-  const [driveScriptUrl, setDriveScriptUrl] = useState("");
-  const [driveSyncToken, setDriveSyncToken] = useState("");
+  const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
+  const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const driveSyncTimer = useRef<number | null>(null);
@@ -263,11 +267,13 @@ export default function Home() {
     if (savedDriveConfig) {
       try {
         const config = JSON.parse(savedDriveConfig) as DriveSyncConfig;
-        setDriveScriptUrl(config.scriptUrl ?? "");
-        setDriveSyncToken(config.token ?? "");
+        setDriveScriptUrl(config.scriptUrl || defaultDriveSyncConfig.scriptUrl);
+        setDriveSyncToken(config.token || defaultDriveSyncConfig.token);
       } catch {
-        window.localStorage.removeItem(driveSyncConfigKey);
+        window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
       }
+    } else {
+      window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
     }
   }, []);
 
@@ -659,7 +665,7 @@ export default function Home() {
           <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
-            <p className="drive-config-dialog__hint">Tạo Web app bằng mã GM-CRM, rồi dán URL và mã đồng bộ riêng của bạn vào đây.</p>
+            <p className="drive-config-dialog__hint">GM-CRM đã được gán sẵn Web app GM-Manager. Bạn không cần đăng nhập hay nhập lại khi mở web.</p>
             <a className="script-link" href="/gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             <label>Mã đồng bộ<input type="password" value={driveSyncToken} onChange={(event) => setDriveSyncToken(event.target.value)} placeholder="Mã bạn đã đặt trong Script" /></label>
