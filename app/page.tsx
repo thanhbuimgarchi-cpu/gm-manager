@@ -20,6 +20,7 @@ type AudioInsightResult = {
   language?: string;
   segments: AudioSegment[];
   keyPoints: string[];
+  apiCallsUsed?: number;
 };
 
 type AudioChunk = {
@@ -294,6 +295,19 @@ function combineKeyPoints(results: AudioInsightResult[]) {
     if (!added) break;
   }
   return combined;
+}
+
+function quotaRetrySeconds(message: string) {
+  if (!/quota|rate.?limit|resource.?exhausted/i.test(message)) return null;
+  const match = /retry\s+in\s+([\d.]+)s/i.exec(message);
+  return Math.max(10, Math.ceil(Number(match?.[1] || 60)) + 3);
+}
+
+async function waitForAudioQuota(seconds: number, update: (remaining: number) => void) {
+  for (let remaining = seconds; remaining > 0; remaining -= 1) {
+    update(remaining);
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
 }
 
 const normalizeFunctionalFloors = (record: WorkRecord): FunctionalFloor[] => {
@@ -620,19 +634,31 @@ export default function Home() {
         formData.append("audio", chunk.file);
         formData.append("scriptUrl", config.scriptUrl);
         formData.append("token", config.token);
-        const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
-        const responseText = await response.text();
-        let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[] };
-        try {
-          result = JSON.parse(responseText) as typeof result;
-        } catch {
-          if (response.status === 413 || /payload too large/i.test(responseText)) {
-            throw new Error("Không thể gửi một đoạn ghi âm lên máy chủ. Hãy thử lại sau.");
+        let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[]; apiCallsUsed?: number } | null = null;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
+          const responseText = await response.text();
+          try {
+            result = JSON.parse(responseText) as typeof result;
+          } catch {
+            if (response.status === 413 || /payload too large/i.test(responseText)) {
+              throw new Error("Không thể gửi một đoạn ghi âm lên máy chủ. Hãy thử lại sau.");
+            }
+            throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
           }
-          throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
+          if (response.ok && result?.ok && result.segments) break;
+          const errorMessage = result?.error || "Không thể xử lý file ghi âm.";
+          const retrySeconds = quotaRetrySeconds(errorMessage);
+          if (!retrySeconds || attempt === 4) throw new Error(retrySeconds ? "Gemini miễn phí đang hết lượt tạm thời. Hãy thử lại sau vài phút." : errorMessage);
+          await waitForAudioQuota(retrySeconds, (remaining) => setAudioProcessingStatus(`Gemini đang giới hạn lượt miễn phí · tiếp tục sau ${remaining} giây`));
+          setAudioProcessingStatus(`Đang thử lại đoạn ${index + 1}/${chunks.length}…`);
         }
-        if (!response.ok || !result.ok || !result.segments) throw new Error(result.error || "Không thể xử lý file ghi âm.");
-        results.push({ language: result.language, segments: result.segments, keyPoints: result.keyPoints ?? [] });
+        if (!result?.segments) throw new Error("Không thể xử lý file ghi âm.");
+        results.push({ language: result.language, segments: result.segments, keyPoints: result.keyPoints ?? [], apiCallsUsed: result.apiCallsUsed });
+        if (index < chunks.length - 1) {
+          const pauseSeconds = result.apiCallsUsed === 1 ? 15 : 65;
+          await waitForAudioQuota(pauseSeconds, (remaining) => setAudioProcessingStatus(`Đã xong đoạn ${index + 1}/${chunks.length} · đoạn tiếp theo sau ${remaining} giây`));
+        }
       }
 
       const segments = results.flatMap((result, index) => result.segments.map((segment) => ({

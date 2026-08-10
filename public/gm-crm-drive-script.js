@@ -43,46 +43,35 @@ function processAudioInsight_(payload) {
   }
   if (audio.data.length > 25200000) throw new Error("File ghi \u00e2m qu\u00e1 l\u1edbn. H\u00e3y d\u00f9ng file t\u1ed1i \u0111a 18 MB.");
 
-  const transcriptSchema = {
+  const insightSchema = {
     type: "OBJECT",
     properties: {
       language: { type: "STRING" },
       segments: { type: "ARRAY", items: { type: "OBJECT", properties: { time: { type: "STRING" }, text: { type: "STRING" } }, required: ["time", "text"] } },
+      keyPoints: { type: "ARRAY", items: { type: "STRING" } },
     },
-    required: ["language", "segments"],
+    required: ["language", "segments", "keyPoints"],
   };
-  const pointsSchema = { type: "OBJECT", properties: { points: { type: "ARRAY", items: { type: "STRING" } } }, required: ["points"] };
-  const transcriptResult = generateGeminiJson_(apiKey, [{
+  const insight = generateGeminiJson_(apiKey, [{
     role: "user",
     parts: [
       { inline_data: { mime_type: audio.mimeType, data: audio.data } },
-      { text: "Chuy\u1ec3n to\u00e0n b\u1ed9 l\u1eddi n\u00f3i trong ghi \u00e2m th\u00e0nh v\u0103n b\u1ea3n ch\u00ednh x\u00e1c. Chia theo c\u00e1c \u0111o\u1ea1n \u00fd ngh\u0129a, m\u1ed7i \u0111o\u1ea1n 1\u20133 c\u00e2u, c\u00f3 m\u1ed1c th\u1eddi gian MM:SS n\u1ebfu nh\u1eadn bi\u1ebft \u0111\u01b0\u1ee3c. Gi\u1eef nguy\u00ean ng\u00f4n ng\u1eef; kh\u00f4ng t\u1ef1 th\u00eam th\u00f4ng tin." },
+      { text: "Chuy\u1ec3n to\u00e0n b\u1ed9 l\u1eddi n\u00f3i trong ghi \u00e2m th\u00e0nh v\u0103n b\u1ea3n ch\u00ednh x\u00e1c. Chia th\u00e0nh c\u00e1c \u0111o\u1ea1n \u00fd ngh\u0129a 1\u20133 c\u00e2u v\u00e0 ghi m\u1ed1c th\u1eddi gian MM:SS. \u0110\u1ed3ng th\u1eddi r\u00fat ra t\u1ed1i \u0111a 4 \u00fd ch\u00ednh ng\u1eafn, ch\u1ec9 gi\u1eef quy\u1ebft \u0111\u1ecbnh, nhu c\u1ea7u, s\u1ed1 li\u1ec7u, vi\u1ec7c c\u1ea7n l\u00e0m v\u00e0 r\u1ee7i ro. Gi\u1eef nguy\u00ean ng\u00f4n ng\u1eef; kh\u00f4ng t\u1ef1 th\u00eam th\u00f4ng tin." },
     ],
-  }], transcriptSchema);
+  }], insightSchema);
 
-  const segments = (transcriptResult.segments || []).filter(function(segment) {
+  const segments = (insight.segments || []).filter(function(segment) {
     return segment && typeof segment.text === "string" && segment.text.trim();
   }).map(function(segment) {
     return { time: typeof segment.time === "string" ? segment.time : "~", text: segment.text.trim() };
   });
   if (!segments.length) throw new Error("Kh\u00f4ng nh\u1eadn di\u1ec7n \u0111\u01b0\u1ee3c l\u1eddi n\u00f3i trong file ghi \u00e2m.");
-
-  const transcript = segments.map(function(segment) { return "[" + segment.time + "] " + segment.text; }).join("\n");
-  const chunks = splitTranscript_(transcript);
-  if (chunks.length > 20) throw new Error("B\u1ea3n ghi qu\u00e1 d\u00e0i \u0111\u1ec3 t\u00f3m t\u1eaft m\u1ed9t l\u1ea7n. H\u00e3y chia file ghi \u00e2m th\u00e0nh c\u00e1c ph\u1ea7n ng\u1eafn h\u01a1n.");
-
-  const partialPoints = [];
-  chunks.forEach(function(chunk, index) {
-    const summary = generateGeminiJson_(apiKey, [{ role: "user", parts: [{ text: "T\u00f3m t\u1eaft ph\u1ea7n " + (index + 1) + "/" + chunks.length + " d\u01b0\u1edbi \u0111\u00e2y th\u00e0nh t\u1ed1i \u0111a 4 \u00fd ch\u00ednh ng\u1eafn, ch\u1ec9 gi\u1eef quy\u1ebft \u0111\u1ecbnh, nhu c\u1ea7u, s\u1ed1 li\u1ec7u, vi\u1ec7c c\u1ea7n l\u00e0m v\u00e0 r\u1ee7i ro. Kh\u00f4ng l\u1eb7p l\u1ea1i, kh\u00f4ng th\u00eam nh\u1eadn \u0111\u1ecbnh ngo\u00e0i v\u0103n b\u1ea3n.\n\n" + chunk }] }], pointsSchema);
-    (summary.points || []).forEach(function(point) { if (typeof point === "string" && point.trim()) partialPoints.push(point.trim()); });
-  });
-
-  const finalSummary = generateGeminiJson_(apiKey, [{ role: "user", parts: [{ text: "G\u1ed9p c\u00e1c \u00fd d\u01b0\u1edbi \u0111\u00e2y th\u00e0nh t\u1ed1i \u0111a 10 \u00fd ch\u00ednh cho h\u1ed3 s\u01a1 kh\u00e1ch h\u00e0ng. B\u1ecf \u00fd tr\u00f9ng, \u01b0u ti\u00ean th\u00f4ng tin c\u00f3 th\u1ec3 h\u00e0nh \u0111\u1ed9ng. Vi\u1ebft ti\u1ebfng Vi\u1ec7t ng\u1eafn g\u1ecdn.\n\n" + partialPoints.map(function(point) { return "- " + point; }).join("\n") }] }], pointsSchema);
   return {
     ok: true,
-    language: transcriptResult.language || "Ti\u1ebfng Vi\u1ec7t",
+    language: insight.language || "Ti\u1ebfng Vi\u1ec7t",
     segments: segments,
-    keyPoints: (finalSummary.points || []).filter(function(point) { return typeof point === "string" && point.trim(); }).map(function(point) { return point.trim(); }),
+    keyPoints: (insight.keyPoints || []).filter(function(point) { return typeof point === "string" && point.trim(); }).map(function(point) { return point.trim(); }),
+    apiCallsUsed: 1,
   };
 }
 
