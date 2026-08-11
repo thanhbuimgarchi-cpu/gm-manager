@@ -1,10 +1,10 @@
 /**
- * GM-CRM → Google Drive
+ * GM-CRM -> Google Drive
  *
- * 1. Thay WEB_SYNC_TOKEN bằng một mã bí mật riêng.
- * 2. Dán toàn bộ tệp này vào script.google.com rồi triển khai dưới dạng Web app.
- * 3. Web app phải chạy bằng tài khoản sở hữu GM-Manager.
- * 4. Trong Project Settings > Script properties, thêm GEMINI_API_KEY bằng khóa từ Google AI Studio.
+ * 1. WEB_SYNC_TOKEN is the private synchronization code used by GM-CRM.
+ * 2. Paste this entire file into script.google.com and deploy it as a Web app.
+ * 3. Run the Web app as the Google account that owns GM-Manager.
+ * 4. In Project Settings > Script properties, add GEMINI_API_KEY from Google AI Studio.
  */
 
 const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
