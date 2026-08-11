@@ -322,7 +322,10 @@ function recordFromWorkbook_(file, projectId) {
 
 function readXlsxSheets_(file) {
   const entries = {};
-  Utilities.unzip(file.getBlob()).forEach(function(blob) { entries[blob.getName()] = blob.getDataAsString("UTF-8"); });
+  // XLSX is a ZIP archive, but Drive preserves the Excel MIME type. Utilities.unzip
+  // requires application/zip, so normalize only the in-memory blob before reading it.
+  const xlsxArchive = file.getBlob().setContentType("application/zip");
+  Utilities.unzip(xlsxArchive).forEach(function(blob) { entries[blob.getName()] = blob.getDataAsString("UTF-8"); });
   const sharedStrings = readSharedStrings_(entries["xl/sharedStrings.xml"]);
   const workbook = XmlService.parse(entries["xl/workbook.xml"]).getRootElement();
   const workbookNs = workbook.getNamespace();
