@@ -17,6 +17,16 @@ function doPost(event) {
     const payload = JSON.parse(event.postData.contents || "{}");
     if (payload.token !== WEB_SYNC_TOKEN) throw new Error("M\u00e3 \u0111\u1ed3ng b\u1ed9 kh\u00f4ng \u0111\u00fang.");
     if (payload.action === "audio-insight") return json_(processAudioInsight_(payload));
+    if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
+    if (payload.action === "store-audio-chunk") {
+      const audioLock = LockService.getScriptLock();
+      audioLock.waitLock(30000);
+      try {
+        return json_(storeAudioChunk_(payload));
+      } finally {
+        audioLock.releaseLock();
+      }
+    }
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_());
 
     const lock = LockService.getScriptLock();
@@ -73,6 +83,75 @@ function processAudioInsight_(payload) {
     keyPoints: (insight.keyPoints || []).filter(function(point) { return typeof point === "string" && point.trim(); }).map(function(point) { return point.trim(); }),
     apiCallsUsed: 1,
   };
+}
+
+function storeAudioChunk_(payload) {
+  const audio = payload.audio || {};
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const chunkIndex = Number(payload.chunkIndex);
+  const totalChunks = Number(payload.totalChunks);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
+    throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c ghi \u00e2m.");
+  }
+  if (typeof audio.data !== "string" || !audio.data || typeof audio.mimeType !== "string" || !audio.mimeType) {
+    throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u \u0111o\u1ea1n ghi \u00e2m.");
+  }
+
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const prefix = "Ghi \u00e2m " + projectId + " - ph\u1ea7n ";
+  if (chunkIndex === 0) trashFilesByPrefix_(customerFolder, prefix);
+  const extensionMatch = /\.([a-z0-9]{1,5})$/i.exec(String(audio.fileName || ""));
+  const extension = extensionMatch ? extensionMatch[1].toLowerCase() : audio.mimeType === "audio/mpeg" ? "mp3" : "wav";
+  const fileName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + "." + extension;
+  trashFilesByName_(customerFolder, fileName);
+  const blob = Utilities.newBlob(Utilities.base64Decode(audio.data), audio.mimeType, fileName);
+  const file = customerFolder.createFile(blob);
+  return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName, folderUrl: customerFolder.getUrl() };
+}
+
+function processStoredAudioChunk_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const chunkIndex = Number(payload.chunkIndex);
+  const totalChunks = Number(payload.totalChunks);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
+    throw new Error("Thi\u1ebfu th\u00f4ng tin \u0111o\u1ea1n ghi \u00e2m c\u1ea7n x\u1eed l\u00fd.");
+  }
+  const customerFolder = getCustomerFolder_(year, month, projectId, false);
+  if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c kh\u00e1ch h\u00e0ng tr\u00ean Drive.");
+  const baseName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + ".";
+  const files = customerFolder.getFiles();
+  let audioFile = null;
+  while (files.hasNext()) {
+    const candidate = files.next();
+    if (candidate.getName().indexOf(baseName) === 0) {
+      audioFile = candidate;
+      break;
+    }
+  }
+  if (!audioFile) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y \u0111o\u1ea1n ghi \u00e2m " + (chunkIndex + 1) + "/" + totalChunks + " tr\u00ean Drive.");
+  const blob = audioFile.getBlob();
+  const result = processAudioInsight_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
+  result.chunkIndex = chunkIndex;
+  result.totalChunks = totalChunks;
+  return result;
+}
+
+function audioChunkBaseName_(projectId, chunkIndex, totalChunks) {
+  return "Ghi \u00e2m " + projectId + " - ph\u1ea7n " + padAudioNumber_(chunkIndex + 1) + "-" + padAudioNumber_(totalChunks);
+}
+
+function padAudioNumber_(value) {
+  return ("000" + Number(value)).slice(-3);
+}
+
+function audioMimeType_(fileName, contentType) {
+  if (/^audio\//i.test(contentType || "")) return contentType;
+  const extension = String(fileName || "").toLowerCase().split(".").pop();
+  return { mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", flac: "audio/flac" }[extension] || "audio/wav";
 }
 
 function generateGeminiJson_(apiKey, contents, responseSchema) {
@@ -175,15 +254,44 @@ function recordFromWorkbook_(file, projectId) {
     floorsByName[floor].rooms.push(room);
   });
 
+  const audioSheet = sheets["6. Th\u00f4ng tin ghi \u00e2m"] || [];
+  const audioRows = audioSheet.slice(1);
+  const audioChunks = [];
+  const isChunkedAudio = String((audioSheet[0] || [])[1] || "") === "Lo\u1ea1i";
+  if (isChunkedAudio) {
+    const chunksByIndex = {};
+    audioRows.forEach(function(row) {
+      const index = Math.max(0, Number(row[0] || 1) - 1);
+      const type = String(row[1] || "");
+      const time = String(row[2] || "");
+      const content = String(row[3] || "");
+      if (!content) return;
+      if (!chunksByIndex[index]) chunksByIndex[index] = { index: index, segments: [], keyPoints: [] };
+      if (type === "T\u00f3m t\u1eaft") chunksByIndex[index].keyPoints.push(content);
+      else chunksByIndex[index].segments.push({ time: time || "~", text: content });
+    });
+    Object.keys(chunksByIndex).sort(function(a, b) { return Number(a) - Number(b); }).forEach(function(index) { audioChunks.push(chunksByIndex[index]); });
+  } else {
+    const legacySegments = [];
+    const legacyPoints = [];
+    audioRows.forEach(function(row) {
+      const time = String(row[0] || "");
+      const text = String(row[1] || "");
+      const point = String(row[2] || "");
+      if (text) legacySegments.push({ time: time || "~", text: text });
+      if (point) legacyPoints.push(point);
+    });
+    if (legacySegments.length || legacyPoints.length) audioChunks.push({ index: 0, segments: legacySegments, keyPoints: legacyPoints });
+  }
   const segments = [];
   const keyPoints = [];
-  (sheets["6. Th\u00f4ng tin ghi \u00e2m"] || []).slice(1).forEach(function(row) {
-    const time = String(row[0] || "");
-    const text = String(row[1] || "");
-    const point = String(row[2] || "");
-    if (text) segments.push({ time: time || "~", text: text });
-    if (point) keyPoints.push(point);
+  audioChunks.forEach(function(chunk) {
+    Array.prototype.push.apply(segments, chunk.segments || []);
+    Array.prototype.push.apply(keyPoints, chunk.keyPoints || []);
   });
+  const inferredCompletedChunks = audioChunks.reduce(function(completed, chunk) { return chunk.index === completed ? completed + 1 : completed; }, 0);
+  const totalChunks = Number(metadata.audioTotalChunks || 0) || (audioChunks.length ? Math.max.apply(null, audioChunks.map(function(chunk) { return chunk.index + 1; })) : 0);
+  const completedChunks = metadata.audioCompletedChunks === undefined || metadata.audioCompletedChunks === "" ? inferredCompletedChunks : Number(metadata.audioCompletedChunks);
 
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
   const createdAt = metadata.createdAt || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
@@ -196,13 +304,17 @@ function recordFromWorkbook_(file, projectId) {
     details: details,
     functionalFloors: Object.keys(floorsByName).map(function(name) { return floorsByName[name]; }),
   };
-  if (segments.length || keyPoints.length) {
+  if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
-      fileName: "Ghi \u00e2m trong " + file.getName(),
+      fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
       language: metadata.audioLanguage || "Ti\u1ebfng Vi\u1ec7t",
       updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
       segments: segments,
       keyPoints: keyPoints,
+      chunks: audioChunks,
+      totalChunks: totalChunks,
+      completedChunks: completedChunks,
+      status: metadata.audioStatus || (totalChunks && completedChunks >= totalChunks ? "complete" : "processing"),
     };
   }
   return record;
@@ -282,11 +394,7 @@ function keyValueRows_(rows) {
 }
 
 function exportCustomerWorkbook_(record, year, month) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  const consulting = getOrCreateFolder_(root, "T\u01b0 v\u1ea5n");
-  const yearFolder = getOrCreateFolder_(consulting, String(year));
-  const monthFolder = getOrCreateFolder_(yearFolder, "T" + month);
-  const customerFolder = getOrCreateFolder_(monthFolder, record.projectId);
+  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
   const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + record.projectId + ".xlsx";
 
   const spreadsheet = SpreadsheetApp.create("GM-CRM temporary " + record.projectId);
@@ -322,7 +430,7 @@ function writeWorkbook_(spreadsheet, record) {
     ["5. H\u1ec7 th\u1ed1ng", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["D", "\u0110i\u1ec7n"], ["N", "N\u01b0\u1edbc"], ["E", "N\u0103ng l\u01b0\u1ee3ng"], ["EL", "Thang m\u00e1y"], ["DR", "C\u1eeda"],
     ]],
-    ["6. Th\u00f4ng tin ghi \u00e2m", ["M\u1ed1c th\u1eddi gian", "N\u1ed9i dung \u0111\u00e3 chuy\u1ec3n", "\u00dd ch\u00ednh"], null],
+    ["6. Th\u00f4ng tin ghi \u00e2m", ["Ph\u1ea7n", "Lo\u1ea1i", "M\u1ed1c th\u1eddi gian", "N\u1ed9i dung"], null],
   ];
 
   sheetDefinitions.forEach(function(definition, index) {
@@ -335,8 +443,11 @@ function writeWorkbook_(spreadsheet, record) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontFamily("Roboto").setFontWeight("bold").setBackground("#eee9e2");
 
     if (name === "0. GM-CRM") {
-      sheet.getRange(2, 1, 5, 2).setValues([
-        ["projectId", record.projectId || ""], ["name", record.name || ""], ["houseId", record.houseId || ""], ["createdAt", record.createdAt || ""], ["audioLanguage", (record.audioNote && record.audioNote.language) || ""],
+      const note = record.audioNote || {};
+      sheet.getRange(2, 1, 9, 2).setValues([
+        ["projectId", record.projectId || ""], ["name", record.name || ""], ["houseId", record.houseId || ""], ["createdAt", record.createdAt || ""],
+        ["audioLanguage", note.language || ""], ["audioFileName", note.fileName || ""], ["audioTotalChunks", note.totalChunks || ""],
+        ["audioCompletedChunks", note.completedChunks || ""], ["audioStatus", note.status || ""],
       ]);
     } else if (name === "4. C\u00f4ng n\u0103ng") {
       const rows = [];
@@ -348,15 +459,25 @@ function writeWorkbook_(spreadsheet, record) {
       if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
     } else if (name === "6. Th\u00f4ng tin ghi \u00e2m") {
       const note = record.audioNote || {};
-      const segments = note.segments || [];
-      const points = note.keyPoints || [];
+      const chunks = note.chunks && note.chunks.length ? note.chunks.slice().sort(function(a, b) { return a.index - b.index; }) :
+        ((note.segments && note.segments.length) || (note.keyPoints && note.keyPoints.length) ? [{ index: 0, segments: note.segments || [], keyPoints: note.keyPoints || [] }] : []);
       const rows = [];
-      const count = Math.max(segments.length, points.length);
-      for (let rowIndex = 0; rowIndex < count; rowIndex++) {
-        const segment = segments[rowIndex] || {};
-        rows.push([segment.time || "", segment.text || "", points[rowIndex] || ""]);
+      chunks.forEach(function(chunk) {
+        (chunk.segments || []).forEach(function(segment) {
+          rows.push([Number(chunk.index) + 1, "N\u1ed9i dung \u0111\u1ea7y \u0111\u1ee7", segment.time || "", segment.text || ""]);
+        });
+        (chunk.keyPoints || []).forEach(function(point) {
+          rows.push([Number(chunk.index) + 1, "T\u00f3m t\u1eaft", "", point || ""]);
+        });
+      });
+      if (rows.length) {
+        sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+        rows.forEach(function(row, rowIndex) {
+          const rowRange = sheet.getRange(rowIndex + 2, 1, 1, headers.length);
+          if (row[1] === "T\u00f3m t\u1eaft") rowRange.setFontColor("#7A1F2B").setFontWeight("bold").setBackground("#F7ECEE");
+          else rowRange.setFontColor("#1F1F1D");
+        });
       }
-      if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
     } else {
       const rows = fieldRows.map(function(field) {
         return [field[0], field[1], (record.details && record.details[field[0]]) || ""];
@@ -365,7 +486,15 @@ function writeWorkbook_(spreadsheet, record) {
     }
     sheet.getDataRange().setFontFamily("Roboto").setWrap(true);
     sheet.setFrozenRows(1);
-    sheet.autoResizeColumns(1, headers.length);
+    if (name === "6. Th\u00f4ng tin ghi \u00e2m") {
+      sheet.setColumnWidth(1, 55);
+      sheet.setColumnWidth(2, 135);
+      sheet.setColumnWidth(3, 95);
+      sheet.setColumnWidth(4, 520);
+    } else {
+      sheet.autoResizeColumns(1, headers.length);
+    }
+    sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
   });
   spreadsheet.getSheetByName("0. GM-CRM").hideSheet();
 }
@@ -381,6 +510,17 @@ function getOrCreateFolder_(parent, name) {
   return matches.hasNext() ? matches.next() : parent.createFolder(name);
 }
 
+function getCustomerFolder_(year, month, projectId, createMissing) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  let consulting = createMissing ? getOrCreateFolder_(root, "T\u01b0 v\u1ea5n") : findFolder_(root, "T\u01b0 v\u1ea5n");
+  if (!consulting) return null;
+  let yearFolder = createMissing ? getOrCreateFolder_(consulting, String(year)) : findFolder_(consulting, String(year));
+  if (!yearFolder) return null;
+  let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
+  if (!monthFolder) return null;
+  return createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+}
+
 function findFolder_(parent, name) {
   const matches = parent.getFoldersByName(name);
   return matches.hasNext() ? matches.next() : null;
@@ -389,6 +529,14 @@ function findFolder_(parent, name) {
 function trashFilesByName_(folder, name) {
   const matches = folder.getFilesByName(name);
   while (matches.hasNext()) matches.next().setTrashed(true);
+}
+
+function trashFilesByPrefix_(folder, prefix) {
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    if (file.getName().indexOf(prefix) === 0) file.setTrashed(true);
+  }
 }
 
 function json_(payload) {

@@ -8,12 +8,22 @@ type AudioSegment = {
   text: string;
 };
 
+type AudioNoteChunk = {
+  index: number;
+  segments: AudioSegment[];
+  keyPoints: string[];
+};
+
 type AudioNote = {
   fileName: string;
   language: string;
   updatedAt: string;
   segments: AudioSegment[];
   keyPoints: string[];
+  chunks?: AudioNoteChunk[];
+  totalChunks?: number;
+  completedChunks?: number;
+  status?: "processing" | "complete";
 };
 
 type AudioInsightResult = {
@@ -21,6 +31,11 @@ type AudioInsightResult = {
   segments: AudioSegment[];
   keyPoints: string[];
   apiCallsUsed?: number;
+};
+
+type AudioProcessResponse = Partial<AudioInsightResult> & {
+  ok?: boolean;
+  error?: string;
 };
 
 type AudioChunk = {
@@ -297,6 +312,29 @@ function combineKeyPoints(results: AudioInsightResult[]) {
   return combined;
 }
 
+function normalizeAudioNoteChunks(note: AudioNote): AudioNoteChunk[] {
+  if (note.chunks?.length) return [...note.chunks].sort((a, b) => a.index - b.index);
+  if (!note.segments.length && !note.keyPoints.length) return [];
+  return [{ index: 0, segments: note.segments, keyPoints: note.keyPoints }];
+}
+
+function buildAudioNote(previous: AudioNote, chunks: AudioNoteChunk[], language?: string): AudioNote {
+  const orderedChunks = [...chunks].sort((a, b) => a.index - b.index);
+  const completedChunks = orderedChunks.reduce((completed, chunk) => chunk.index === completed ? completed + 1 : completed, 0);
+  const totalChunks = Math.max(previous.totalChunks ?? orderedChunks.length, orderedChunks.length);
+  return {
+    ...previous,
+    language: language || previous.language || "Tiếng Việt",
+    updatedAt: new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
+    chunks: orderedChunks,
+    completedChunks,
+    totalChunks,
+    status: completedChunks >= totalChunks ? "complete" : "processing",
+    segments: orderedChunks.flatMap((chunk) => chunk.segments),
+    keyPoints: combineKeyPoints(orderedChunks.map((chunk) => ({ segments: chunk.segments, keyPoints: chunk.keyPoints }))),
+  };
+}
+
 function quotaRetrySeconds(message: string) {
   if (!/quota|rate.?limit|resource.?exhausted/i.test(message)) return null;
   const match = /retry\s+in\s+([\d.]+)s/i.exec(message);
@@ -469,6 +507,20 @@ export default function Home() {
     saveWorkspace(nextYears);
   };
 
+  const persistRecord = (record: WorkRecord, year: number, month: number) => {
+    setYears((currentYears) => {
+      const nextYears = currentYears.map((yearFolder) => yearFolder.year !== year ? yearFolder : {
+        ...yearFolder,
+        months: yearFolder.months.map((monthFolder, index) => index !== month - 1 ? monthFolder : {
+          ...monthFolder,
+          records: monthFolder.records.map((currentRecord) => currentRecord.projectId === record.projectId ? record : currentRecord),
+        }),
+      });
+      saveWorkspace(nextYears);
+      return nextYears;
+    });
+  };
+
   const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     if (!config.scriptUrl || !config.token) return;
@@ -606,6 +658,85 @@ export default function Home() {
     queueDriveSync(updatedRecord);
   };
 
+  const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
+    if (!startingRecord.audioNote) throw new Error("Chưa có tiến độ ghi âm để tiếp tục.");
+    const config = defaultDriveSyncConfig;
+    let workingRecord = startingRecord;
+    let workingChunks = normalizeAudioNoteChunks(startingRecord.audioNote);
+    const totalChunks = startingRecord.audioNote.totalChunks ?? workingChunks.length;
+    let startIndex = startingRecord.audioNote.completedChunks ?? 0;
+    while (workingChunks.some((chunk) => chunk.index === startIndex)) startIndex += 1;
+
+    for (let index = startIndex; index < totalChunks; index += 1) {
+      setAudioProcessingStatus(`Đang xử lý đoạn ${index + 1}/${totalChunks}…`);
+      let result: AudioProcessResponse | null = null;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const response = await fetch("/api/audio-process", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scriptUrl: config.scriptUrl,
+            token: config.token,
+            year,
+            month,
+            projectId: startingRecord.projectId,
+            chunkIndex: index,
+            totalChunks,
+          }),
+        });
+        const responseText = await response.text();
+        try {
+          result = JSON.parse(responseText) as AudioProcessResponse;
+        } catch {
+          throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
+        }
+        if (response.ok && result?.ok && result.segments) break;
+        const errorMessage = result?.error || "Không thể xử lý file ghi âm.";
+        const retrySeconds = quotaRetrySeconds(errorMessage);
+        if (!retrySeconds || attempt === 4) throw new Error(retrySeconds ? "Gemini miễn phí đang hết lượt tạm thời. Tiến độ đã được lưu; hãy bấm tiếp tục sau vài phút." : errorMessage);
+        await waitForAudioQuota(retrySeconds, (remaining) => setAudioProcessingStatus(`Gemini đang giới hạn lượt miễn phí · tiếp tục sau ${remaining} giây`));
+        setAudioProcessingStatus(`Đang thử lại đoạn ${index + 1}/${totalChunks}…`);
+      }
+      if (!result?.segments) throw new Error("Không thể xử lý file ghi âm.");
+
+      const offsetSeconds = index * MAX_AUDIO_CHUNK_SECONDS;
+      const processedChunk: AudioNoteChunk = {
+        index,
+        segments: result.segments.map((segment) => ({
+          time: formatAudioTime(offsetSeconds + parseAudioTime(segment.time)),
+          text: segment.text,
+        })),
+        keyPoints: result.keyPoints ?? [],
+      };
+      workingChunks = [...workingChunks.filter((chunk) => chunk.index !== index), processedChunk];
+      const audioNote = buildAudioNote(workingRecord.audioNote!, workingChunks, result.language);
+      workingRecord = { ...workingRecord, audioNote };
+      persistRecord(workingRecord, year, month);
+      setAudioProcessingStatus(`Đang ghi đoạn ${index + 1}/${totalChunks} vào Excel…`);
+      await syncRecordToDrive(workingRecord, year, month, config);
+
+      if (index < totalChunks - 1) {
+        const pauseSeconds = result.apiCallsUsed === 1 ? 15 : 65;
+        await waitForAudioQuota(pauseSeconds, (remaining) => setAudioProcessingStatus(`Đã lưu đoạn ${index + 1}/${totalChunks} vào Excel · tiếp tục sau ${remaining} giây`));
+      }
+    }
+    return workingRecord;
+  };
+
+  const resumeAudioProcessing = async (record: WorkRecord) => {
+    setAudioProcessingId(record.id);
+    try {
+      const completedRecord = await processAudioCheckpoint(record, selectedYear, selectedMonth);
+      const total = completedRecord.audioNote?.totalChunks ?? 0;
+      setNotice(`Đã xử lý và lưu đủ ${total}/${total} đoạn vào Excel.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể tiếp tục xử lý file ghi âm.");
+    } finally {
+      setAudioProcessingId(null);
+      setAudioProcessingStatus("");
+    }
+  };
+
   const importAudioNote = async (event: ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -619,74 +750,55 @@ export default function Home() {
       input.value = "";
       return;
     }
-    const config = defaultDriveSyncConfig;
 
-    const recordId = selectedRecord.id;
-    setAudioProcessingId(recordId);
+    const config = defaultDriveSyncConfig;
+    const record = selectedRecord;
+    setAudioProcessingId(record.id);
     setAudioProcessingStatus("Đang chuẩn bị bản ghi…");
     try {
       const chunks = await splitAudioForProcessing(file);
-      const results: AudioInsightResult[] = [];
       for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index];
-        setAudioProcessingStatus(`Đang xử lý đoạn ${index + 1}/${chunks.length}…`);
+        setAudioProcessingStatus(`Đang lưu file ghi âm ${index + 1}/${chunks.length} vào Drive…`);
         const formData = new FormData();
-        formData.append("audio", chunk.file);
+        formData.append("audio", chunks[index].file);
         formData.append("scriptUrl", config.scriptUrl);
         formData.append("token", config.token);
-        let result: { ok?: boolean; error?: string; language?: string; segments?: AudioSegment[]; keyPoints?: string[]; apiCallsUsed?: number } | null = null;
-        for (let attempt = 0; attempt < 5; attempt += 1) {
-          const response = await fetch("/api/audio-insight", { method: "POST", body: formData });
-          const responseText = await response.text();
-          try {
-            result = JSON.parse(responseText) as typeof result;
-          } catch {
-            if (response.status === 413 || /payload too large/i.test(responseText)) {
-              throw new Error("Không thể gửi một đoạn ghi âm lên máy chủ. Hãy thử lại sau.");
-            }
-            throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
-          }
-          if (response.ok && result?.ok && result.segments) break;
-          const errorMessage = result?.error || "Không thể xử lý file ghi âm.";
-          const retrySeconds = quotaRetrySeconds(errorMessage);
-          if (!retrySeconds || attempt === 4) throw new Error(retrySeconds ? "Gemini miễn phí đang hết lượt tạm thời. Hãy thử lại sau vài phút." : errorMessage);
-          await waitForAudioQuota(retrySeconds, (remaining) => setAudioProcessingStatus(`Gemini đang giới hạn lượt miễn phí · tiếp tục sau ${remaining} giây`));
-          setAudioProcessingStatus(`Đang thử lại đoạn ${index + 1}/${chunks.length}…`);
+        formData.append("year", String(selectedYear));
+        formData.append("month", String(selectedMonth));
+        formData.append("projectId", record.projectId);
+        formData.append("chunkIndex", String(index));
+        formData.append("totalChunks", String(chunks.length));
+        formData.append("originalFileName", file.name);
+        const response = await fetch("/api/audio-store", { method: "POST", body: formData });
+        const responseText = await response.text();
+        let result: { ok?: boolean; error?: string };
+        try {
+          result = JSON.parse(responseText) as typeof result;
+        } catch {
+          throw new Error("Không thể lưu file ghi âm vào Drive. Hãy cập nhật lại Apps Script.");
         }
-        if (!result?.segments) throw new Error("Không thể xử lý file ghi âm.");
-        results.push({ language: result.language, segments: result.segments, keyPoints: result.keyPoints ?? [], apiCallsUsed: result.apiCallsUsed });
-        if (index < chunks.length - 1) {
-          const pauseSeconds = result.apiCallsUsed === 1 ? 15 : 65;
-          await waitForAudioQuota(pauseSeconds, (remaining) => setAudioProcessingStatus(`Đã xong đoạn ${index + 1}/${chunks.length} · đoạn tiếp theo sau ${remaining} giây`));
-        }
+        if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu file ghi âm vào Drive.");
       }
-
-      const segments = results.flatMap((result, index) => result.segments.map((segment) => ({
-        time: formatAudioTime(chunks[index].offsetSeconds + parseAudioTime(segment.time)),
-        text: segment.text,
-      })));
-      const keyPoints = combineKeyPoints(results);
 
       const audioNote: AudioNote = {
         fileName: file.name,
-        language: results.find((result) => result.language)?.language || "Tiếng Việt",
+        language: "Tiếng Việt",
         updatedAt: new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
-        segments,
-        keyPoints,
+        segments: [],
+        keyPoints: [],
+        chunks: [],
+        totalChunks: chunks.length,
+        completedChunks: 0,
+        status: "processing",
       };
-      const updatedRecord = { ...selectedRecord, audioNote };
-      const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-        ...yearFolder,
-        months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
-          ...monthFolder,
-          records: monthFolder.records.map((record) => record.id === recordId ? updatedRecord : record),
-        }),
-      });
-      persist(nextYears);
-      queueDriveSync(updatedRecord);
-      setNotice(chunks.length > 1 ? `Đã xử lý ${chunks.length} đoạn ghi âm, tổng hợp văn bản và ý chính.` : "Đã chuyển ghi âm thành văn bản và lưu ý chính.");
+      const checkpointRecord = { ...record, audioNote };
+      persistRecord(checkpointRecord, selectedYear, selectedMonth);
+      await syncRecordToDrive(checkpointRecord, selectedYear, selectedMonth, config);
+      const completedRecord = await processAudioCheckpoint(checkpointRecord, selectedYear, selectedMonth);
+      const total = completedRecord.audioNote?.totalChunks ?? chunks.length;
+      setNotice(`Đã xử lý và lưu đủ ${total}/${total} đoạn vào Excel.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể xử lý file ghi âm.");
+      setNotice(error instanceof Error ? error.message : "Không thể xử lý file ghi âm. Tiến độ đã hoàn thành vẫn được giữ lại.");
     } finally {
       setAudioProcessingId(null);
       setAudioProcessingStatus("");
@@ -794,6 +906,12 @@ export default function Home() {
   useEffect(() => () => {
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
   }, []);
+
+  const selectedAudioNote = selectedRecord?.audioNote;
+  const audioDisplayChunks = selectedAudioNote ? normalizeAudioNoteChunks(selectedAudioNote) : [];
+  const audioTotalChunks = selectedAudioNote?.totalChunks ?? audioDisplayChunks.length;
+  const audioCompletedChunks = selectedAudioNote?.completedChunks ?? audioDisplayChunks.length;
+  const hasPendingAudio = Boolean(selectedAudioNote && audioTotalChunks > audioCompletedChunks);
 
   return (
     <main className="crm-shell">
@@ -1020,28 +1138,37 @@ export default function Home() {
                 <div className="audio-information__heading">
                   <div>
                     <h3>6. Thông tin ghi âm</h3>
-                    <p>Nhập MP3, WAV, M4A, AAC, OGG hoặc FLAC. Bản ghi dài sẽ tự tách thành các đoạn nhỏ, xử lý lần lượt rồi tổng hợp văn bản và ý chính.</p>
+                    <p>File được lưu trong thư mục khách hàng. Mỗi đoạn xong sẽ ghi ngay vào Excel; nếu dừng giữa chừng, lần sau tiếp tục từ đoạn chưa làm.</p>
                   </div>
-                  <label className={`audio-import-button ${audioProcessingId === selectedRecord.id ? "audio-import-button--busy" : ""}`}>
-                    <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} disabled={audioProcessingId === selectedRecord.id} />
-                    {audioProcessingId === selectedRecord.id ? audioProcessingStatus || "Đang xử lý…" : "Import ghi âm"}
-                  </label>
+                  {audioProcessingId === selectedRecord.id ? (
+                    <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button>
+                  ) : hasPendingAudio ? (
+                    <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>
+                      Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}
+                    </button>
+                  ) : (
+                    <label className="audio-import-button">
+                      <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />
+                      Import ghi âm
+                    </label>
+                  )}
                 </div>
-                {selectedRecord.audioNote && (
+                {selectedAudioNote && (
                   <div className="audio-note">
-                    <p className="audio-note__meta">{selectedRecord.audioNote.fileName} · {selectedRecord.audioNote.language} · {selectedRecord.audioNote.updatedAt}</p>
-                    <h4>Ý chính</h4>
-                    {selectedRecord.audioNote.keyPoints.length > 0 ? (
-                      <ul>{selectedRecord.audioNote.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul>
-                    ) : <p className="audio-note__empty">Chưa rút được ý chính từ bản ghi âm này.</p>}
-                    {selectedRecord.audioNote.segments.length > 0 && (
-                      <details>
-                        <summary>Văn bản đã chuyển ({selectedRecord.audioNote.segments.length} đoạn)</summary>
-                        <div className="audio-transcript">
-                          {selectedRecord.audioNote.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}
+                    <p className="audio-note__meta">{selectedAudioNote.fileName} · {selectedAudioNote.language} · Đã hoàn thành {audioCompletedChunks}/{audioTotalChunks} đoạn · {selectedAudioNote.updatedAt}</p>
+                    {audioDisplayChunks.length ? audioDisplayChunks.map((chunk) => (
+                      <section className="audio-chunk" key={chunk.index}>
+                        <h4>Đoạn {chunk.index + 1}/{audioTotalChunks}</h4>
+                        <div className="audio-chunk__transcript">
+                          <strong>Nội dung đầy đủ</strong>
+                          {chunk.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}
                         </div>
-                      </details>
-                    )}
+                        <div className="audio-chunk__summary">
+                          <strong>Tóm tắt</strong>
+                          {chunk.keyPoints.length ? <ul>{chunk.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul> : <p>Chưa có ý chính cho đoạn này.</p>}
+                        </div>
+                      </section>
+                    )) : <p className="audio-note__empty">File ghi âm đã lưu vào Drive. Chưa có đoạn nào được xử lý.</p>}
                   </div>
                 )}
               </section>
