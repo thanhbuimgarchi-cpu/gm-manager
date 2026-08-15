@@ -1,4 +1,4 @@
-import { access, cp, mkdir, rm } from "node:fs/promises";
+import { access, cp, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { Plugin } from "vite";
 
@@ -29,7 +29,9 @@ export function sites(): Plugin {
       const hostingConfig = resolve(root, ".openai", "hosting.json");
       const drizzleSource = resolve(root, "drizzle");
 
-      await rm(outputDirectory, { recursive: true, force: true });
+      // This workspace is Dropbox-synced, which can temporarily lock the
+      // generated metadata directory. Update the generated files in place so
+      // an unrelated sync lock does not invalidate an otherwise valid build.
       await mkdir(outputDirectory, { recursive: true });
 
       if (await exists(hostingConfig)) {
