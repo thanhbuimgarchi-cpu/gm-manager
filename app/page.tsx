@@ -73,8 +73,16 @@ type WorkRecord = {
   createdAt: string;
   details: Record<string, string>;
   audioNote?: AudioNote;
+  designProgress?: DesignProgressRow[];
   functionalFloors?: FunctionalFloor[];
   functionalRows?: LegacyFunctionalRow[];
+};
+
+type DesignProgressRow = {
+  content: string;
+  plannedDate: string;
+  actualDate: string;
+  note: string;
 };
 
 type FunctionalRoom = {
@@ -100,6 +108,12 @@ type MonthFolder = {
 type YearFolder = {
   year: number;
   months: MonthFolder[];
+};
+
+type CustomerLocation = {
+  record: WorkRecord;
+  year: number;
+  month: number;
 };
 
 type DriveFolder = {
@@ -129,7 +143,7 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
 
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫", url: "https://drive.google.com/drive/folders/1KtXRW5p5tuY4qLC8q0hOG5dcKtnCfCu-" },
-  { label: "Tư vấn", icon: "⌂", url: "https://drive.google.com/drive/folders/1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4" },
+  { label: "Tư vấn", icon: "⌂", url: "https://drive.google.com/drive/folders/16ItUFlDizo1xfyJEAnXeHWbsot2r_Wep" },
   { label: "Thiết kế", icon: "▣", url: "https://drive.google.com/drive/folders/1DZ9x1xvDFj2C_1tgPw9hxXGWwxbgO7q5" },
   { label: "Dự toán", icon: "⌁", url: "https://drive.google.com/drive/folders/1loJbkEr_FT8iWf0Q4yFPKf6z4GmDJd9B" },
   { label: "Thi công", icon: "♧", url: "https://drive.google.com/drive/folders/1l8QbIOmsjUPxk7WSQP0rhvp9__I7fwyc" },
@@ -202,6 +216,25 @@ const systemFields: DetailField[] = [
 ];
 
 const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "Sân trước", "Sân sau", "Giếng trời", "Phòng thay đồ", "WC", "Sân phơi", "Sân thượng", "Phòng thờ", "Thang bộ", "Thang máy", "Phòng sinh hoạt chung", "Phòng xem phim", "Phòng xông hơi", "Phòng làm việc", "Phòng học", "Khu vực kinh doanh", "Phòng kho", "Phòng ngủ master", "WC master", "Phòng giúp việc"];
+
+const designProgressContents = [
+  "Tư vấn concept",
+  "Mặt bằng công năng",
+  "3D lần 1",
+  "3D lần 2",
+  "3D lần 3",
+  "Hồ sơ bổ kỹ thuật",
+  "Nghiệm thu và bàn giao",
+] as const;
+
+const createDesignProgress = (): DesignProgressRow[] => designProgressContents.map((content) => ({ content, plannedDate: "", actualDate: "", note: "" }));
+const normalizeDesignProgress = (record?: WorkRecord | null): DesignProgressRow[] => {
+  const existing = record?.designProgress ?? [];
+  return designProgressContents.map((content, index) => {
+    const row = existing.find((item) => item.content === content) ?? existing[index];
+    return { content, plannedDate: row?.plannedDate ?? "", actualDate: row?.actualDate ?? "", note: row?.note ?? "" };
+  });
+};
 
 const createFunctionalRoom = (): FunctionalRoom => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, room: "", quantity: "", description: "" });
 const createFunctionalFloor = (floor = "Tầng 1"): FunctionalFloor => ({ id: `floor-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, rooms: [createFunctionalRoom()] });
@@ -429,6 +462,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             name: record.name || localRecord?.name || record.details?.HVT || record.projectId,
             houseId: record.houseId || localRecord?.houseId || "",
             details: record.details ?? {},
+            designProgress: record.designProgress ?? localRecord?.designProgress ?? createDesignProgress(),
           };
         }),
       };
@@ -443,6 +477,8 @@ export default function Home() {
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
+  const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
+  const [personnelView, setPersonnelView] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [modalMonth, setModalMonth] = useState(now.month);
   const [modalYear, setModalYear] = useState(now.year);
@@ -460,10 +496,12 @@ export default function Home() {
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
   const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
+  const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const driveSyncTimer = useRef<number | null>(null);
+  const designSyncTimer = useRef<number | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -496,11 +534,38 @@ export default function Home() {
     const currentYear = getVietnamDate().year;
     return Array.from(new Set([...years.map((folder) => folder.year), ...Array.from({ length: 9 }, (_, index) => currentYear - 3 + index)])).sort((a, b) => a - b);
   }, [years]);
+  const customerLocations = useMemo<CustomerLocation[]>(() => years.flatMap((yearFolder) => yearFolder.months.flatMap((monthFolder, monthIndex) => (
+    monthFolder.records.map((record) => ({ record, year: yearFolder.year, month: monthIndex + 1 }))
+  ))).sort((a, b) => b.year - a.year || b.month - a.month || a.record.name.localeCompare(b.record.name, "vi")), [years]);
+  const customerSearchResults = useMemo(() => {
+    const term = normalizeSearchText(search.trim());
+    if (!term) return [];
+    return customerLocations.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)).slice(0, 12);
+  }, [customerLocations, search]);
+  const selectedCustomerLocation = customerLocations.find(({ record }) => record.projectId === selectedCustomerProjectId) ?? null;
   const visibleRecords = useMemo(() => {
-    const term = search.trim().toLowerCase();
     const records = activeMonthFolder?.records ?? [];
-    return term ? records.filter((record) => `${record.name} ${record.houseId ?? ""} ${record.projectId}`.toLowerCase().includes(term)) : records;
-  }, [activeMonthFolder, search]);
+    return selectedCustomerProjectId ? records.filter((record) => record.projectId === selectedCustomerProjectId) : [];
+  }, [activeMonthFolder, selectedCustomerProjectId]);
+
+  const selectCustomer = ({ record, year, month }: CustomerLocation) => {
+    setSelectedCustomerProjectId(record.projectId);
+    setSelectedYear(year);
+    setSelectedMonth(month);
+    setActiveFolder("Tư vấn");
+    setPersonnelView(false);
+    setSelectedRecordId(null);
+    setOpenMenuId(null);
+    setSearch("");
+  };
+
+  const returnToCustomerSearch = () => {
+    setSelectedCustomerProjectId(null);
+    setSelectedRecordId(null);
+    setOpenMenuId(null);
+    setActiveFolder("Tư vấn");
+    setSearch("");
+  };
 
   const persist = (nextYears: YearFolder[]) => {
     setYears(nextYears);
@@ -578,6 +643,7 @@ export default function Home() {
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
+      designProgress: createDesignProgress(),
       functionalFloors: [createFunctionalFloor()],
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
@@ -586,22 +652,38 @@ export default function Home() {
     });
     persist(nextYears);
     void syncRecordToDrive(record, modalYear, modalMonth);
+    void syncDesignProgressToDrive(record, modalYear, modalMonth);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
+    setSelectedCustomerProjectId(projectId);
+    setPersonnelView(false);
+    setActiveFolder("Tư vấn");
     setAddOpen(false);
     setNotice(`Đã tạo thư mục ${projectId} trong T${modalMonth}/${modalYear}`);
   };
 
   const deleteRecord = (id: string) => {
+    const deletedRecord = activeMonthFolder?.records.find((record) => record.id === id);
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : { ...monthFolder, records: monthFolder.records.filter((record) => record.id !== id) }),
     });
     persist(nextYears);
+    if (deletedRecord?.projectId === selectedCustomerProjectId) returnToCustomerSearch();
     setNotice("Đã xóa dữ liệu — danh sách được cập nhật ngay");
   };
 
   const selectedRecord = activeMonthFolder?.records.find((record) => record.id === selectedRecordId) ?? null;
+  const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
+  const designProgressRows = normalizeDesignProgress(activeCustomerRecord);
+
+  const updateDesignProgress = (rowIndex: number, key: keyof Omit<DesignProgressRow, "content">, value: string) => {
+    if (!activeCustomerRecord || !selectedCustomerLocation) return;
+    const nextRows = designProgressRows.map((row, index) => index === rowIndex ? { ...row, [key]: value } : row);
+    const updatedRecord = { ...activeCustomerRecord, designProgress: nextRows };
+    persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
+    queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
+  };
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
     setOpenMenuId(null);
@@ -863,6 +945,7 @@ export default function Home() {
     setDriveConfigOpen(false);
     setNotice("Đã kết nối Google Apps Script trên thiết bị này");
     if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
+    if (activeCustomerRecord) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
@@ -894,6 +977,36 @@ export default function Home() {
     }
   };
 
+  const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) {
+      setDriveConfigOpen(true);
+      return;
+    }
+    setSyncingDesignId(record.id);
+    try {
+      const response = await fetch("/api/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "sync-design-progress",
+          scriptUrl: config.scriptUrl,
+          token: config.token,
+          year,
+          month,
+          record: { ...record, designProgress: normalizeDesignProgress(record) },
+        }),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel tiến độ thiết kế kiến trúc.");
+      setNotice(`Đã cập nhật Tiến độ thiết kế kiến trúc ${record.projectId}.xlsx`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể đồng bộ tiến độ thiết kế kiến trúc.");
+    } finally {
+      setSyncingDesignId(null);
+    }
+  };
+
   const queueDriveSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
     if (!isDriveConnected) return;
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
@@ -903,8 +1016,18 @@ export default function Home() {
     }, 900);
   };
 
+  const queueDesignProgressSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+    if (!isDriveConnected) return;
+    if (designSyncTimer.current) window.clearTimeout(designSyncTimer.current);
+    designSyncTimer.current = window.setTimeout(() => {
+      designSyncTimer.current = null;
+      void syncDesignProgressToDrive(record, year, month);
+    }, 900);
+  };
+
   useEffect(() => () => {
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
+    if (designSyncTimer.current) window.clearTimeout(designSyncTimer.current);
   }, []);
 
   const selectedAudioNote = selectedRecord?.audioNote;
@@ -915,11 +1038,66 @@ export default function Home() {
 
   return (
     <main className="crm-shell">
+      {!selectedCustomerProjectId && (
+        <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
+          <header className="customer-gateway__header">
+            <div className="brand customer-gateway__brand">GM<span>-CRM</span></div>
+            <div className="customer-gateway__actions">
+              <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
+              <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
+              {!personnelView && <button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button>}
+            </div>
+          </header>
+
+          {personnelView ? (
+            <div className="personnel-placeholder">
+              <button className="gateway-back" onClick={() => setPersonnelView(false)}>← Quay lại tìm khách hàng</button>
+              <span className="personnel-placeholder__icon">♙</span>
+              <p className="eyebrow">GM-Manager</p>
+              <h1>Nhân lực</h1>
+              <p>Đây là khu vực riêng cho dữ liệu nhân lực. Giao diện chi tiết sẽ được xây dựng ở bước tiếp theo.</p>
+            </div>
+          ) : (
+            <div className="customer-gateway__body">
+              <p className="eyebrow">GM-Manager · Khách hàng</p>
+              <h1>Chọn khách hàng trước khi làm việc</h1>
+              <p className="customer-gateway__intro">Tìm theo tên khách hàng, mã nhà hoặc ID dự án. Sau khi chọn, toàn bộ Tư vấn, Thiết kế, Dự toán, Thi công, Nghiệm thu và Bảo hành sẽ đi theo đúng hồ sơ đó.</p>
+              <label className="customer-search">
+                <span>⌕</span>
+                <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm tên, mã nhà hoặc ID dự án…" aria-label="Tìm khách hàng" />
+              </label>
+
+              <div className="customer-search-results" aria-live="polite">
+                {!search.trim() ? (
+                  <div className="customer-search-empty"><span>⌕</span><p>Nhập thông tin để tìm khách hàng trong tất cả các năm và tháng.</p></div>
+                ) : customerSearchResults.length ? customerSearchResults.map((location) => (
+                  <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
+                    <span className="customer-result__folder">▰</span>
+                    <span className="customer-result__identity"><b>{location.record.name}</b><small>{location.record.projectId}{location.record.houseId ? ` · ${location.record.houseId}` : ""}</small></span>
+                    <span className="customer-result__date">T{location.month} / {location.year}</span>
+                    <span className="customer-result__arrow">→</span>
+                  </button>
+                )) : (
+                  <div className="customer-search-empty"><span>∅</span><p>Không tìm thấy khách hàng phù hợp.</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
+                )}
+              </div>
+
+              <button className="personnel-entry" onClick={() => setPersonnelView(true)}>
+                <span className="personnel-entry__icon">♙</span>
+                <span><b>Nhân lực</b><small>Mở khu vực quản lý nhân sự riêng</small></span>
+                <em>→</em>
+              </button>
+            </div>
+          )}
+          {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
+        </section>
+      )}
+
       <aside className="sidebar">
         <div className="brand">GM<span>-CRM</span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
-          {syncedDriveFolders.map((folder) => (
+          {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
             <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
               <span>{folder.label}</span>
@@ -942,7 +1120,10 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <label className="search-box"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customer..." aria-label="Search customer" /></label>
+          <button className="customer-context" onClick={returnToCustomerSearch}>
+            <span className="customer-context__back">←</span>
+            <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
+          </button>
           <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
         </header>
 
@@ -950,12 +1131,12 @@ export default function Home() {
           <section className="consulting-view">
             <div className="calendar-bar">
               <label>Tháng
-                <select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>
+                <select value={selectedMonth} disabled aria-label="Tháng của khách hàng đã chọn">
                   {monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}
                 </select>
               </label>
               <label>Năm
-                <select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>
+                <select value={selectedYear} disabled aria-label="Năm của khách hàng đã chọn">
                   {years.map((folder) => <option key={folder.year} value={folder.year}>{folder.year}</option>)}
                 </select>
               </label>
@@ -987,10 +1168,31 @@ export default function Home() {
               </div>
             </section>
           </section>
+        ) : activeFolder === "Thiết kế" ? (
+          <section className="design-progress-view">
+            <header className="design-progress-view__heading">
+              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế kiến trúc</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""}</span></div>
+              <div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
+            </header>
+            <div className="design-progress-table-wrap">
+              <table className="design-progress-table">
+                <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Ngày thực tế</th><th>Ghi chú</th></tr></thead>
+                <tbody>{designProgressRows.map((row, index) => (
+                  <tr key={row.content}>
+                    <td><b>{row.content}</b></td>
+                    <td><input value={row.plannedDate} onChange={(event) => updateDesignProgress(index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+                    <td><input value={row.actualDate} onChange={(event) => updateDesignProgress(index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
+                    <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+            <footer className="design-progress-view__footer"><span>File: Tiến độ thiết kế kiến trúc {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
+          </section>
         ) : (
           <section className="coming-soon">
             <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
-            <p>Khu vực này đã được liên kết với thư mục cùng tên trong GM-manager.</p><a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="add-button">Mở trên Drive ↗</a>
+            <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục cùng tên bên trong hồ sơ khách hàng này.</p><a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="add-button">Mở trên Drive ↗</a>
           </section>
         )}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}

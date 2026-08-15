@@ -8,6 +8,7 @@
  */
 
 const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
+const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 // Token is intentionally pre-set to the value configured in GM-CRM.
 const WEB_SYNC_TOKEN = "010101";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -33,6 +34,11 @@ function doPost(event) {
     lock.waitLock(30000);
     try {
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
+
+      if (payload.action === "sync-design-progress") {
+        const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month));
+        return json_({ ok: true, ...designResult });
+      }
 
       const result = exportCustomerWorkbook_(payload.record, Number(payload.year), Number(payload.month));
       return json_({ ok: true, ...result });
@@ -187,8 +193,10 @@ function loadConsultingWorkspace_() {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const yearsByNumber = {};
   const seenProjects = {};
-  // The new structure lives directly under GMmanager. Read it first so it wins
-  // when the same project still exists in the legacy T\u01b0 v\u1ea5n folder.
+  // Current structure: GM-Manager / Khach hang / year / month / project.
+  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  if (customers) collectCustomerWorkbooks_(customers, yearsByNumber, seenProjects);
+  // Keep read-only fallbacks so older deployments never hide existing records.
   collectCustomerWorkbooks_(root, yearsByNumber, seenProjects);
   const legacyConsulting = findFolder_(root, "T\u01b0 v\u1ea5n");
   if (legacyConsulting) collectCustomerWorkbooks_(legacyConsulting, yearsByNumber, seenProjects);
@@ -224,7 +232,7 @@ function collectCustomerWorkbooks_(container, yearsByNumber, seenProjects) {
         if (seenProjects[projectKey]) continue;
         const workbook = latestWorkbook_(customerFolder);
         if (!workbook) continue;
-        months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId));
+        months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId, customerFolder));
         seenProjects[projectKey] = true;
       }
     }
@@ -242,7 +250,20 @@ function latestWorkbook_(folder) {
   return latest;
 }
 
-function recordFromWorkbook_(file, projectId) {
+function latestDesignProgressWorkbook_(customerFolder) {
+  const designFolder = findFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
+  if (!designFolder) return null;
+  const files = designFolder.getFiles();
+  let latest = null;
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!/^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac.*\.xlsx$/i.test(file.getName())) continue;
+    if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
+  }
+  return latest;
+}
+
+function recordFromWorkbook_(file, projectId, customerFolder) {
   const sheets = readXlsxSheets_(file);
   const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
   const details = {};
@@ -312,6 +333,14 @@ function recordFromWorkbook_(file, projectId) {
     details: details,
     functionalFloors: Object.keys(floorsByName).map(function(name) { return floorsByName[name]; }),
   };
+  const designWorkbook = latestDesignProgressWorkbook_(customerFolder);
+  if (designWorkbook) {
+    const designSheets = readXlsxSheets_(designWorkbook);
+    const designRows = designSheets["Ti\u1ebfn \u0111\u1ed9"] || designSheets[Object.keys(designSheets)[0]] || [];
+    record.designProgress = designRows.slice(1).filter(function(row) { return String(row[0] || "").trim(); }).map(function(row) {
+      return { content: String(row[0] || ""), plannedDate: String(row[1] || ""), actualDate: String(row[2] || ""), note: String(row[3] || "") };
+    });
+  }
   if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
       fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
@@ -425,6 +454,35 @@ function exportCustomerWorkbook_(record, year, month) {
   }
 }
 
+function exportDesignProgressWorkbook_(record, year, month) {
+  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const designFolder = getOrCreateFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
+  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac " + record.projectId + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM design progress temporary " + record.projectId);
+  try {
+    const sheet = spreadsheet.getSheets()[0];
+    sheet.setName("Ti\u1ebfn \u0111\u1ed9");
+    const rows = (record.designProgress || []).map(function(row) {
+      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.note || "")];
+    });
+    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ghi ch\u00fa"]].concat(rows);
+    sheet.getRange(1, 1, values.length, 4).setValues(values).setVerticalAlignment("top").setWrap(true);
+    sheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(1, 220);
+    sheet.setColumnWidth(2, 125);
+    sheet.setColumnWidth(3, 125);
+    sheet.setColumnWidth(4, 420);
+    sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
+    const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
+    trashFilesByName_(designFolder, fileName);
+    const xlsxFile = designFolder.createFile(xlsxBlob);
+    return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: designFolder.getUrl(), fileName: fileName };
+  } finally {
+    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+  }
+}
+
 function writeWorkbook_(spreadsheet, record) {
   const sheetDefinitions = [
     ["0. GM-CRM", ["Kh\u00f3a", "Gi\u00e1 tr\u1ecb"], null],
@@ -523,7 +581,9 @@ function getOrCreateFolder_(parent, name) {
 
 function getCustomerFolder_(year, month, projectId, createMissing) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  let yearFolder = createMissing ? getOrCreateFolder_(root, String(year)) : findFolder_(root, String(year));
+  const customers = createMissing ? getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME) : findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  if (!customers) return null;
+  let yearFolder = createMissing ? getOrCreateFolder_(customers, String(year)) : findFolder_(customers, String(year));
   if (!yearFolder) return null;
   let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return null;
