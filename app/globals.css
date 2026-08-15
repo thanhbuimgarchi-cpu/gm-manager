@@ -26,7 +26,7 @@
 @media (max-width: 620px) { .audio-information__heading { flex-direction: column; }.audio-import-button { width: 100%; }.audio-information__heading p { max-width: none; } }
 
 /* Timeline chart: horizontal axis is time; vertical axis is the work sequence. */
-.schedule-charts { grid-template-columns: minmax(0, 1fr); }
+.schedule-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .schedule-timeline { min-width: 0; padding: 16px; border: 1px solid #e1dfd9; border-radius: 8px; background: #fff; }
 .schedule-timeline > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .schedule-timeline h3 { margin: 0; color: #37342f; font-size: 12px; }
