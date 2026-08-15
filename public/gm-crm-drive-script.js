@@ -527,7 +527,18 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
   if (!yearFolder) return null;
   let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return null;
-  return createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+  const customerFolder = createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+  if (customerFolder && createMissing) ensureProjectFolders_(customerFolder);
+  return customerFolder;
+}
+
+function ensureProjectFolders_(customerFolder) {
+  const consulting = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
+  ["Thi c\u00f4ng", "Thi\u1ebft k\u1ebf", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh", "D\u1ef1 to\u00e1n"].forEach(function(name) {
+    getOrCreateFolder_(customerFolder, name);
+  });
+  const dataFolder = getOrCreateFolder_(consulting, "DataID");
+  getOrCreateFolder_(dataFolder, "Ghi \u00e2m");
 }
 
 function getLegacyCustomerFolder_(year, month, projectId) {
@@ -543,7 +554,9 @@ function getLegacyCustomerFolder_(year, month, projectId) {
 function getAudioFolder_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
   if (!customerFolder) return null;
-  const dataFolder = createMissing ? getOrCreateFolder_(customerFolder, "DataID") : findFolder_(customerFolder, "DataID");
+  const consulting = createMissing ? getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n") : findFolder_(customerFolder, "T\u01b0 v\u1ea5n");
+  if (!consulting) return null;
+  const dataFolder = createMissing ? getOrCreateFolder_(consulting, "DataID") : findFolder_(consulting, "DataID");
   if (!dataFolder) return null;
   return createMissing ? getOrCreateFolder_(dataFolder, "Ghi \u00e2m") : findFolder_(dataFolder, "Ghi \u00e2m");
 }
