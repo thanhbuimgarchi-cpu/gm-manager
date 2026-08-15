@@ -743,6 +743,20 @@ export default function Home() {
     queueDriveSync(updatedRecord);
   };
 
+  const updateRecordName = (value: string) => {
+    if (!selectedRecord) return;
+    const updatedRecord = { ...selectedRecord, name: value };
+    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
+      ...yearFolder,
+      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
+        ...monthFolder,
+        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
+      }),
+    });
+    persist(nextYears);
+    queueDriveSync(updatedRecord);
+  };
+
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
     if (!startingRecord.audioNote) throw new Error("Chưa có tiến độ ghi âm để tiếp tục.");
     const config = defaultDriveSyncConfig;
@@ -1262,7 +1276,7 @@ export default function Home() {
         <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
           <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
             <header className="record-detail__heading">
-              <div><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.projectId}</h2><span>{selectedRecord.name}</span></div>
+              <div className="record-detail__identity"><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /></div>
               <button className="dialog-close" onClick={() => setSelectedRecordId(null)} aria-label="Đóng">×</button>
             </header>
             <div className="detail-scroll">
