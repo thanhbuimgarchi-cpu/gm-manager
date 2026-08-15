@@ -79,6 +79,8 @@ type WorkRecord = {
 };
 
 type DesignProgressRow = {
+  id: string;
+  isCustom: boolean;
   content: string;
   plannedDate: string;
   actualDate: string;
@@ -227,14 +229,208 @@ const designProgressContents = [
   "Nghiệm thu và bàn giao",
 ] as const;
 
-const createDesignProgress = (): DesignProgressRow[] => designProgressContents.map((content) => ({ content, plannedDate: "", actualDate: "", note: "" }));
+type DesignDateKey = "plannedDate" | "actualDate";
+
+const isFixedDesignContent = (content: string) => designProgressContents.some((item) => item === content);
+const createFixedDesignRow = (content: string, index: number): DesignProgressRow => ({
+  id: `design-fixed-${index}`,
+  isCustom: false,
+  content,
+  plannedDate: "",
+  actualDate: "",
+  note: "",
+});
+const createCustomDesignRow = (): DesignProgressRow => ({
+  id: `design-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  isCustom: true,
+  content: "",
+  plannedDate: "",
+  actualDate: "",
+  note: "",
+});
+const createDesignProgress = (): DesignProgressRow[] => designProgressContents.map(createFixedDesignRow);
 const normalizeDesignProgress = (record?: WorkRecord | null): DesignProgressRow[] => {
   const existing = record?.designProgress ?? [];
-  return designProgressContents.map((content, index) => {
-    const row = existing.find((item) => item.content === content) ?? existing[index];
-    return { content, plannedDate: row?.plannedDate ?? "", actualDate: row?.actualDate ?? "", note: row?.note ?? "" };
+  if (!existing.length) return createDesignProgress();
+
+  const normalized = existing.map((row, index) => {
+    const isCustom = row.isCustom ?? !isFixedDesignContent(row.content ?? "");
+    return {
+      id: row.id || `design-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
+      isCustom,
+      content: row.content ?? "",
+      plannedDate: row.plannedDate ?? "",
+      actualDate: row.actualDate ?? "",
+      note: row.note ?? "",
+    };
   });
+  const existingFixed = new Set(normalized.filter((row) => !row.isCustom).map((row) => row.content));
+  const missingFixed = designProgressContents
+    .map(createFixedDesignRow)
+    .filter((row) => !existingFixed.has(row.content));
+  return [...normalized, ...missingFixed];
 };
+
+const formatDesignDateInput = (value: string) => {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+
+const parseDesignDate = (value: string) => {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value.trim());
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return { date, dayNumber: Math.floor(date.getTime() / 86_400_000) };
+};
+
+const hasSequentialDesignDates = (rows: DesignProgressRow[], key: DesignDateKey) => {
+  let previousDay: number | null = null;
+  for (const row of rows) {
+    const parsed = parseDesignDate(row[key]);
+    if (!parsed) continue;
+    if (previousDay !== null && parsed.dayNumber < previousDay) return false;
+    previousDay = parsed.dayNumber;
+  }
+  return true;
+};
+
+const designDateStatus = (row: DesignProgressRow) => {
+  const planned = parseDesignDate(row.plannedDate);
+  const actual = parseDesignDate(row.actualDate);
+  if (!planned || !actual) return "unpaired";
+  if (actual.dayNumber > planned.dayNumber) return "late";
+  if (actual.dayNumber < planned.dayNumber) return "early";
+  return "on-time";
+};
+
+const average = (values: number[]) => values.length ? values.reduce((total, value) => total + value, 0) / values.length : 0;
+
+const analyzeDesignProgress = (rows: DesignProgressRow[]) => {
+  const plannedRows = rows.map((row) => ({ row, parsed: parseDesignDate(row.plannedDate) })).filter((item) => item.parsed);
+  const actualRows = rows.map((row) => ({ row, parsed: parseDesignDate(row.actualDate) })).filter((item) => item.parsed);
+  const paired = rows.map((row) => {
+    const planned = parseDesignDate(row.plannedDate);
+    const actual = parseDesignDate(row.actualDate);
+    return planned && actual ? { row, variance: actual.dayNumber - planned.dayNumber } : null;
+  }).filter((item): item is { row: DesignProgressRow; variance: number } => Boolean(item));
+  const current = getVietnamDate();
+  const today = Math.floor(Date.UTC(current.year, current.month - 1, current.day) / 86_400_000);
+  const overdue = rows.filter((row) => {
+    const planned = parseDesignDate(row.plannedDate);
+    return planned && planned.dayNumber < today && !parseDesignDate(row.actualDate);
+  });
+  const late = paired.filter((item) => item.variance > 0);
+  const early = paired.filter((item) => item.variance < 0);
+  const onTime = paired.filter((item) => item.variance === 0);
+  const averageVariance = average(paired.map((item) => item.variance));
+  const worst = [...paired].sort((a, b) => b.variance - a.variance)[0];
+  const midpoint = Math.max(1, Math.floor(paired.length / 2));
+  const firstTrend = average(paired.slice(0, midpoint).map((item) => item.variance));
+  const lastTrend = average(paired.slice(midpoint).map((item) => item.variance));
+  const trendDelta = lastTrend - firstTrend;
+  const nextPlanned = plannedRows
+    .filter(({ row, parsed }) => parsed && parsed.dayNumber >= today && !parseDesignDate(row.actualDate))
+    .sort((a, b) => (a.parsed?.dayNumber ?? 0) - (b.parsed?.dayNumber ?? 0))[0];
+
+  const coverageLine = plannedRows.length
+    ? `Đã có ngày thực tế cho ${paired.length}/${plannedRows.length} mốc có kế hoạch; ${overdue.length} mốc đã quá hạn nhưng chưa ghi nhận hoàn thành.`
+    : "Chưa có ngày dự kiến; cần nhập lịch cơ sở để bắt đầu đo chênh lệch tiến độ.";
+  const varianceLine = paired.length
+    ? `Kết quả hiện tại: ${late.length} mốc chậm, ${onTime.length} mốc đúng hạn, ${early.length} mốc sớm; chênh lệch trung bình ${averageVariance > 0 ? `chậm ${averageVariance.toFixed(1)}` : averageVariance < 0 ? `sớm ${Math.abs(averageVariance).toFixed(1)}` : "0"} ngày.`
+    : "Chưa có cặp ngày dự kiến–thực tế hoàn chỉnh để tính độ trễ trung bình.";
+  const worstLine = worst
+    ? worst.variance > 0
+      ? `Mốc chậm nhất là “${worst.row.content || "Chưa đặt tên"}”, muộn ${worst.variance} ngày so với kế hoạch.`
+      : `Chưa có mốc hoàn thành muộn; mốc có biên độ thấp nhất là “${worst.row.content || "Chưa đặt tên"}” (${Math.abs(worst.variance)} ngày sớm).`
+    : "Chưa xác định được mốc chậm nhất vì dữ liệu thực tế còn thiếu.";
+  const trendLine = paired.length >= 4
+    ? Math.abs(trendDelta) < 1
+      ? "Độ lệch ở nửa sau gần như không đổi so với nửa đầu; xu hướng tiến độ đang ổn định."
+      : trendDelta > 0
+        ? `Độ trễ trung bình ở nửa sau tăng ${trendDelta.toFixed(1)} ngày; xu hướng đang xấu đi và cần tìm nguyên nhân ở các mốc gần đây.`
+        : `Độ trễ trung bình ở nửa sau giảm ${Math.abs(trendDelta).toFixed(1)} ngày; tiến độ đang có dấu hiệu phục hồi.`
+    : "Cần ít nhất 4 mốc có đủ hai ngày để đánh giá xu hướng trễ tăng hay giảm một cách hữu ích.";
+  const actionLine = overdue.length
+    ? `Ưu tiên cập nhật hoặc xử lý mốc “${overdue[0].content || "Chưa đặt tên"}”; đây là mốc quá hạn chưa có ngày thực tế.`
+    : nextPlanned
+      ? `Mốc kế tiếp cần theo dõi là “${nextPlanned.row.content || "Chưa đặt tên"}” vào ${nextPlanned.row.plannedDate}.`
+      : actualRows.length && paired.length === plannedRows.length
+        ? "Các mốc có kế hoạch đã được ghi nhận; nên xác nhận nguyên nhân và hành động khắc phục cho mọi mốc màu đỏ."
+        : "Hãy hoàn thiện ngày dự kiến và ngày thực tế để hệ thống đưa ra cảnh báo hành động cụ thể.";
+  return [coverageLine, varianceLine, worstLine, trendLine, actionLine];
+};
+
+const formatTimelineDate = (day: number) => new Date(day * 86_400_000).toLocaleDateString("vi-VN", { timeZone: "UTC", day: "2-digit", month: "2-digit" });
+const shortenTimelineLabel = (value: string, maximum = 28) => value.length > maximum ? `${value.slice(0, maximum - 1)}…` : value;
+
+function DesignTimelineChart({ rows, dateKey, title }: { rows: DesignProgressRow[]; dateKey: DesignDateKey; title: string }) {
+  const timelineRows = rows.map((row) => ({
+    row,
+    selected: parseDesignDate(row[dateKey]),
+  }));
+  const allDays = rows.flatMap((row) => [parseDesignDate(row.plannedDate)?.dayNumber, parseDesignDate(row.actualDate)?.dayNumber]).filter((day): day is number => typeof day === "number");
+  const datedCount = timelineRows.filter((item) => item.selected).length;
+
+  if (!datedCount || !allDays.length) {
+    return <article className="schedule-timeline schedule-timeline--empty"><div><h3>{title}</h3><p>Nhập {dateKey === "plannedDate" ? "ngày dự kiến" : "ngày thực tế"} để hiển thị đồ thị với trục thời gian và trục công việc.</p></div></article>;
+  }
+
+  const firstDay = Math.min(...allDays);
+  const lastDay = Math.max(...allDays);
+  const span = Math.max(1, lastDay - firstDay);
+  const dayPadding = Math.max(1, Math.round(span * 0.07));
+  const minimum = firstDay - dayPadding;
+  const maximum = lastDay + dayPadding;
+  const totalDays = Math.max(1, maximum - minimum);
+  const chartWidth = 960;
+  const chartHeight = Math.max(300, timelineRows.length * 52 + 112);
+  const margins = { top: 30, right: 34, bottom: 64, left: 205 };
+  const plotWidth = chartWidth - margins.left - margins.right;
+  const plotHeight = chartHeight - margins.top - margins.bottom;
+  const xForDay = (day: number) => margins.left + ((day - minimum) / totalDays) * plotWidth;
+  const yForIndex = (index: number) => timelineRows.length === 1
+    ? margins.top + plotHeight / 2
+    : margins.top + (index / (timelineRows.length - 1)) * plotHeight;
+  const tickCount = Math.min(6, Math.max(2, span + 1));
+  const tickDays = Array.from({ length: tickCount }, (_, index) => minimum + (totalDays * index) / (tickCount - 1));
+  const selectedPoints = timelineRows.flatMap(({ selected }, index) => selected ? [{ x: xForDay(selected.dayNumber), y: yForIndex(index) }] : []);
+
+  return <article className="schedule-timeline">
+    <header><div><h3>{title}</h3><p>Trục ngang: thời gian · Trục dọc: công việc</p></div><span>{datedCount}/{timelineRows.length} mốc</span></header>
+    <div className="schedule-timeline__canvas" role="img" aria-label={`${title}, trục ngang là thời gian và trục dọc là công việc`}>
+      <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="xMinYMin meet">
+        <text className="schedule-timeline__axis-title" x={margins.left + plotWidth / 2} y={chartHeight - 12} textAnchor="middle">Thời gian</text>
+        <text className="schedule-timeline__axis-title" transform={`translate(22 ${margins.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">Công việc</text>
+        {tickDays.map((day, index) => <g key={`tick-${index}`}>
+          <line className="schedule-timeline__vertical-grid" x1={xForDay(day)} x2={xForDay(day)} y1={margins.top} y2={margins.top + plotHeight} />
+          <text className="schedule-timeline__tick" x={xForDay(day)} y={chartHeight - 33} textAnchor="middle">{formatTimelineDate(day)}</text>
+        </g>)}
+        {timelineRows.map(({ row }, index) => {
+          const y = yForIndex(index);
+          const label = row.content || "Chưa đặt tên";
+          return <g key={row.id}>
+            <line className="schedule-timeline__horizontal-grid" x1={margins.left} x2={margins.left + plotWidth} y1={y} y2={y} />
+            <text className="schedule-timeline__work-label" x={margins.left - 16} y={y + 3} textAnchor="end"><title>{label}</title>{shortenTimelineLabel(label)}</text>
+          </g>;
+        })}
+        <line className="schedule-timeline__axis" x1={margins.left} x2={margins.left + plotWidth} y1={margins.top + plotHeight} y2={margins.top + plotHeight} />
+        <line className="schedule-timeline__axis" x1={margins.left} x2={margins.left} y1={margins.top} y2={margins.top + plotHeight} />
+        {selectedPoints.length > 1 && <polyline className={`schedule-timeline__line schedule-timeline__line--${dateKey === "plannedDate" ? "planned" : "actual"}`} points={selectedPoints.map((point) => `${point.x},${point.y}`).join(" ")} />}
+        {timelineRows.map(({ row, selected }, index) => selected && <circle key={`point-${dateKey}-${row.id}`} className={`schedule-timeline__point schedule-timeline__point--${dateKey === "plannedDate" ? "planned" : designDateStatus(row)}`} cx={xForDay(selected.dayNumber)} cy={yForIndex(index)} r="5"><title>{`${row.content || "Chưa đặt tên"}: ${dateKey === "plannedDate" ? "dự kiến" : "thực tế"} ${row[dateKey]}`}</title></circle>)}
+      </svg>
+    </div>
+    <footer>{dateKey === "plannedDate"
+      ? <span><i className="is-planned" /> Ngày dự kiến</span>
+      : <><span><i className="is-late" /> Chậm</span><span><i className="is-early" /> Sớm</span><span><i className="is-on-time" /> Đúng hạn</span><span><i className="is-actual" /> Chưa đủ ngày để so sánh</span></>}
+    </footer>
+  </article>;
+}
 
 const createFunctionalRoom = (): FunctionalRoom => ({ id: `room-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, room: "", quantity: "", description: "" });
 const createFunctionalFloor = (floor = "Tầng 1"): FunctionalFloor => ({ id: `floor-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, floor, rooms: [createFunctionalRoom()] });
@@ -679,13 +875,50 @@ export default function Home() {
   const selectedRecord = activeMonthFolder?.records.find((record) => record.id === selectedRecordId) ?? null;
   const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
   const designProgressRows = normalizeDesignProgress(activeCustomerRecord);
+  const designScheduleAnalysis = analyzeDesignProgress(designProgressRows);
 
-  const updateDesignProgress = (rowIndex: number, key: keyof Omit<DesignProgressRow, "content">, value: string) => {
+  const commitDesignProgressRows = (nextRows: DesignProgressRow[]) => {
     if (!activeCustomerRecord || !selectedCustomerLocation) return;
-    const nextRows = designProgressRows.map((row, index) => index === rowIndex ? { ...row, [key]: value } : row);
     const updatedRecord = { ...activeCustomerRecord, designProgress: nextRows };
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
     queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
+  };
+
+  const updateDesignProgress = (rowIndex: number, key: "content" | DesignDateKey | "note", value: string) => {
+    let nextValue = value;
+    if (key === "plannedDate" || key === "actualDate") {
+      nextValue = formatDesignDateInput(value);
+      if (nextValue.length === 10 && !parseDesignDate(nextValue)) {
+        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 12/04/2026.");
+        return;
+      }
+    }
+    const nextRows = designProgressRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue } : row);
+    if ((key === "plannedDate" || key === "actualDate") && nextValue.length === 10 && !hasSequentialDesignDates(nextRows, key)) {
+      setNotice(`${key === "plannedDate" ? "Ngày dự kiến" : "Ngày thực tế"} phải tăng dần theo thứ tự từ trên xuống.`);
+      return;
+    }
+    commitDesignProgressRows(nextRows);
+  };
+
+  const addDesignProgressRow = () => commitDesignProgressRows([...designProgressRows, createCustomDesignRow()]);
+
+  const deleteDesignProgressRow = (rowIndex: number) => {
+    const row = designProgressRows[rowIndex];
+    if (!row?.isCustom) return;
+    commitDesignProgressRows(designProgressRows.filter((_, index) => index !== rowIndex));
+  };
+
+  const moveDesignProgressRow = (rowIndex: number, direction: -1 | 1) => {
+    const destination = rowIndex + direction;
+    if (destination < 0 || destination >= designProgressRows.length) return;
+    const nextRows = [...designProgressRows];
+    [nextRows[rowIndex], nextRows[destination]] = [nextRows[destination], nextRows[rowIndex]];
+    if (!hasSequentialDesignDates(nextRows, "plannedDate") || !hasSequentialDesignDates(nextRows, "actualDate")) {
+      setNotice("Không thể đổi vị trí vì sẽ làm thứ tự ngày bị lùi. Hãy điều chỉnh ngày trước.");
+      return;
+    }
+    commitDesignProgressRows(nextRows);
   };
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
@@ -1194,22 +1427,43 @@ export default function Home() {
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-progress-view">
             <header className="design-progress-view__heading">
-              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế kiến trúc</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""}</span></div>
+              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế kiến trúc</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""} · Ngày tự định dạng dd/mm/yyyy</span></div>
               <div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
             </header>
             <div className="design-progress-table-wrap">
               <table className="design-progress-table">
                 <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Ngày thực tế</th><th>Ghi chú</th></tr></thead>
                 <tbody>{designProgressRows.map((row, index) => (
-                  <tr key={row.content}>
-                    <td><b>{row.content}</b></td>
-                    <td><input value={row.plannedDate} onChange={(event) => updateDesignProgress(index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-                    <td><input value={row.actualDate} onChange={(event) => updateDesignProgress(index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
+                  <tr key={row.id}>
+                    <td><div className="design-progress-content">
+                      {row.isCustom
+                        ? <GrowingTextarea value={row.content} onChange={(event) => updateDesignProgress(index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
+                        : <b>{row.content}</b>}
+                      <span className="design-progress-content__actions">
+                        <button type="button" onClick={() => moveDesignProgressRow(index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
+                        <button type="button" onClick={() => moveDesignProgressRow(index, 1)} disabled={index === designProgressRows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
+                        {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
+                      </span>
+                    </div></td>
+                    <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+                    <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
                     <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
                   </tr>
                 ))}</tbody>
               </table>
+              <button type="button" className="design-progress-add-row" onClick={addDesignProgressRow}><span>＋</span> Thêm dòng tiến độ</button>
             </div>
+            <section className="design-progress-insights">
+              <div className="design-progress-insights__heading"><div><p className="eyebrow">So sánh lịch</p><h2>Đồ thị kế hoạch và thực tế</h2></div><div className="schedule-legend"><span><i className="is-late" /> Chậm</span><span><i className="is-early" /> Sớm</span><span><i className="is-on-time" /> Bằng kế hoạch</span></div></div>
+              <div className="schedule-charts">
+                <DesignTimelineChart rows={designProgressRows} dateKey="plannedDate" title="Đồ thị ngày dự kiến" />
+                <DesignTimelineChart rows={designProgressRows} dateKey="actualDate" title="Đồ thị ngày thực tế" />
+              </div>
+              <article className="schedule-analysis">
+                <header><p className="eyebrow">Phân tích tự động</p><h3>5 nhận xét tiến độ</h3><span>Dựa trên chênh lệch từng mốc, không thay thế phân tích đường găng.</span></header>
+                <ol>{designScheduleAnalysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
+              </article>
+            </section>
             <footer className="design-progress-view__footer"><span>File: Tiến độ thiết kế kiến trúc {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
           </section>
         ) : (

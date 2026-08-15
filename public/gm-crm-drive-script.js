@@ -337,8 +337,20 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   if (designWorkbook) {
     const designSheets = readXlsxSheets_(designWorkbook);
     const designRows = designSheets["Ti\u1ebfn \u0111\u1ed9"] || designSheets[Object.keys(designSheets)[0]] || [];
-    record.designProgress = designRows.slice(1).filter(function(row) { return String(row[0] || "").trim(); }).map(function(row) {
-      return { content: String(row[0] || ""), plannedDate: String(row[1] || ""), actualDate: String(row[2] || ""), note: String(row[3] || "") };
+    const fixedDesignContents = ["T\u01b0 v\u1ea5n concept", "M\u1eb7t b\u1eb1ng c\u00f4ng n\u0103ng", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"];
+    record.designProgress = designRows.slice(1).filter(function(row) {
+      return row.slice(0, 6).some(function(value) { return String(value || "").trim(); });
+    }).map(function(row, index) {
+      const content = String(row[0] || "");
+      const customCell = String(row[5] || "").toLowerCase();
+      return {
+        id: String(row[4] || ("design-drive-" + projectId + "-" + index)),
+        isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedDesignContents.indexOf(content) === -1,
+        content: content,
+        plannedDate: String(row[1] || ""),
+        actualDate: String(row[2] || ""),
+        note: String(row[3] || ""),
+      };
     });
   }
   if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
@@ -463,16 +475,17 @@ function exportDesignProgressWorkbook_(record, year, month) {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Ti\u1ebfn \u0111\u1ed9");
     const rows = (record.designProgress || []).map(function(row) {
-      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.note || "")];
+      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false"];
     });
-    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ghi ch\u00fa"]].concat(rows);
-    sheet.getRange(1, 1, values.length, 4).setValues(values).setVerticalAlignment("top").setWrap(true);
-    sheet.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
+    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh"]].concat(rows);
+    sheet.getRange(1, 1, values.length, 6).setValues(values).setVerticalAlignment("top").setWrap(true);
+    sheet.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
     sheet.setFrozenRows(1);
     sheet.setColumnWidth(1, 220);
     sheet.setColumnWidth(2, 125);
     sheet.setColumnWidth(3, 125);
     sheet.setColumnWidth(4, 420);
+    sheet.hideColumns(5, 2);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(designFolder, fileName);
