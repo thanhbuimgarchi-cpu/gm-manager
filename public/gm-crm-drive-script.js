@@ -99,16 +99,16 @@ function storeAudioChunk_(payload) {
     throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u \u0111o\u1ea1n ghi \u00e2m.");
   }
 
-  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const audioFolder = getAudioFolder_(year, month, projectId, true);
   const prefix = "Ghi \u00e2m " + projectId + " - ph\u1ea7n ";
-  if (chunkIndex === 0) trashFilesByPrefix_(customerFolder, prefix);
+  if (chunkIndex === 0) trashFilesByPrefix_(audioFolder, prefix);
   const extensionMatch = /\.([a-z0-9]{1,5})$/i.exec(String(audio.fileName || ""));
   const extension = extensionMatch ? extensionMatch[1].toLowerCase() : audio.mimeType === "audio/mpeg" ? "mp3" : "wav";
   const fileName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + "." + extension;
-  trashFilesByName_(customerFolder, fileName);
+  trashFilesByName_(audioFolder, fileName);
   const blob = Utilities.newBlob(Utilities.base64Decode(audio.data), audio.mimeType, fileName);
-  const file = customerFolder.createFile(blob);
-  return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName, folderUrl: customerFolder.getUrl() };
+  const file = audioFolder.createFile(blob);
+  return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName, folderUrl: audioFolder.getUrl() };
 }
 
 function processStoredAudioChunk_(payload) {
@@ -120,18 +120,11 @@ function processStoredAudioChunk_(payload) {
   if (!year || month < 1 || month > 12 || !projectId || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
     throw new Error("Thi\u1ebfu th\u00f4ng tin \u0111o\u1ea1n ghi \u00e2m c\u1ea7n x\u1eed l\u00fd.");
   }
-  const customerFolder = getCustomerFolder_(year, month, projectId, false);
-  if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c kh\u00e1ch h\u00e0ng tr\u00ean Drive.");
   const baseName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + ".";
-  const files = customerFolder.getFiles();
-  let audioFile = null;
-  while (files.hasNext()) {
-    const candidate = files.next();
-    if (candidate.getName().indexOf(baseName) === 0) {
-      audioFile = candidate;
-      break;
-    }
-  }
+  const audioFolder = getAudioFolder_(year, month, projectId, false);
+  let audioFile = findFileByPrefix_(audioFolder, baseName);
+  // Continue recordings started with the previous T\u01b0 v\u1ea5n/year/month layout.
+  if (!audioFile) audioFile = findFileByPrefix_(getLegacyCustomerFolder_(year, month, projectId), baseName);
   if (!audioFile) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y \u0111o\u1ea1n ghi \u00e2m " + (chunkIndex + 1) + "/" + totalChunks + " tr\u00ean Drive.");
   const blob = audioFile.getBlob();
   const result = processAudioInsight_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
@@ -192,16 +185,31 @@ function splitTranscript_(text) {
 
 function loadConsultingWorkspace_() {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  const consulting = findFolder_(root, "T\u01b0 v\u1ea5n");
-  if (!consulting) return { ok: true, years: [] };
+  const yearsByNumber = {};
+  const seenProjects = {};
+  // The new structure lives directly under GMmanager. Read it first so it wins
+  // when the same project still exists in the legacy T\u01b0 v\u1ea5n folder.
+  collectCustomerWorkbooks_(root, yearsByNumber, seenProjects);
+  const legacyConsulting = findFolder_(root, "T\u01b0 v\u1ea5n");
+  if (legacyConsulting) collectCustomerWorkbooks_(legacyConsulting, yearsByNumber, seenProjects);
+  const years = Object.keys(yearsByNumber).map(function(year) { return yearsByNumber[year]; });
+  years.sort(function(a, b) { return a.year - b.year; });
+  return { ok: true, years: years };
+}
 
-  const years = [];
-  const yearFolders = consulting.getFolders();
+function collectCustomerWorkbooks_(container, yearsByNumber, seenProjects) {
+  const yearFolders = container.getFolders();
   while (yearFolders.hasNext()) {
     const yearFolder = yearFolders.next();
     const yearName = yearFolder.getName();
     if (yearName.indexOf("-") === 0 || !/^\d{4}$/.test(yearName)) continue;
-    const months = Array.from({ length: 12 }, function(_, index) { return { label: "T" + (index + 1), records: [] }; });
+    if (!yearsByNumber[yearName]) {
+      yearsByNumber[yearName] = {
+        year: Number(yearName),
+        months: Array.from({ length: 12 }, function(_, index) { return { label: "T" + (index + 1), records: [] }; }),
+      };
+    }
+    const months = yearsByNumber[yearName].months;
     const monthFolders = yearFolder.getFolders();
     while (monthFolders.hasNext()) {
       const monthFolder = monthFolders.next();
@@ -212,15 +220,15 @@ function loadConsultingWorkspace_() {
         const customerFolder = customerFolders.next();
         const projectId = customerFolder.getName();
         if (projectId.indexOf("-") === 0) continue;
+        const projectKey = yearName + "/" + match[1] + "/" + projectId;
+        if (seenProjects[projectKey]) continue;
         const workbook = latestWorkbook_(customerFolder);
         if (!workbook) continue;
         months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId));
+        seenProjects[projectKey] = true;
       }
     }
-    years.push({ year: Number(yearName), months: months });
   }
-  years.sort(function(a, b) { return a.year - b.year; });
-  return { ok: true, years: years };
 }
 
 function latestWorkbook_(folder) {
@@ -515,13 +523,39 @@ function getOrCreateFolder_(parent, name) {
 
 function getCustomerFolder_(year, month, projectId, createMissing) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  let consulting = createMissing ? getOrCreateFolder_(root, "T\u01b0 v\u1ea5n") : findFolder_(root, "T\u01b0 v\u1ea5n");
-  if (!consulting) return null;
-  let yearFolder = createMissing ? getOrCreateFolder_(consulting, String(year)) : findFolder_(consulting, String(year));
+  let yearFolder = createMissing ? getOrCreateFolder_(root, String(year)) : findFolder_(root, String(year));
   if (!yearFolder) return null;
   let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return null;
   return createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+}
+
+function getLegacyCustomerFolder_(year, month, projectId) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const consulting = findFolder_(root, "T\u01b0 v\u1ea5n");
+  if (!consulting) return null;
+  const yearFolder = findFolder_(consulting, String(year));
+  if (!yearFolder) return null;
+  const monthFolder = findFolder_(yearFolder, "T" + month);
+  return monthFolder ? findFolder_(monthFolder, projectId) : null;
+}
+
+function getAudioFolder_(year, month, projectId, createMissing) {
+  const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  if (!customerFolder) return null;
+  const dataFolder = createMissing ? getOrCreateFolder_(customerFolder, "DataID") : findFolder_(customerFolder, "DataID");
+  if (!dataFolder) return null;
+  return createMissing ? getOrCreateFolder_(dataFolder, "Ghi \u00e2m") : findFolder_(dataFolder, "Ghi \u00e2m");
+}
+
+function findFileByPrefix_(folder, prefix) {
+  if (!folder) return null;
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const candidate = files.next();
+    if (candidate.getName().indexOf(prefix) === 0) return candidate;
+  }
+  return null;
 }
 
 function findFolder_(parent, name) {
