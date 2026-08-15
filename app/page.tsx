@@ -539,9 +539,9 @@ export default function Home() {
   ))).sort((a, b) => b.year - a.year || b.month - a.month || a.record.name.localeCompare(b.record.name, "vi")), [years]);
   const customerSearchResults = useMemo(() => {
     const term = normalizeSearchText(search.trim());
-    if (!term) return [];
-    return customerLocations.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)).slice(0, 12);
-  }, [customerLocations, search]);
+    const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
+    return (term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers).slice(0, 24);
+  }, [customerLocations, search, selectedMonth, selectedYear]);
   const selectedCustomerLocation = customerLocations.find(({ record }) => record.projectId === selectedCustomerProjectId) ?? null;
   const visibleRecords = useMemo(() => {
     const records = activeMonthFolder?.records ?? [];
@@ -560,10 +560,13 @@ export default function Home() {
   };
 
   const returnToCustomerSearch = () => {
+    const currentDate = getVietnamDate();
     setSelectedCustomerProjectId(null);
     setSelectedRecordId(null);
     setOpenMenuId(null);
     setActiveFolder("Tư vấn");
+    setSelectedYear(currentDate.year);
+    setSelectedMonth(currentDate.month);
     setSearch("");
   };
 
@@ -1059,18 +1062,24 @@ export default function Home() {
             </div>
           ) : (
             <div className="customer-gateway__body">
-              <p className="eyebrow">GM-Manager · Khách hàng</p>
-              <h1>Chọn khách hàng trước khi làm việc</h1>
-              <p className="customer-gateway__intro">Tìm theo tên khách hàng, mã nhà hoặc ID dự án. Sau khi chọn, toàn bộ Tư vấn, Thiết kế, Dự toán, Thi công, Nghiệm thu và Bảo hành sẽ đi theo đúng hồ sơ đó.</p>
+              <div className="personnel-entry customer-entry">
+                <span className="personnel-entry__icon customer-entry__icon">▰</span>
+                <span><b>Khách hàng</b><small>Chọn hồ sơ trước khi làm việc</small></span>
+                <em>{customerSearchResults.length} hồ sơ</em>
+              </div>
               <label className="customer-search">
                 <span>⌕</span>
                 <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm tên, mã nhà hoặc ID dự án…" aria-label="Tìm khách hàng" />
               </label>
 
+              <div className="customer-period" aria-label="Chọn thời gian khách hàng">
+                <label>Tháng<select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
+                <label>Năm<select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+                <span>Đang hiện hồ sơ trong <b>T{selectedMonth} / {selectedYear}</b></span>
+              </div>
+
               <div className="customer-search-results" aria-live="polite">
-                {!search.trim() ? (
-                  <div className="customer-search-empty"><span>⌕</span><p>Nhập thông tin để tìm khách hàng trong tất cả các năm và tháng.</p></div>
-                ) : customerSearchResults.length ? customerSearchResults.map((location) => (
+                {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder">▰</span>
                     <span className="customer-result__identity"><b>{location.record.name}</b><small>{location.record.projectId}{location.record.houseId ? ` · ${location.record.houseId}` : ""}</small></span>
@@ -1078,7 +1087,7 @@ export default function Home() {
                     <span className="customer-result__arrow">→</span>
                   </button>
                 )) : (
-                  <div className="customer-search-empty"><span>∅</span><p>Không tìm thấy khách hàng phù hợp.</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
+                  <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
                 )}
               </div>
 
