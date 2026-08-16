@@ -673,6 +673,7 @@ export default function Home() {
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
+  const [consultingSearch, setConsultingSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
   const [personnelView, setPersonnelView] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -739,11 +740,6 @@ export default function Home() {
     return (term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers).slice(0, 24);
   }, [customerLocations, search, selectedMonth, selectedYear]);
   const selectedCustomerLocation = customerLocations.find(({ record }) => record.projectId === selectedCustomerProjectId) ?? null;
-  const visibleRecords = useMemo(() => {
-    const records = activeMonthFolder?.records ?? [];
-    return selectedCustomerProjectId ? records.filter((record) => record.projectId === selectedCustomerProjectId) : [];
-  }, [activeMonthFolder, selectedCustomerProjectId]);
-
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
     setSelectedCustomerProjectId(record.projectId);
     setSelectedYear(year);
@@ -753,6 +749,7 @@ export default function Home() {
     setSelectedRecordId(null);
     setOpenMenuId(null);
     setSearch("");
+    setConsultingSearch("");
   };
 
   const returnToCustomerSearch = () => {
@@ -764,6 +761,7 @@ export default function Home() {
     setSelectedYear(currentDate.year);
     setSelectedMonth(currentDate.month);
     setSearch("");
+    setConsultingSearch("");
   };
 
   const persist = (nextYears: YearFolder[]) => {
@@ -872,8 +870,8 @@ export default function Home() {
     setNotice("Đã xóa dữ liệu — danh sách được cập nhật ngay");
   };
 
-  const selectedRecord = activeMonthFolder?.records.find((record) => record.id === selectedRecordId) ?? null;
   const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
+  const selectedRecord = activeCustomerRecord;
   const designProgressRows = normalizeDesignProgress(activeCustomerRecord);
   const designScheduleAnalysis = analyzeDesignProgress(designProgressRows);
 
@@ -1285,6 +1283,23 @@ export default function Home() {
   const audioTotalChunks = selectedAudioNote?.totalChunks ?? audioDisplayChunks.length;
   const audioCompletedChunks = selectedAudioNote?.completedChunks ?? audioDisplayChunks.length;
   const hasPendingAudio = Boolean(selectedAudioNote && audioTotalChunks > audioCompletedChunks);
+  const consultingSearchTerm = normalizeSearchText(consultingSearch);
+  const visibleDetailSections = detailSections.map((section) => {
+    const sectionMatches = !consultingSearchTerm || normalizeSearchText(section.title).includes(consultingSearchTerm);
+    const fields = sectionMatches ? section.fields : section.fields.filter((field) => normalizeSearchText(`${field.label} ${field.code} ${selectedRecord?.details?.[field.code] ?? ""}`).includes(consultingSearchTerm));
+    return { ...section, fields };
+  }).filter((section) => section.fields.length > 0);
+  const visibleSystemFields = systemFields.filter((field) => !consultingSearchTerm || normalizeSearchText(`Thông tin hệ thống ${field.label} ${field.code} ${selectedRecord?.details?.[field.code] ?? ""}`).includes(consultingSearchTerm));
+  const consultingSearchMatchesFunctional = !consultingSearchTerm || normalizeSearchText([
+    "Thông tin công năng tầng phòng số lượng mô tả",
+    ...functionalFloors.flatMap((floor) => [floor.floor, ...floor.rooms.flatMap((room) => [room.room, room.quantity, room.description])]),
+  ].join(" ")).includes(consultingSearchTerm);
+  const consultingSearchMatchesAudio = !consultingSearchTerm || normalizeSearchText([
+    "Thông tin ghi âm nội dung đầy đủ tóm tắt",
+    selectedAudioNote?.fileName ?? "",
+    ...audioDisplayChunks.flatMap((chunk) => [...chunk.segments.map((segment) => segment.text), ...chunk.keyPoints]),
+  ].join(" ")).includes(consultingSearchTerm);
+  const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
 
   return (
     <main className="crm-shell">
@@ -1385,44 +1400,78 @@ export default function Home() {
 
         {activeFolder === "Tư vấn" ? (
           <section className="consulting-view">
-            <div className="calendar-bar">
-              <label>Tháng
-                <select value={selectedMonth} disabled aria-label="Tháng của khách hàng đã chọn">
-                  {monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}
-                </select>
-              </label>
-              <label>Năm
-                <select value={selectedYear} disabled aria-label="Năm của khách hàng đã chọn">
-                  {years.map((folder) => <option key={folder.year} value={folder.year}>{folder.year}</option>)}
-                </select>
-              </label>
-              <span className="calendar-bar__hint">Thư mục đang xem: <b>{activeMonthFolder?.label} / {selectedYear}</b></span>
-              <a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="drive-link">Mở thư mục Drive ↗</a>
-            </div>
+            <label className="customer-search consulting-search">
+              <span>⌕</span>
+              <input value={consultingSearch} onChange={(event) => setConsultingSearch(event.target.value)} placeholder="Search trong Phiếu thông tin khách hàng…" aria-label="Search Phiếu thông tin khách hàng" />
+              {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa nội dung Search">×</button>}
+            </label>
 
-            <section className="month-workspace">
-              <header className="month-workspace__heading">
-                <div><p className="eyebrow">Tư vấn</p><h1>Thư mục {activeMonthFolder?.label} / {selectedYear}</h1></div>
-                <span>{visibleRecords.length} thư mục dự án</span>
+            {selectedRecord && <section className="record-detail record-detail--inline">
+              <header className="record-detail__heading">
+                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
+                <div className="consulting-profile-actions">
+                  <div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
+                  <div className="project-actions">
+                    <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
+                    {openMenuId === selectedRecord.id && <div className="project-menu">
+                      <button onClick={() => startProtectedAction("rename", selectedRecord)}>Rename</button>
+                      <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Delete</button>
+                    </div>}
+                  </div>
+                </div>
               </header>
-              <div className="record-grid">
-                {visibleRecords.length ? visibleRecords.map((record) => (
-                  <article className="project-folder" key={record.id} onClick={() => setSelectedRecordId(record.id)}>
-                    <span className="project-folder__icon">▰</span>
-                    <div><b>{record.projectId}</b><small>{record.name}{record.houseId && <span className="house-id"> · {record.houseId}</span>}</small><em>Khởi tạo {record.createdAt}</em></div>
-                    <div className="project-actions">
-                      <button className="more-button" onClick={(event) => { event.stopPropagation(); setOpenMenuId(openMenuId === record.id ? null : record.id); }} aria-label={`Tùy chọn ${record.projectId}`}>…</button>
-                      {openMenuId === record.id && (
-                        <div className="project-menu" onClick={(event) => event.stopPropagation()}>
-                          <button onClick={() => startProtectedAction("rename", record)}>Rename</button>
-                          <button className="project-menu__delete" onClick={() => startProtectedAction("delete", record)}>Delete</button>
-                        </div>
-                      )}
-                    </div>
-                  </article>
-                )) : <div className="empty-records"><span>▱</span><h2>Chưa có thư mục dự án</h2><p>Nhấn Add customer để tạo hồ sơ trong tháng đang chọn.</p><button onClick={openAddDialog}>Thêm hồ sơ đầu tiên</button></div>}
+              <div className="detail-scroll">
+                {!hasConsultingSearchResults && <div className="consulting-search-empty"><span>∅</span><p>Không tìm thấy nội dung phù hợp với “{consultingSearch}”.</p></div>}
+                {visibleDetailSections.length > 0 && <table className="information-table">
+                  <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
+                  <tbody>{visibleDetailSections.map((section) => <Fragment key={section.title}>
+                    <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
+                    {section.fields.map((field) => <tr key={field.code}>
+                      <td>{field.label} <span className="field-code">({field.code})</span></td>
+                      <td>{field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                        <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
+                      </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
+                    </tr>)}
+                  </Fragment>)}</tbody>
+                </table>}
+
+                {consultingSearchMatchesFunctional && <section className="dynamic-information">
+                  <h3>4. Thông tin công năng</h3>
+                  <p>Gõ tối thiểu 2 ký tự để xem gợi ý gần đúng, hoặc bắt đầu bằng <b>@</b> để nhập phòng mới.</p>
+                  <table className="functional-table">
+                    <thead><tr><th>Tầng</th><th>Công năng</th><th>Số lượng</th><th>Mô tả chi tiết</th></tr></thead>
+                    <tbody>{functionalFloors.flatMap((floor) => floor.rooms.map((room, roomIndex) => <tr key={room.id}>
+                      {roomIndex === 0 && <td rowSpan={floor.rooms.length} className="functional-floor"><div className="floor-cell">
+                        <input value={floor.floor} onChange={(event) => updateFunctionalFloor(floor.id, event.target.value)} aria-label="Tên tầng" />
+                        <span><button type="button" onClick={addFunctionalFloor} aria-label="Thêm tầng">+</button><button type="button" onClick={() => removeFunctionalFloor(floor.id)} disabled={functionalFloors.length === 1} aria-label="Xóa tầng">−</button></span>
+                      </div></td>}
+                      <td><div className="room-autocomplete">
+                        <GrowingTextarea className="room-autocomplete__input" value={room.room} onChange={(event) => { updateFunctionalRoom(floor.id, room.id, "room", event.target.value); setRoomSuggestionFor(room.id); }} onBlur={(event) => { window.setTimeout(() => setRoomSuggestionFor(null), 120); validateRoom(floor.id, room.id, event.target.value); }} onKeyDown={(event) => { if (event.key === "Escape") setRoomSuggestionFor(null); }} placeholder="Gõ để tìm hoặc @Phòng mới" aria-autocomplete="list" aria-expanded={roomSuggestionFor === room.id && getRoomSuggestions(room.room).length > 0} />
+                        {roomSuggestionFor === room.id && getRoomSuggestions(room.room).length > 0 && <div className="room-suggestions" role="listbox" aria-label="Gợi ý công năng">{getRoomSuggestions(room.room).map((suggestion) => <button key={suggestion} type="button" role="option" onMouseDown={(event) => event.preventDefault()} onClick={() => { updateFunctionalRoom(floor.id, room.id, "room", suggestion); setRoomSuggestionFor(null); }}>{suggestion}</button>)}</div>}
+                      </div></td>
+                      <td><input inputMode="numeric" value={room.quantity} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "quantity", event.target.value)} placeholder="0" /></td>
+                      <td><GrowingTextarea className="functional-description" value={room.description} onChange={(event) => updateFunctionalRoom(floor.id, room.id, "description", event.target.value)} placeholder="Nhập mô tả" /></td>
+                    </tr>))}</tbody>
+                  </table>
+                </section>}
+
+                {visibleSystemFields.length > 0 && <section className="dynamic-information system-information">
+                  <h3>5. Thông tin hệ thống</h3>
+                  <table className="information-table"><thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead><tbody>{visibleSystemFields.map((field) => <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>)}</tbody></table>
+                </section>}
+
+                {consultingSearchMatchesAudio && <section className="dynamic-information system-information audio-information">
+                  <div className="audio-information__heading"><div><h3>6. Thông tin ghi âm</h3><p>File được lưu trong thư mục khách hàng. Mỗi đoạn xong sẽ ghi ngay vào Excel; nếu dừng giữa chừng, lần sau tiếp tục từ đoạn chưa làm.</p></div>
+                    {audioProcessingId === selectedRecord.id ? <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button> : hasPendingAudio ? <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}</button> : <label className="audio-import-button"><input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />Import ghi âm</label>}
+                  </div>
+                  {selectedAudioNote && <div className="audio-note">
+                    <p className="audio-note__meta">{selectedAudioNote.fileName} · {selectedAudioNote.language} · Đã hoàn thành {audioCompletedChunks}/{audioTotalChunks} đoạn · {selectedAudioNote.updatedAt}</p>
+                    {audioDisplayChunks.length ? audioDisplayChunks.map((chunk) => <section className="audio-chunk" key={chunk.index}><h4>Đoạn {chunk.index + 1}/{audioTotalChunks}</h4><div className="audio-chunk__transcript"><strong>Nội dung đầy đủ</strong>{chunk.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}</div><div className="audio-chunk__summary"><strong>Tóm tắt</strong>{chunk.keyPoints.length ? <ul>{chunk.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul> : <p>Chưa có ý chính cho đoạn này.</p>}</div></section>) : <p className="audio-note__empty">File ghi âm đã lưu vào Drive. Chưa có đoạn nào được xử lý.</p>}
+                  </div>}
+                </section>}
               </div>
-            </section>
+              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel vào Drive…" : "Tự động đồng bộ Excel sau mỗi thay đổi"}</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.projectId} / Tư vấn</span></footer>
+            </section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-progress-view">
@@ -1526,7 +1575,7 @@ export default function Home() {
         </div>
       )}
 
-      {selectedRecord && (
+      {selectedRecordId && selectedRecord && (
         <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
           <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
             <header className="record-detail__heading">

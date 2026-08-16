@@ -60,3 +60,20 @@
 .schedule-timeline--empty { display: grid; min-height: 180px; place-items: center; color: #98958e; font-size: 10px; text-align: center; }
 .schedule-timeline--empty p { max-width: 300px; margin: 0; line-height: 1.5; }
 @media (max-width: 620px) { .schedule-timeline { padding: 13px; }.schedule-timeline > header { flex-direction: column; gap: 5px; }.schedule-timeline > header > span { padding: 0; }.schedule-timeline__canvas { margin-right: -13px; margin-left: -13px; padding: 0 13px; } }
+
+/* The consulting workspace opens the customer form directly; month/year stay in the customer gateway. */
+.consulting-search { margin-bottom: 16px; box-shadow: none; }
+.consulting-search > button { display: grid; flex: 0 0 auto; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #8a8780; font-size: 18px; }
+.consulting-search > button:hover { background: #f0efeb; color: #4c4944; }
+.record-detail--inline { width: 100%; max-height: none; border: 1px solid #e2e1dc; box-shadow: none; overflow: visible; }
+.record-detail--inline .record-detail__heading { border-radius: 10px 10px 0 0; background: #fff; }
+.record-detail--inline .detail-scroll { overflow: visible; }
+.record-detail--inline .record-detail__footer { border-radius: 0 0 10px 10px; }
+.record-detail--inline .record-detail__footer > span:last-child { max-width: 55%; color: #9a968f; text-align: right; overflow-wrap: anywhere; }
+.consulting-profile-actions { display: flex; align-items: center; gap: 14px; padding-top: 6px; }
+.consulting-profile-actions .project-menu { top: 30px; }
+.consulting-search-empty { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 8px; color: #98958e; text-align: center; }
+.consulting-search-empty span { font-size: 27px; }
+.consulting-search-empty p { margin: 0; font-size: 11px; }
+@media (max-width: 800px) { .consulting-profile-actions { align-items: flex-end; flex-direction: column-reverse; gap: 8px; }.record-detail--inline .record-detail__heading { align-items: flex-start; }.record-detail--inline .record-detail__footer { align-items: flex-start; flex-direction: column; }.record-detail--inline .record-detail__footer > span:last-child { max-width: none; text-align: left; } }
+@media (max-width: 620px) { .record-detail--inline { max-height: none; }.record-detail--inline .detail-scroll { padding-right: 12px; padding-left: 12px; }.consulting-search { margin-bottom: 12px; } }
