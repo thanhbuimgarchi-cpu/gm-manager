@@ -1193,13 +1193,15 @@ export default function Home() {
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
     setOpenMenuId(null);
-    if (type === "delete") {
-      deleteRecord(record.id);
-      setNotice(`Đã xóa ${record.projectId}`);
-      return;
-    }
     setProtectedAction({ type, record });
-    setRenameValue(record.name);
+    if (type === "rename") setRenameValue(record.name);
+  };
+
+  const confirmDeleteRecord = () => {
+    if (!protectedAction || protectedAction.type !== "delete") return;
+    deleteRecord(protectedAction.record.id);
+    setNotice(`Đã xóa ${protectedAction.record.projectId}`);
+    setProtectedAction(null);
   };
 
   const renameRecord = (event: FormEvent<HTMLFormElement>) => {
@@ -1893,13 +1895,23 @@ export default function Home() {
 
       {protectedAction && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setProtectedAction(null)}>
-          <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-            <p className="eyebrow">{protectedAction.record.projectId}</p>
-            <h2>Rename hồ sơ</h2>
-            <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
-            <button className="add-button" type="submit">Lưu tên mới</button>
-          </form>
+          {protectedAction.type === "delete" ? (
+            <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <p className="eyebrow">{protectedAction.record.projectId}</p>
+              <h2>Xóa hồ sơ?</h2>
+              <p>Thao tác này sẽ xóa hồ sơ khỏi danh sách hiện tại.</p>
+              <div className="dialog-actions"><button type="button" onClick={() => setProtectedAction(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDeleteRecord}>Xóa hồ sơ</button></div>
+            </div>
+          ) : (
+            <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <p className="eyebrow">{protectedAction.record.projectId}</p>
+              <h2>Rename hồ sơ</h2>
+              <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
+              <button className="add-button" type="submit">Lưu tên mới</button>
+            </form>
+          )}
         </div>
       )}
 
