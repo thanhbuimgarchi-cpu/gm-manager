@@ -11,7 +11,6 @@ type AudioSegment = {
 type AudioNoteChunk = {
   index: number;
   segments: AudioSegment[];
-  keyPoints: string[];
 };
 
 type AudioNote = {
@@ -19,7 +18,6 @@ type AudioNote = {
   language: string;
   updatedAt: string;
   segments: AudioSegment[];
-  keyPoints: string[];
   chunks?: AudioNoteChunk[];
   totalChunks?: number;
   completedChunks?: number;
@@ -29,7 +27,6 @@ type AudioNote = {
 type AudioInsightResult = {
   language?: string;
   segments: AudioSegment[];
-  keyPoints: string[];
   apiCallsUsed?: number;
 };
 
@@ -697,30 +694,10 @@ function formatAudioTime(totalSeconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-function combineKeyPoints(results: AudioInsightResult[]) {
-  const lists = results.map((result) => result.keyPoints);
-  const seen = new Set<string>();
-  const combined: string[] = [];
-  for (let pointIndex = 0; combined.length < 12; pointIndex += 1) {
-    let added = false;
-    lists.forEach((points) => {
-      const point = points[pointIndex]?.trim();
-      const key = point?.toLocaleLowerCase("vi").replaceAll(/\s+/g, " ");
-      if (point && key && !seen.has(key) && combined.length < 12) {
-        seen.add(key);
-        combined.push(point);
-        added = true;
-      }
-    });
-    if (!added) break;
-  }
-  return combined;
-}
-
 function normalizeAudioNoteChunks(note: AudioNote): AudioNoteChunk[] {
   if (note.chunks?.length) return [...note.chunks].sort((a, b) => a.index - b.index);
-  if (!note.segments.length && !note.keyPoints.length) return [];
-  return [{ index: 0, segments: note.segments, keyPoints: note.keyPoints }];
+  if (!note.segments.length) return [];
+  return [{ index: 0, segments: note.segments }];
 }
 
 function buildAudioNote(previous: AudioNote, chunks: AudioNoteChunk[], language?: string): AudioNote {
@@ -736,7 +713,6 @@ function buildAudioNote(previous: AudioNote, chunks: AudioNoteChunk[], language?
     totalChunks,
     status: completedChunks >= totalChunks ? "complete" : "processing",
     segments: orderedChunks.flatMap((chunk) => chunk.segments),
-    keyPoints: combineKeyPoints(orderedChunks.map((chunk) => ({ segments: chunk.segments, keyPoints: chunk.keyPoints }))),
   };
 }
 
@@ -1344,7 +1320,6 @@ export default function Home() {
           time: formatAudioTime(offsetSeconds + parseAudioTime(segment.time)),
           text: segment.text,
         })),
-        keyPoints: result.keyPoints ?? [],
       };
       workingChunks = [...workingChunks.filter((chunk) => chunk.index !== index), processedChunk];
       const audioNote = buildAudioNote(workingRecord.audioNote!, workingChunks, result.language);
@@ -1420,7 +1395,6 @@ export default function Home() {
         language: "Tiếng Việt",
         updatedAt: new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
         segments: [],
-        keyPoints: [],
         chunks: [],
         totalChunks: chunks.length,
         completedChunks: 0,
@@ -1628,9 +1602,9 @@ export default function Home() {
     ...functionalFloors.flatMap((floor) => [floor.floor, ...floor.rooms.flatMap((room) => [room.room, room.quantity, room.description])]),
   ].join(" ")).includes(consultingSearchTerm);
   const consultingSearchMatchesAudio = !consultingSearchTerm || normalizeSearchText([
-    "Thông tin ghi âm nội dung đầy đủ tóm tắt",
+    "Thông tin ghi âm nội dung chuyển từ ghi âm",
     selectedAudioNote?.fileName ?? "",
-    ...audioDisplayChunks.flatMap((chunk) => [...chunk.segments.map((segment) => segment.text), ...chunk.keyPoints]),
+    ...audioDisplayChunks.flatMap((chunk) => chunk.segments.map((segment) => segment.text)),
   ].join(" ")).includes(consultingSearchTerm);
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
   const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? null;
@@ -1937,7 +1911,7 @@ export default function Home() {
                   </div>
                   {selectedAudioNote && <div className="audio-note">
                     <p className="audio-note__meta">{selectedAudioNote.fileName} · {selectedAudioNote.language} · Đã hoàn thành {audioCompletedChunks}/{audioTotalChunks} đoạn · {selectedAudioNote.updatedAt}</p>
-                    {audioDisplayChunks.length ? audioDisplayChunks.map((chunk) => <section className="audio-chunk" key={chunk.index}><h4>Đoạn {chunk.index + 1}/{audioTotalChunks}</h4><div className="audio-chunk__transcript"><strong>Nội dung đầy đủ</strong>{chunk.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}</div><div className="audio-chunk__summary"><strong>Tóm tắt</strong>{chunk.keyPoints.length ? <ul>{chunk.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul> : <p>Chưa có ý chính cho đoạn này.</p>}</div></section>) : <p className="audio-note__empty">File ghi âm đã lưu vào Drive. Chưa có đoạn nào được xử lý.</p>}
+                    {audioDisplayChunks.length ? audioDisplayChunks.map((chunk) => <section className="audio-chunk" key={chunk.index}><h4>Đoạn {chunk.index + 1}/{audioTotalChunks}</h4><div className="audio-chunk__transcript"><strong>Nội dung chuyển từ ghi âm</strong>{chunk.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}</div></section>) : <p className="audio-note__empty">File ghi âm đã lưu vào Drive. Chưa có đoạn nào được xử lý.</p>}
                   </div>}
                 </section>}
               </div>
@@ -2139,12 +2113,8 @@ export default function Home() {
                       <section className="audio-chunk" key={chunk.index}>
                         <h4>Đoạn {chunk.index + 1}/{audioTotalChunks}</h4>
                         <div className="audio-chunk__transcript">
-                          <strong>Nội dung đầy đủ</strong>
+                          <strong>Nội dung chuyển từ ghi âm</strong>
                           {chunk.segments.map((segment, index) => <p key={`${segment.time}-${index}`}><b>{segment.time}</b>{segment.text}</p>)}
-                        </div>
-                        <div className="audio-chunk__summary">
-                          <strong>Tóm tắt</strong>
-                          {chunk.keyPoints.length ? <ul>{chunk.keyPoints.map((point, index) => <li key={`${index}-${point}`}>{point}</li>)}</ul> : <p>Chưa có ý chính cho đoạn này.</p>}
                         </div>
                       </section>
                     )) : <p className="audio-note__empty">File ghi âm đã lưu vào Drive. Chưa có đoạn nào được xử lý.</p>}

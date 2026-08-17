@@ -14,7 +14,7 @@ const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
-    if (payload.action === "audio-insight") return json_(processAudioInsight_(payload));
+    if (payload.action === "audio-insight") return json_(transcribeAudio_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {
       const audioLock = LockService.getScriptLock();
@@ -53,7 +53,7 @@ function doPost(event) {
   }
 }
 
-function processAudioInsight_(payload) {
+function transcribeAudio_(payload) {
   const audio = payload.audio || {};
   const apiKey = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
   if (!apiKey) throw new Error("Ch\u01b0a c\u1ea5u h\u00ecnh GEMINI_API_KEY trong Script Properties.");
@@ -62,24 +62,23 @@ function processAudioInsight_(payload) {
   }
   if (audio.data.length > 25200000) throw new Error("File ghi \u00e2m qu\u00e1 l\u1edbn. H\u00e3y d\u00f9ng file t\u1ed1i \u0111a 18 MB.");
 
-  const insightSchema = {
+  const transcriptSchema = {
     type: "OBJECT",
     properties: {
       language: { type: "STRING" },
       segments: { type: "ARRAY", items: { type: "OBJECT", properties: { time: { type: "STRING" }, text: { type: "STRING" } }, required: ["time", "text"] } },
-      keyPoints: { type: "ARRAY", items: { type: "STRING" } },
     },
-    required: ["language", "segments", "keyPoints"],
+    required: ["language", "segments"],
   };
-  const insight = generateGeminiJson_(apiKey, [{
+  const transcript = generateGeminiJson_(apiKey, [{
     role: "user",
     parts: [
       { inline_data: { mime_type: audio.mimeType, data: audio.data } },
-      { text: "Chuy\u1ec3n to\u00e0n b\u1ed9 l\u1eddi n\u00f3i trong ghi \u00e2m th\u00e0nh v\u0103n b\u1ea3n ch\u00ednh x\u00e1c. Chia th\u00e0nh c\u00e1c \u0111o\u1ea1n \u00fd ngh\u0129a 1\u20133 c\u00e2u v\u00e0 ghi m\u1ed1c th\u1eddi gian MM:SS. \u0110\u1ed3ng th\u1eddi r\u00fat ra t\u1ed1i \u0111a 4 \u00fd ch\u00ednh ng\u1eafn, ch\u1ec9 gi\u1eef quy\u1ebft \u0111\u1ecbnh, nhu c\u1ea7u, s\u1ed1 li\u1ec7u, vi\u1ec7c c\u1ea7n l\u00e0m v\u00e0 r\u1ee7i ro. Gi\u1eef nguy\u00ean ng\u00f4n ng\u1eef; kh\u00f4ng t\u1ef1 th\u00eam th\u00f4ng tin." },
+      { text: "Chuy\u1ec3n to\u00e0n b\u1ed9 l\u1eddi n\u00f3i trong ghi \u00e2m th\u00e0nh v\u0103n b\u1ea3n ch\u00ednh x\u00e1c. Chia th\u00e0nh c\u00e1c \u0111o\u1ea1n \u00fd ngh\u0129a 1\u20133 c\u00e2u v\u00e0 ghi m\u1ed1c th\u1eddi gian MM:SS. Gi\u1eef nguy\u00ean ng\u00f4n ng\u1eef v\u00e0 l\u1eddi n\u00f3i; kh\u00f4ng t\u00f3m t\u1eaft, kh\u00f4ng r\u00fat \u00fd, kh\u00f4ng th\u00eam th\u00f4ng tin." },
     ],
-  }], insightSchema);
+  }], transcriptSchema);
 
-  const segments = (insight.segments || []).filter(function(segment) {
+  const segments = (transcript.segments || []).filter(function(segment) {
     return segment && typeof segment.text === "string" && segment.text.trim();
   }).map(function(segment) {
     return { time: typeof segment.time === "string" ? segment.time : "~", text: segment.text.trim() };
@@ -87,9 +86,8 @@ function processAudioInsight_(payload) {
   if (!segments.length) throw new Error("Kh\u00f4ng nh\u1eadn di\u1ec7n \u0111\u01b0\u1ee3c l\u1eddi n\u00f3i trong file ghi \u00e2m.");
   return {
     ok: true,
-    language: insight.language || "Ti\u1ebfng Vi\u1ec7t",
+    language: transcript.language || "Ti\u1ebfng Vi\u1ec7t",
     segments: segments,
-    keyPoints: (insight.keyPoints || []).filter(function(point) { return typeof point === "string" && point.trim(); }).map(function(point) { return point.trim(); }),
     apiCallsUsed: 1,
   };
 }
@@ -134,7 +132,7 @@ function processStoredAudioChunk_(payload) {
   let audioFile = findFileByPrefix_(audioFolder, baseName);
   if (!audioFile) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y \u0111o\u1ea1n ghi \u00e2m " + (chunkIndex + 1) + "/" + totalChunks + " tr\u00ean Drive.");
   const blob = audioFile.getBlob();
-  const result = processAudioInsight_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
+  const result = transcribeAudio_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
   result.chunkIndex = chunkIndex;
   result.totalChunks = totalChunks;
   return result;
@@ -399,7 +397,9 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   const audioSheet = sheets["6. Th\u00f4ng tin ghi \u00e2m"] || [];
   const audioRows = audioSheet.slice(1);
   const audioChunks = [];
-  const isChunkedAudio = String((audioSheet[0] || [])[1] || "") === "Lo\u1ea1i";
+  const audioHeader = audioSheet[0] || [];
+  const isChunkedAudio = String(audioHeader[1] || "") === "Lo\u1ea1i";
+  const isTranscriptOnlyAudio = String(audioHeader[1] || "") === "M\u1ed1c th\u1eddi gian";
   if (isChunkedAudio) {
     const chunksByIndex = {};
     audioRows.forEach(function(row) {
@@ -408,28 +408,34 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
       const time = String(row[2] || "");
       const content = String(row[3] || "");
       if (!content) return;
-      if (!chunksByIndex[index]) chunksByIndex[index] = { index: index, segments: [], keyPoints: [] };
-      if (type === "T\u00f3m t\u1eaft") chunksByIndex[index].keyPoints.push(content);
-      else chunksByIndex[index].segments.push({ time: time || "~", text: content });
+      if (type === "T\u00f3m t\u1eaft") return;
+      if (!chunksByIndex[index]) chunksByIndex[index] = { index: index, segments: [] };
+      chunksByIndex[index].segments.push({ time: time || "~", text: content });
+    });
+    Object.keys(chunksByIndex).sort(function(a, b) { return Number(a) - Number(b); }).forEach(function(index) { audioChunks.push(chunksByIndex[index]); });
+  } else if (isTranscriptOnlyAudio) {
+    const chunksByIndex = {};
+    audioRows.forEach(function(row) {
+      const index = Math.max(0, Number(row[0] || 1) - 1);
+      const time = String(row[1] || "");
+      const text = String(row[2] || "");
+      if (!text) return;
+      if (!chunksByIndex[index]) chunksByIndex[index] = { index: index, segments: [] };
+      chunksByIndex[index].segments.push({ time: time || "~", text: text });
     });
     Object.keys(chunksByIndex).sort(function(a, b) { return Number(a) - Number(b); }).forEach(function(index) { audioChunks.push(chunksByIndex[index]); });
   } else {
     const legacySegments = [];
-    const legacyPoints = [];
     audioRows.forEach(function(row) {
       const time = String(row[0] || "");
       const text = String(row[1] || "");
-      const point = String(row[2] || "");
       if (text) legacySegments.push({ time: time || "~", text: text });
-      if (point) legacyPoints.push(point);
     });
-    if (legacySegments.length || legacyPoints.length) audioChunks.push({ index: 0, segments: legacySegments, keyPoints: legacyPoints });
+    if (legacySegments.length) audioChunks.push({ index: 0, segments: legacySegments });
   }
   const segments = [];
-  const keyPoints = [];
   audioChunks.forEach(function(chunk) {
     Array.prototype.push.apply(segments, chunk.segments || []);
-    Array.prototype.push.apply(keyPoints, chunk.keyPoints || []);
   });
   const inferredCompletedChunks = audioChunks.reduce(function(completed, chunk) { return chunk.index === completed ? completed + 1 : completed; }, 0);
   const totalChunks = Number(metadata.audioTotalChunks || 0) || (audioChunks.length ? Math.max.apply(null, audioChunks.map(function(chunk) { return chunk.index + 1; })) : 0);
@@ -449,13 +455,12 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
   record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
   record.warrantyProgress = readWarrantyProgress_(customerFolder, projectId);
-  if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
+  if (segments.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
       fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
       language: metadata.audioLanguage || "Ti\u1ebfng Vi\u1ec7t",
       updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
       segments: segments,
-      keyPoints: keyPoints,
       chunks: audioChunks,
       totalChunks: totalChunks,
       completedChunks: completedChunks,
@@ -711,7 +716,7 @@ function writeWorkbook_(spreadsheet, record) {
     ["5. H\u1ec7 th\u1ed1ng", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["D", "\u0110i\u1ec7n"], ["N", "N\u01b0\u1edbc"], ["E", "N\u0103ng l\u01b0\u1ee3ng"], ["EL", "Thang m\u00e1y"], ["DR", "C\u1eeda"],
     ]],
-    ["6. Th\u00f4ng tin ghi \u00e2m", ["Ph\u1ea7n", "Lo\u1ea1i", "M\u1ed1c th\u1eddi gian", "N\u1ed9i dung"], null],
+    ["6. Th\u00f4ng tin ghi \u00e2m", ["Ph\u1ea7n", "M\u1ed1c th\u1eddi gian", "N\u1ed9i dung ghi \u00e2m"], null],
   ];
 
   sheetDefinitions.forEach(function(definition, index) {
@@ -741,23 +746,16 @@ function writeWorkbook_(spreadsheet, record) {
     } else if (name === "6. Th\u00f4ng tin ghi \u00e2m") {
       const note = record.audioNote || {};
       const chunks = note.chunks && note.chunks.length ? note.chunks.slice().sort(function(a, b) { return a.index - b.index; }) :
-        ((note.segments && note.segments.length) || (note.keyPoints && note.keyPoints.length) ? [{ index: 0, segments: note.segments || [], keyPoints: note.keyPoints || [] }] : []);
+        (note.segments && note.segments.length ? [{ index: 0, segments: note.segments || [] }] : []);
       const rows = [];
       chunks.forEach(function(chunk) {
         (chunk.segments || []).forEach(function(segment) {
-          rows.push([Number(chunk.index) + 1, "N\u1ed9i dung \u0111\u1ea7y \u0111\u1ee7", segment.time || "", segment.text || ""]);
-        });
-        (chunk.keyPoints || []).forEach(function(point) {
-          rows.push([Number(chunk.index) + 1, "T\u00f3m t\u1eaft", "", point || ""]);
+          rows.push([Number(chunk.index) + 1, segment.time || "", segment.text || ""]);
         });
       });
       if (rows.length) {
         sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-        rows.forEach(function(row, rowIndex) {
-          const rowRange = sheet.getRange(rowIndex + 2, 1, 1, headers.length);
-          if (row[1] === "T\u00f3m t\u1eaft") rowRange.setFontColor("#7A1F2B").setFontWeight("bold").setBackground("#F7ECEE");
-          else rowRange.setFontColor("#1F1F1D");
-        });
+        sheet.getRange(2, 1, rows.length, headers.length).setFontColor("#1F1F1D");
       }
     } else {
       const rows = fieldRows.map(function(field) {
@@ -769,9 +767,8 @@ function writeWorkbook_(spreadsheet, record) {
     sheet.setFrozenRows(1);
     if (name === "6. Th\u00f4ng tin ghi \u00e2m") {
       sheet.setColumnWidth(1, 55);
-      sheet.setColumnWidth(2, 135);
-      sheet.setColumnWidth(3, 95);
-      sheet.setColumnWidth(4, 520);
+      sheet.setColumnWidth(2, 95);
+      sheet.setColumnWidth(3, 520);
     } else {
       sheet.autoResizeColumns(1, headers.length);
     }

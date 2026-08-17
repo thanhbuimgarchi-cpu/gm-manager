@@ -53,7 +53,7 @@ export async function POST(request: Request) {
       redirect: "follow",
     });
     const responseText = await scriptResponse.text();
-    let result: { ok?: boolean; error?: string; language?: string; segments?: unknown[]; keyPoints?: string[] };
+    let result: { ok?: boolean; error?: string; language?: string; segments?: unknown[] };
     try {
       result = JSON.parse(responseText) as typeof result;
     } catch {
