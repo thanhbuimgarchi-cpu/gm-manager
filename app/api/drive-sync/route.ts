@@ -6,6 +6,7 @@ type SyncRequest = {
   token?: string;
   year?: number;
   month?: number;
+  progressKind?: "architecture" | "interior";
   record?: unknown;
 };
 
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
     const scriptResponse = await fetch(body.scriptUrl, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: body.action ?? "sync-customer", token: body.token, year: body.year, month: body.month, record: body.record }),
+      body: JSON.stringify({ action: body.action ?? "sync-customer", token: body.token, year: body.year, month: body.month, progressKind: body.progressKind, record: body.record }),
       redirect: "follow",
     });
     const responseText = await scriptResponse.text();

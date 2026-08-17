@@ -74,6 +74,7 @@ type WorkRecord = {
   details: Record<string, string>;
   audioNote?: AudioNote;
   designProgress?: DesignProgressRow[];
+  interiorDesignProgress?: DesignProgressRow[];
   functionalFloors?: FunctionalFloor[];
   functionalRows?: LegacyFunctionalRow[];
 };
@@ -84,6 +85,7 @@ type DesignProgressRow = {
   content: string;
   plannedDate: string;
   actualDate: string;
+  assignee: string;
   note: string;
 };
 
@@ -209,6 +211,8 @@ const detailSections: Array<{ title: string; fields: DetailField[] }> = [
   },
 ];
 
+const demandCheckboxCodes = new Set(["NCT-KT", "NCT-NT", "NCC-KT", "NCC-NT"]);
+
 const systemFields: DetailField[] = [
   { code: "D", label: "Điện" },
   { code: "N", label: "Nước" },
@@ -219,7 +223,7 @@ const systemFields: DetailField[] = [
 
 const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "Sân trước", "Sân sau", "Giếng trời", "Phòng thay đồ", "WC", "Sân phơi", "Sân thượng", "Phòng thờ", "Thang bộ", "Thang máy", "Phòng sinh hoạt chung", "Phòng xem phim", "Phòng xông hơi", "Phòng làm việc", "Phòng học", "Khu vực kinh doanh", "Phòng kho", "Phòng ngủ master", "WC master", "Phòng giúp việc"];
 
-const designProgressContents = [
+const architectureDesignProgressContents = [
   "Tư vấn concept",
   "Mặt bằng công năng",
   "3D lần 1",
@@ -229,44 +233,86 @@ const designProgressContents = [
   "Nghiệm thu và bàn giao",
 ] as const;
 
+const interiorDesignProgressContents = [
+  "Kiểm tra và khớp MBCN",
+  "Tư vấn concept nội thất",
+  "3D lần 1",
+  "3D lần 2",
+  "3D lần 3",
+  "Hồ sơ bổ kỹ thuật nội thất",
+  "Nghiệm thu và bàn giao",
+] as const;
+
+type DesignProgressKind = "architecture" | "interior";
+
+const designProgressDefinitions: Record<DesignProgressKind, {
+  field: "designProgress" | "interiorDesignProgress";
+  fixedContents: readonly string[];
+  idPrefix: string;
+  title: string;
+  shortTitle: string;
+  demandCode: "NCT-KT" | "NCT-NT";
+}> = {
+  architecture: {
+    field: "designProgress",
+    fixedContents: architectureDesignProgressContents,
+    idPrefix: "design",
+    title: "Tiến độ thiết kế kiến trúc",
+    shortTitle: "Kiến trúc",
+    demandCode: "NCT-KT",
+  },
+  interior: {
+    field: "interiorDesignProgress",
+    fixedContents: interiorDesignProgressContents,
+    idPrefix: "interior-design",
+    title: "Tiến độ thiết kế nội thất",
+    shortTitle: "Nội thất",
+    demandCode: "NCT-NT",
+  },
+};
+
 type DesignDateKey = "plannedDate" | "actualDate";
 
-const isFixedDesignContent = (content: string) => designProgressContents.some((item) => item === content);
-const createFixedDesignRow = (content: string, index: number): DesignProgressRow => ({
-  id: `design-fixed-${index}`,
+const isFixedDesignContent = (content: string, kind: DesignProgressKind) => designProgressDefinitions[kind].fixedContents.some((item) => item === content);
+const createFixedDesignRow = (content: string, index: number, kind: DesignProgressKind): DesignProgressRow => ({
+  id: `${designProgressDefinitions[kind].idPrefix}-fixed-${index}`,
   isCustom: false,
   content,
   plannedDate: "",
   actualDate: "",
+  assignee: "",
   note: "",
 });
-const createCustomDesignRow = (): DesignProgressRow => ({
-  id: `design-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+const createCustomDesignRow = (kind: DesignProgressKind): DesignProgressRow => ({
+  id: `${designProgressDefinitions[kind].idPrefix}-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
   isCustom: true,
   content: "",
   plannedDate: "",
   actualDate: "",
+  assignee: "",
   note: "",
 });
-const createDesignProgress = (): DesignProgressRow[] => designProgressContents.map(createFixedDesignRow);
-const normalizeDesignProgress = (record?: WorkRecord | null): DesignProgressRow[] => {
-  const existing = record?.designProgress ?? [];
-  if (!existing.length) return createDesignProgress();
+const createDesignProgress = (kind: DesignProgressKind = "architecture"): DesignProgressRow[] => designProgressDefinitions[kind].fixedContents.map((content, index) => createFixedDesignRow(content, index, kind));
+const normalizeDesignProgress = (record?: WorkRecord | null, kind: DesignProgressKind = "architecture"): DesignProgressRow[] => {
+  const definition = designProgressDefinitions[kind];
+  const existing = (record?.[definition.field] ?? []) as DesignProgressRow[];
+  if (!existing.length) return createDesignProgress(kind);
 
   const normalized = existing.map((row, index) => {
-    const isCustom = row.isCustom ?? !isFixedDesignContent(row.content ?? "");
+    const isCustom = row.isCustom ?? !isFixedDesignContent(row.content ?? "", kind);
     return {
-      id: row.id || `design-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
+      id: row.id || `${definition.idPrefix}-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
       isCustom,
       content: row.content ?? "",
       plannedDate: row.plannedDate ?? "",
       actualDate: row.actualDate ?? "",
+      assignee: row.assignee ?? "",
       note: row.note ?? "",
     };
   });
   const existingFixed = new Set(normalized.filter((row) => !row.isCustom).map((row) => row.content));
-  const missingFixed = designProgressContents
-    .map(createFixedDesignRow)
+  const missingFixed = definition.fixedContents
+    .map((content, index) => createFixedDesignRow(content, index, kind))
     .filter((row) => !existingFixed.has(row.content));
   return [...normalized, ...missingFixed];
 };
@@ -659,6 +705,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             houseId: record.houseId || localRecord?.houseId || "",
             details: record.details ?? {},
             designProgress: record.designProgress ?? localRecord?.designProgress ?? createDesignProgress(),
+            interiorDesignProgress: record.interiorDesignProgress ?? localRecord?.interiorDesignProgress ?? createDesignProgress("interior"),
           };
         }),
       };
@@ -674,6 +721,7 @@ export default function Home() {
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
   const [consultingSearch, setConsultingSearch] = useState("");
+  const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
   const [personnelView, setPersonnelView] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -698,7 +746,7 @@ export default function Home() {
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const driveSyncTimer = useRef<number | null>(null);
-  const designSyncTimer = useRef<number | null>(null);
+  const designSyncTimers = useRef<Partial<Record<DesignProgressKind, number>>>({});
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -739,6 +787,11 @@ export default function Home() {
     const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
     return (term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers).slice(0, 24);
   }, [customerLocations, search, selectedMonth, selectedYear]);
+  const workflowSearchResults = useMemo(() => {
+    const term = normalizeSearchText(workflowSearch.trim());
+    if (!term) return [];
+    return customerLocations.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)).slice(0, 8);
+  }, [customerLocations, workflowSearch]);
   const selectedCustomerLocation = customerLocations.find(({ record }) => record.projectId === selectedCustomerProjectId) ?? null;
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
     setSelectedCustomerProjectId(record.projectId);
@@ -750,6 +803,19 @@ export default function Home() {
     setOpenMenuId(null);
     setSearch("");
     setConsultingSearch("");
+    setWorkflowSearch("");
+  };
+
+  const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation) => {
+    setSelectedCustomerProjectId(record.projectId);
+    setSelectedYear(year);
+    setSelectedMonth(month);
+    setPersonnelView(false);
+    setSelectedRecordId(null);
+    setOpenMenuId(null);
+    setSearch("");
+    setConsultingSearch("");
+    setWorkflowSearch("");
   };
 
   const returnToCustomerSearch = () => {
@@ -762,6 +828,7 @@ export default function Home() {
     setSelectedMonth(currentDate.month);
     setSearch("");
     setConsultingSearch("");
+    setWorkflowSearch("");
   };
 
   const persist = (nextYears: YearFolder[]) => {
@@ -841,6 +908,7 @@ export default function Home() {
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
       designProgress: createDesignProgress(),
+      interiorDesignProgress: createDesignProgress("interior"),
       functionalFloors: [createFunctionalFloor()],
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
@@ -849,7 +917,6 @@ export default function Home() {
     });
     persist(nextYears);
     void syncRecordToDrive(record, modalYear, modalMonth);
-    void syncDesignProgressToDrive(record, modalYear, modalMonth);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
     setSelectedCustomerProjectId(projectId);
@@ -872,17 +939,24 @@ export default function Home() {
 
   const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
   const selectedRecord = activeCustomerRecord;
-  const designProgressRows = normalizeDesignProgress(activeCustomerRecord);
-  const designScheduleAnalysis = analyzeDesignProgress(designProgressRows);
+  const architectureDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "architecture");
+  const interiorDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "interior");
+  const designScheduleAnalysis = analyzeDesignProgress(architectureDesignProgressRows);
+  const interiorDesignScheduleAnalysis = analyzeDesignProgress(interiorDesignProgressRows);
+  const isDemandSelected = (code: string) => Boolean(activeCustomerRecord?.details?.[code]?.trim());
+  const progressRowsFor = (kind: DesignProgressKind) => kind === "architecture" ? architectureDesignProgressRows : interiorDesignProgressRows;
+  const progressAnalysisFor = (kind: DesignProgressKind) => kind === "architecture" ? designScheduleAnalysis : interiorDesignScheduleAnalysis;
 
-  const commitDesignProgressRows = (nextRows: DesignProgressRow[]) => {
+  const commitDesignProgressRows = (kind: DesignProgressKind, nextRows: DesignProgressRow[]) => {
     if (!activeCustomerRecord || !selectedCustomerLocation) return;
-    const updatedRecord = { ...activeCustomerRecord, designProgress: nextRows };
+    const field = designProgressDefinitions[kind].field;
+    const updatedRecord = { ...activeCustomerRecord, [field]: nextRows };
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
-    queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
+    queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month, kind);
   };
 
-  const updateDesignProgress = (rowIndex: number, key: "content" | DesignDateKey | "note", value: string) => {
+  const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
+    const currentRows = progressRowsFor(kind);
     let nextValue = value;
     if (key === "plannedDate" || key === "actualDate") {
       nextValue = formatDesignDateInput(value);
@@ -891,32 +965,34 @@ export default function Home() {
         return;
       }
     }
-    const nextRows = designProgressRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue } : row);
+    const nextRows = currentRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue } : row);
     if ((key === "plannedDate" || key === "actualDate") && nextValue.length === 10 && !hasSequentialDesignDates(nextRows, key)) {
       setNotice(`${key === "plannedDate" ? "Ngày dự kiến" : "Ngày thực tế"} phải tăng dần theo thứ tự từ trên xuống.`);
       return;
     }
-    commitDesignProgressRows(nextRows);
+    commitDesignProgressRows(kind, nextRows);
   };
 
-  const addDesignProgressRow = () => commitDesignProgressRows([...designProgressRows, createCustomDesignRow()]);
+  const addDesignProgressRow = (kind: DesignProgressKind) => commitDesignProgressRows(kind, [...progressRowsFor(kind), createCustomDesignRow(kind)]);
 
-  const deleteDesignProgressRow = (rowIndex: number) => {
-    const row = designProgressRows[rowIndex];
+  const deleteDesignProgressRow = (kind: DesignProgressKind, rowIndex: number) => {
+    const rows = progressRowsFor(kind);
+    const row = rows[rowIndex];
     if (!row?.isCustom) return;
-    commitDesignProgressRows(designProgressRows.filter((_, index) => index !== rowIndex));
+    commitDesignProgressRows(kind, rows.filter((_, index) => index !== rowIndex));
   };
 
-  const moveDesignProgressRow = (rowIndex: number, direction: -1 | 1) => {
+  const moveDesignProgressRow = (kind: DesignProgressKind, rowIndex: number, direction: -1 | 1) => {
+    const rows = progressRowsFor(kind);
     const destination = rowIndex + direction;
-    if (destination < 0 || destination >= designProgressRows.length) return;
-    const nextRows = [...designProgressRows];
+    if (destination < 0 || destination >= rows.length) return;
+    const nextRows = [...rows];
     [nextRows[rowIndex], nextRows[destination]] = [nextRows[destination], nextRows[rowIndex]];
     if (!hasSequentialDesignDates(nextRows, "plannedDate") || !hasSequentialDesignDates(nextRows, "actualDate")) {
       setNotice("Không thể đổi vị trí vì sẽ làm thứ tự ngày bị lùi. Hãy điều chỉnh ngày trước.");
       return;
     }
-    commitDesignProgressRows(nextRows);
+    commitDesignProgressRows(kind, nextRows);
   };
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
@@ -956,6 +1032,8 @@ export default function Home() {
     });
     persist(nextYears);
     queueDriveSync(updatedRecord);
+    if (value && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
+    if (value && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
     setProtectedAction(null);
     setNotice("Đã đổi tên hồ sơ");
   };
@@ -1193,7 +1271,8 @@ export default function Home() {
     setDriveConfigOpen(false);
     setNotice("Đã kết nối Google Apps Script trên thiết bị này");
     if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
-    if (activeCustomerRecord) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
+    if (activeCustomerRecord && isDemandSelected("NCT-KT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
+    if (activeCustomerRecord && isDemandSelected("NCT-NT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config, "interior");
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
@@ -1225,7 +1304,7 @@ export default function Home() {
     }
   };
 
-  const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
+  const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig, kind: DesignProgressKind = "architecture") => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     if (!config.scriptUrl || !config.token) {
       setDriveConfigOpen(true);
@@ -1242,14 +1321,15 @@ export default function Home() {
           token: config.token,
           year,
           month,
-          record: { ...record, designProgress: normalizeDesignProgress(record) },
+          progressKind: kind,
+          record: { ...record, [designProgressDefinitions[kind].field]: normalizeDesignProgress(record, kind) },
         }),
       });
       const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel tiến độ thiết kế kiến trúc.");
-      setNotice(`Đã cập nhật Tiến độ thiết kế kiến trúc ${record.projectId}.xlsx`);
+      if (!response.ok || !result.ok) throw new Error(result.error || `Không thể tạo Excel ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
+      setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${record.projectId}.xlsx`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể đồng bộ tiến độ thiết kế kiến trúc.");
+      setNotice(error instanceof Error ? error.message : `Không thể đồng bộ ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
     } finally {
       setSyncingDesignId(null);
     }
@@ -1264,18 +1344,21 @@ export default function Home() {
     }, 900);
   };
 
-  const queueDesignProgressSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+  const queueDesignProgressSync = (record: WorkRecord, year = selectedYear, month = selectedMonth, kind: DesignProgressKind = "architecture") => {
     if (!isDriveConnected) return;
-    if (designSyncTimer.current) window.clearTimeout(designSyncTimer.current);
-    designSyncTimer.current = window.setTimeout(() => {
-      designSyncTimer.current = null;
-      void syncDesignProgressToDrive(record, year, month);
+    const timer = designSyncTimers.current[kind];
+    if (timer) window.clearTimeout(timer);
+    designSyncTimers.current[kind] = window.setTimeout(() => {
+      delete designSyncTimers.current[kind];
+      void syncDesignProgressToDrive(record, year, month, undefined, kind);
     }, 900);
   };
 
   useEffect(() => () => {
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
-    if (designSyncTimer.current) window.clearTimeout(designSyncTimer.current);
+    Object.values(designSyncTimers.current).forEach((timer) => {
+      if (timer) window.clearTimeout(timer);
+    });
   }, []);
 
   const selectedAudioNote = selectedRecord?.audioNote;
@@ -1300,6 +1383,76 @@ export default function Home() {
     ...audioDisplayChunks.flatMap((chunk) => [...chunk.segments.map((segment) => segment.text), ...chunk.keyPoints]),
   ].join(" ")).includes(consultingSearchTerm);
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
+  const renderWorkflowCustomerSearch = () => (
+    <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
+      <label className="customer-search workflow-customer-search__input">
+        <span>⌕</span>
+        <input value={workflowSearch} onChange={(event) => setWorkflowSearch(event.target.value)} placeholder="Search khách hàng, mã nhà hoặc ID dự án…" aria-label="Search khách hàng" />
+        {workflowSearch && <button type="button" onClick={() => setWorkflowSearch("")} aria-label="Xóa nội dung Search">×</button>}
+      </label>
+      {workflowSearch && <div className="workflow-customer-search__results">
+        {workflowSearchResults.length ? workflowSearchResults.map((location) => (
+          <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location)}>
+            <span><b>{location.record.name}</b><small>{location.record.projectId}{location.record.houseId ? ` · ${location.record.houseId}` : ""}</small></span>
+            <em>T{location.month} / {location.year} →</em>
+          </button>
+        )) : <p>Không tìm thấy khách hàng phù hợp.</p>}
+      </div>}
+    </section>
+  );
+  const renderDesignSchedule = (kind: DesignProgressKind) => {
+    const definition = designProgressDefinitions[kind];
+    const rows = progressRowsFor(kind);
+    const analysis = progressAnalysisFor(kind);
+    const enabled = isDemandSelected(definition.demandCode);
+    if (!enabled) return <section className="design-schedule design-schedule--disabled">
+      <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><p>Chưa chọn nhu cầu {definition.shortTitle.toLocaleLowerCase("vi")} trong Phiếu thông tin khách hàng.</p></div>
+      <span>Chưa kích hoạt</span>
+    </section>;
+
+    return <section className="design-schedule">
+      <header className="design-schedule__heading">
+        <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
+        <div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
+      </header>
+      <div className="design-progress-table-wrap">
+        <table className="design-progress-table">
+          <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Ngày thực tế</th><th>Người phụ trách</th><th>Ghi chú</th></tr></thead>
+          <tbody>{rows.map((row, index) => (
+            <tr key={row.id}>
+              <td><div className="design-progress-content">
+                {row.isCustom
+                  ? <GrowingTextarea value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
+                  : <b>{row.content}</b>}
+                <span className="design-progress-content__actions">
+                  <button type="button" onClick={() => moveDesignProgressRow(kind, index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
+                  <button type="button" onClick={() => moveDesignProgressRow(kind, index, 1)} disabled={index === rows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
+                  {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
+                </span>
+              </div></td>
+              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
+              <td><GrowingTextarea value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
+              <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+            </tr>
+          ))}</tbody>
+        </table>
+        <button type="button" className="design-progress-add-row" onClick={() => addDesignProgressRow(kind)}><span>＋</span> Thêm dòng tiến độ</button>
+      </div>
+      <section className="design-progress-insights">
+        <div className="design-progress-insights__heading"><div><p className="eyebrow">So sánh lịch</p><h2>Đồ thị kế hoạch và thực tế</h2></div><div className="schedule-legend"><span><i className="is-late" /> Chậm</span><span><i className="is-early" /> Sớm</span><span><i className="is-on-time" /> Bằng kế hoạch</span></div></div>
+        <div className="schedule-charts">
+          <DesignTimelineChart rows={rows} dateKey="plannedDate" title="Đồ thị ngày dự kiến" />
+          <DesignTimelineChart rows={rows} dateKey="actualDate" title="Đồ thị ngày thực tế" />
+        </div>
+        <article className="schedule-analysis">
+          <header><p className="eyebrow">Phân tích tự động</p><h3>5 nhận xét tiến độ</h3><span>Dựa trên chênh lệch từng mốc, không thay thế phân tích đường găng.</span></header>
+          <ol>{analysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
+        </article>
+      </section>
+      <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
+    </section>;
+  };
 
   return (
     <main className="crm-shell">
@@ -1428,7 +1581,7 @@ export default function Home() {
                     <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
                     {section.fields.map((field) => <tr key={field.code}>
                       <td>{field.label} <span className="field-code">({field.code})</span></td>
-                      <td>{field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                         <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
                       </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                     </tr>)}
@@ -1474,51 +1627,26 @@ export default function Home() {
             </section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
-          <section className="design-progress-view">
+          <section className="design-workspace">
+            {renderWorkflowCustomerSearch()}
+            <section className="design-progress-view">
             <header className="design-progress-view__heading">
-              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế kiến trúc</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""} · Ngày tự định dạng dd/mm/yyyy</span></div>
+              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""}</span></div>
               <div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
             </header>
-            <div className="design-progress-table-wrap">
-              <table className="design-progress-table">
-                <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Ngày thực tế</th><th>Ghi chú</th></tr></thead>
-                <tbody>{designProgressRows.map((row, index) => (
-                  <tr key={row.id}>
-                    <td><div className="design-progress-content">
-                      {row.isCustom
-                        ? <GrowingTextarea value={row.content} onChange={(event) => updateDesignProgress(index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
-                        : <b>{row.content}</b>}
-                      <span className="design-progress-content__actions">
-                        <button type="button" onClick={() => moveDesignProgressRow(index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
-                        <button type="button" onClick={() => moveDesignProgressRow(index, 1)} disabled={index === designProgressRows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
-                        {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
-                      </span>
-                    </div></td>
-                    <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-                    <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
-                    <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-              <button type="button" className="design-progress-add-row" onClick={addDesignProgressRow}><span>＋</span> Thêm dòng tiến độ</button>
+            <div className="design-schedules">
+              {renderDesignSchedule("architecture")}
+              {renderDesignSchedule("interior")}
             </div>
-            <section className="design-progress-insights">
-              <div className="design-progress-insights__heading"><div><p className="eyebrow">So sánh lịch</p><h2>Đồ thị kế hoạch và thực tế</h2></div><div className="schedule-legend"><span><i className="is-late" /> Chậm</span><span><i className="is-early" /> Sớm</span><span><i className="is-on-time" /> Bằng kế hoạch</span></div></div>
-              <div className="schedule-charts">
-                <DesignTimelineChart rows={designProgressRows} dateKey="plannedDate" title="Đồ thị ngày dự kiến" />
-                <DesignTimelineChart rows={designProgressRows} dateKey="actualDate" title="Đồ thị ngày thực tế" />
-              </div>
-              <article className="schedule-analysis">
-                <header><p className="eyebrow">Phân tích tự động</p><h3>5 nhận xét tiến độ</h3><span>Dựa trên chênh lệch từng mốc, không thay thế phân tích đường găng.</span></header>
-                <ol>{designScheduleAnalysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
-              </article>
-            </section>
-            <footer className="design-progress-view__footer"><span>File: Tiến độ thiết kế kiến trúc {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
+          </section>
           </section>
         ) : (
-          <section className="coming-soon">
-            <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
-            <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục cùng tên bên trong hồ sơ khách hàng này.</p><a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="add-button">Mở trên Drive ↗</a>
+          <section className="workflow-page">
+            {renderWorkflowCustomerSearch()}
+            <section className="coming-soon">
+              <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
+              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục cùng tên bên trong hồ sơ khách hàng này.</p><a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="add-button">Mở trên Drive ↗</a>
+            </section>
           </section>
         )}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}

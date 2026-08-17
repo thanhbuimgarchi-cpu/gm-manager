@@ -36,7 +36,7 @@ function doPost(event) {
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
-        const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month));
+        const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month), payload.progressKind);
         return json_({ ok: true, ...designResult });
       }
 
@@ -250,14 +250,17 @@ function latestWorkbook_(folder) {
   return latest;
 }
 
-function latestDesignProgressWorkbook_(customerFolder) {
+function latestDesignProgressWorkbook_(customerFolder, progressKind) {
   const designFolder = findFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
   if (!designFolder) return null;
+  const filePattern = progressKind === "interior"
+    ? /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t.*\.xlsx$/i
+    : /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac.*\.xlsx$/i;
   const files = designFolder.getFiles();
   let latest = null;
   while (files.hasNext()) {
     const file = files.next();
-    if (!/^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac.*\.xlsx$/i.test(file.getName())) continue;
+    if (!filePattern.test(file.getName())) continue;
     if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
   }
   return latest;
@@ -333,26 +336,8 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
     details: details,
     functionalFloors: Object.keys(floorsByName).map(function(name) { return floorsByName[name]; }),
   };
-  const designWorkbook = latestDesignProgressWorkbook_(customerFolder);
-  if (designWorkbook) {
-    const designSheets = readXlsxSheets_(designWorkbook);
-    const designRows = designSheets["Ti\u1ebfn \u0111\u1ed9"] || designSheets[Object.keys(designSheets)[0]] || [];
-    const fixedDesignContents = ["T\u01b0 v\u1ea5n concept", "M\u1eb7t b\u1eb1ng c\u00f4ng n\u0103ng", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"];
-    record.designProgress = designRows.slice(1).filter(function(row) {
-      return row.slice(0, 6).some(function(value) { return String(value || "").trim(); });
-    }).map(function(row, index) {
-      const content = String(row[0] || "");
-      const customCell = String(row[5] || "").toLowerCase();
-      return {
-        id: String(row[4] || ("design-drive-" + projectId + "-" + index)),
-        isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedDesignContents.indexOf(content) === -1,
-        content: content,
-        plannedDate: String(row[1] || ""),
-        actualDate: String(row[2] || ""),
-        note: String(row[3] || ""),
-      };
-    });
-  }
+  record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
+  record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
   if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
       fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
@@ -367,6 +352,37 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
     };
   }
   return record;
+}
+
+function readDesignProgress_(customerFolder, projectId, progressKind) {
+  const workbook = latestDesignProgressWorkbook_(customerFolder, progressKind);
+  if (!workbook) return [];
+  const sheets = readXlsxSheets_(workbook);
+  const rows = sheets["Ti\u1ebfn \u0111\u1ed9"] || sheets[Object.keys(sheets)[0]] || [];
+  const header = rows[0] || [];
+  const hasAssignee = String(header[3] || "") === "Ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch";
+  const noteColumn = hasAssignee ? 4 : 3;
+  const idColumn = hasAssignee ? 5 : 4;
+  const customColumn = hasAssignee ? 6 : 5;
+  const fixedContents = progressKind === "interior"
+    ? ["Ki\u1ec3m tra v\u00e0 kh\u1edbp MBCN", "T\u01b0 v\u1ea5n concept n\u1ed9i th\u1ea5t", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt n\u1ed9i th\u1ea5t", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"]
+    : ["T\u01b0 v\u1ea5n concept", "M\u1eb7t b\u1eb1ng c\u00f4ng n\u0103ng", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"];
+  const prefix = progressKind === "interior" ? "interior-design" : "design";
+  return rows.slice(1).filter(function(row) {
+    return row.slice(0, customColumn + 1).some(function(value) { return String(value || "").trim(); });
+  }).map(function(row, index) {
+    const content = String(row[0] || "");
+    const customCell = String(row[customColumn] || "").toLowerCase();
+    return {
+      id: String(row[idColumn] || (prefix + "-drive-" + projectId + "-" + index)),
+      isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedContents.indexOf(content) === -1,
+      content: content,
+      plannedDate: String(row[1] || ""),
+      actualDate: String(row[2] || ""),
+      assignee: hasAssignee ? String(row[3] || "") : "",
+      note: String(row[noteColumn] || ""),
+    };
+  });
 }
 
 function readXlsxSheets_(file) {
@@ -466,26 +482,28 @@ function exportCustomerWorkbook_(record, year, month) {
   }
 }
 
-function exportDesignProgressWorkbook_(record, year, month) {
+function exportDesignProgressWorkbook_(record, year, month, progressKind) {
   const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
   const designFolder = getOrCreateFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
-  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac " + record.projectId + ".xlsx";
-  const spreadsheet = SpreadsheetApp.create("GM-CRM design progress temporary " + record.projectId);
+  const isInterior = progressKind === "interior";
+  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + (isInterior ? "n\u1ed9i th\u1ea5t " : "ki\u1ebfn tr\u00fac ") + record.projectId + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM " + (isInterior ? "interior " : "architecture ") + "design progress temporary " + record.projectId);
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Ti\u1ebfn \u0111\u1ed9");
-    const rows = (record.designProgress || []).map(function(row) {
-      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false"];
+    const rows = (isInterior ? record.interiorDesignProgress || [] : record.designProgress || []).map(function(row) {
+      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.assignee || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false"];
     });
-    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh"]].concat(rows);
-    sheet.getRange(1, 1, values.length, 6).setValues(values).setVerticalAlignment("top").setWrap(true);
-    sheet.getRange(1, 1, 1, 6).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
+    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh"]].concat(rows);
+    sheet.getRange(1, 1, values.length, 7).setValues(values).setVerticalAlignment("top").setWrap(true).setFontFamily("Roboto");
+    sheet.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
     sheet.setFrozenRows(1);
     sheet.setColumnWidth(1, 220);
     sheet.setColumnWidth(2, 125);
     sheet.setColumnWidth(3, 125);
-    sheet.setColumnWidth(4, 420);
-    sheet.hideColumns(5, 2);
+    sheet.setColumnWidth(4, 160);
+    sheet.setColumnWidth(5, 420);
+    sheet.hideColumns(6, 2);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(designFolder, fileName);
