@@ -129,8 +129,6 @@ function processStoredAudioChunk_(payload) {
   const baseName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + ".";
   const audioFolder = getAudioFolder_(year, month, projectId, false);
   let audioFile = findFileByPrefix_(audioFolder, baseName);
-  // Continue recordings started with the previous T\u01b0 v\u1ea5n/year/month layout.
-  if (!audioFile) audioFile = findFileByPrefix_(getLegacyCustomerFolder_(year, month, projectId), baseName);
   if (!audioFile) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y \u0111o\u1ea1n ghi \u00e2m " + (chunkIndex + 1) + "/" + totalChunks + " tr\u00ean Drive.");
   const blob = audioFile.getBlob();
   const result = processAudioInsight_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
@@ -193,13 +191,9 @@ function loadConsultingWorkspace_() {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const yearsByNumber = {};
   const seenProjects = {};
-  // Current structure: GM-Manager / Khach hang / year / month / project.
+  // Only supported structure: GM-Manager / Khach hang / year / month / project.
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
   if (customers) collectCustomerWorkbooks_(customers, yearsByNumber, seenProjects);
-  // Keep read-only fallbacks so older deployments never hide existing records.
-  collectCustomerWorkbooks_(root, yearsByNumber, seenProjects);
-  const legacyConsulting = findFolder_(root, "T\u01b0 v\u1ea5n");
-  if (legacyConsulting) collectCustomerWorkbooks_(legacyConsulting, yearsByNumber, seenProjects);
   const years = Object.keys(yearsByNumber).map(function(year) { return yearsByNumber[year]; });
   years.sort(function(a, b) { return a.year - b.year; });
   return { ok: true, years: years };
@@ -230,7 +224,7 @@ function collectCustomerWorkbooks_(container, yearsByNumber, seenProjects) {
         if (projectId.indexOf("-") === 0) continue;
         const projectKey = yearName + "/" + match[1] + "/" + projectId;
         if (seenProjects[projectKey]) continue;
-        const workbook = latestWorkbook_(customerFolder);
+        const workbook = latestCustomerWorkbook_(customerFolder, projectId);
         if (!workbook) continue;
         months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId, customerFolder));
         seenProjects[projectKey] = true;
@@ -248,6 +242,21 @@ function latestWorkbook_(folder) {
     if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
   }
   return latest;
+}
+
+function latestCustomerWorkbook_(customerFolder, projectId) {
+  const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + projectId + ".xlsx";
+  const consultingFolder = findFolder_(customerFolder, "T\u01b0 v\u1ea5n");
+  const currentWorkbook = consultingFolder ? findFileByName_(consultingFolder, fileName) : null;
+  if (currentWorkbook) return currentWorkbook;
+
+  // Migrate the former project-root workbook exactly once, preserving the file
+  // while putting it into the required T\u01b0 v\u1ea5n folder.
+  const legacyWorkbook = findFileByName_(customerFolder, fileName);
+  if (!legacyWorkbook) return null;
+  const targetFolder = consultingFolder || getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
+  legacyWorkbook.moveTo(targetFolder);
+  return legacyWorkbook;
 }
 
 function latestDesignProgressWorkbook_(customerFolder, progressKind) {
@@ -463,18 +472,21 @@ function keyValueRows_(rows) {
 
 function exportCustomerWorkbook_(record, year, month) {
   const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const consultingFolder = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
   const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + record.projectId + ".xlsx";
 
   const spreadsheet = SpreadsheetApp.create("GM-CRM temporary " + record.projectId);
   try {
     writeWorkbook_(spreadsheet, record);
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
-    trashFilesByName_(customerFolder, fileName);
-    const xlsxFile = customerFolder.createFile(xlsxBlob);
+    const legacyWorkbook = findFileByName_(customerFolder, fileName);
+    if (legacyWorkbook) legacyWorkbook.moveTo(consultingFolder);
+    trashFilesByName_(consultingFolder, fileName);
+    const xlsxFile = consultingFolder.createFile(xlsxBlob);
     return {
       fileId: xlsxFile.getId(),
       fileUrl: xlsxFile.getUrl(),
-      folderUrl: customerFolder.getUrl(),
+      folderUrl: consultingFolder.getUrl(),
       fileName: fileName,
     };
   } finally {
@@ -632,16 +644,6 @@ function ensureProjectFolders_(customerFolder) {
   getOrCreateFolder_(dataFolder, "Ghi \u00e2m");
 }
 
-function getLegacyCustomerFolder_(year, month, projectId) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  const consulting = findFolder_(root, "T\u01b0 v\u1ea5n");
-  if (!consulting) return null;
-  const yearFolder = findFolder_(consulting, String(year));
-  if (!yearFolder) return null;
-  const monthFolder = findFolder_(yearFolder, "T" + month);
-  return monthFolder ? findFolder_(monthFolder, projectId) : null;
-}
-
 function getAudioFolder_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
   if (!customerFolder) return null;
@@ -664,6 +666,12 @@ function findFileByPrefix_(folder, prefix) {
 
 function findFolder_(parent, name) {
   const matches = parent.getFoldersByName(name);
+  return matches.hasNext() ? matches.next() : null;
+}
+
+function findFileByName_(folder, name) {
+  if (!folder) return null;
+  const matches = folder.getFilesByName(name);
   return matches.hasNext() ? matches.next() : null;
 }
 

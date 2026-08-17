@@ -123,7 +123,6 @@ type CustomerLocation = {
 type DriveFolder = {
   label: string;
   icon: string;
-  url: string;
 };
 
 type DriveSyncConfig = {
@@ -146,27 +145,20 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
 };
 
 const syncedDriveFolders: DriveFolder[] = [
-  { label: "-DATA", icon: "◫", url: "https://drive.google.com/drive/folders/1KtXRW5p5tuY4qLC8q0hOG5dcKtnCfCu-" },
-  { label: "Tư vấn", icon: "⌂", url: "https://drive.google.com/drive/folders/16ItUFlDizo1xfyJEAnXeHWbsot2r_Wep" },
-  { label: "Thiết kế", icon: "▣", url: "https://drive.google.com/drive/folders/1DZ9x1xvDFj2C_1tgPw9hxXGWwxbgO7q5" },
-  { label: "Dự toán", icon: "⌁", url: "https://drive.google.com/drive/folders/1loJbkEr_FT8iWf0Q4yFPKf6z4GmDJd9B" },
-  { label: "Thi công", icon: "♧", url: "https://drive.google.com/drive/folders/1l8QbIOmsjUPxk7WSQP0rhvp9__I7fwyc" },
-  { label: "Nghiệm thu", icon: "✓", url: "https://drive.google.com/drive/folders/1UtILAuZidLcluaheQDxGt4XXeUUa5rOr" },
-  { label: "Bảo hành", icon: "⚙", url: "https://drive.google.com/drive/folders/1xPYkwM5i6tO9F_O5aPAAVKbtKecj6_U_" },
-  { label: "Nhân lực", icon: "♙", url: "https://drive.google.com/drive/folders/1tQEoQPp38kinet7FzjVFF0-k6O7YJqcN" },
+  { label: "-DATA", icon: "◫" },
+  { label: "Tư vấn", icon: "⌂" },
+  { label: "Thiết kế", icon: "▣" },
+  { label: "Dự toán", icon: "⌁" },
+  { label: "Thi công", icon: "♧" },
+  { label: "Nghiệm thu", icon: "✓" },
+  { label: "Bảo hành", icon: "⚙" },
+  { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
 
 const initialYears: YearFolder[] = [
   { year: 2024, months: buildMonths() },
   { year: 2025, months: buildMonths() },
   { year: 2026, months: buildMonths() },
-];
-
-const team = [
-  ["SP", "Sandra Perry", "Product Manager", "lavender"],
-  ["AC", "Antony Cardenas", "Sales Manager", "sand"],
-  ["JC", "Jamal Connolly", "Growth Marketer", "rose"],
-  ["CC", "Cara Cerr", "SEO Specialist", "sage"],
 ];
 
 type DetailField = {
@@ -1525,21 +1517,9 @@ export default function Home() {
             <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
               <span>{folder.label}</span>
-              <span className="nav-row__drive">↗</span>
             </button>
           ))}
         </nav>
-
-        <section className="members">
-          <div className="members__heading"><p className="sidebar-label">Members</p><button aria-label="Invite member" className="plain-plus">+</button></div>
-          {team.map(([initials, name, role, color]) => (
-            <div className="member" key={name}>
-              <span className={`avatar avatar--${color}`}>{initials}</span>
-              <span><b>{name}</b><small>{role}</small></span>
-            </div>
-          ))}
-          <div className="member member--you"><span className="avatar avatar--you">IR</span><span><b>Ilona Rollins</b><small>CRM Specialist</small></span><span className="logout">↪</span></div>
-        </section>
       </aside>
 
       <section className="workspace">
@@ -1629,23 +1609,19 @@ export default function Home() {
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-workspace">
             {renderWorkflowCustomerSearch()}
-            <section className="design-progress-view">
-            <header className="design-progress-view__heading">
-              <div><p className="eyebrow">Thiết kế · {activeCustomerRecord?.projectId}</p><h1>Tiến độ thiết kế</h1><span>{activeCustomerRecord?.name}{activeCustomerRecord?.houseId ? ` · ${activeCustomerRecord.houseId}` : ""}</span></div>
-              <div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
-            </header>
-            <div className="design-schedules">
-              {renderDesignSchedule("architecture")}
-              {renderDesignSchedule("interior")}
-            </div>
-          </section>
+            <section className="design-progress-view design-progress-view--bare">
+              <div className="design-schedules">
+                {renderDesignSchedule("architecture")}
+                {renderDesignSchedule("interior")}
+              </div>
+            </section>
           </section>
         ) : (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
             <section className="coming-soon">
               <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
-              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục cùng tên bên trong hồ sơ khách hàng này.</p><a href={activeDriveFolder?.url} target="_blank" rel="noreferrer" className="add-button">Mở trên Drive ↗</a>
+              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
             </section>
           </section>
         )}
