@@ -1065,7 +1065,8 @@ export default function Home() {
       if (!response.ok || !result.ok || !result.files) throw new Error(result.error || "Không thể nạp danh sách tệp.");
       setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: result.files ?? [] }));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
+      const rawMessage = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
+      const message = rawMessage.includes("Thiếu dữ liệu hồ sơ") ? "Apps Script chưa được cập nhật chức năng nạp danh sách tệp." : rawMessage;
       setWorkflowFilesError(message);
       if (!quietly) setNotice(message);
     } finally {
