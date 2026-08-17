@@ -7,10 +7,10 @@
  * 4. In Project Settings > Script properties, add GEMINI_API_KEY from Google AI Studio.
  */
 
-const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
+const ROOT_FOLDER_ID = "PASTE_DRIVE_ROOT_FOLDER_ID_HERE";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
-// Token is intentionally pre-set to the value configured in GM-CRM.
-const WEB_SYNC_TOKEN = "010101";
+// Paste the same private token that you enter in GM-CRM's Drive connection form.
+const WEB_SYNC_TOKEN = "PASTE_PRIVATE_SYNC_TOKEN_HERE";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 function doPost(event) {

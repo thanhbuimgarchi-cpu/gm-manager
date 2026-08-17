@@ -155,8 +155,49 @@ const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, re
 const driveSyncConfigKey = "gm-manager-apps-script";
 const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
-  token: "010101",
+  token: "",
 };
+
+function isAppsScriptUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "script.google.com" && url.pathname.startsWith("/macros/s/");
+  } catch {
+    return false;
+  }
+}
+
+async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
+  if (!isAppsScriptUrl(config.scriptUrl) || !config.token) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
+  const response = await fetch(config.scriptUrl, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify({ ...payload, token: config.token }),
+    redirect: "follow",
+  });
+  const responseText = await response.text();
+  let result: T;
+  try {
+    result = JSON.parse(responseText) as T;
+  } catch {
+    throw new Error("Google Apps Script trả về dữ liệu không hợp lệ. Hãy triển khai lại Script.");
+  }
+  return { response, result };
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const blockSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += blockSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + blockSize));
+  return btoa(binary);
+}
+
+function browserAudioMimeType(file: File) {
+  if (file.type.startsWith("audio/")) return file.type;
+  const extension = file.name.toLowerCase().split(".").pop();
+  return ({ mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", flac: "audio/flac" } as Record<string, string>)[extension ?? ""] ?? "";
+}
 
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫" },
@@ -844,11 +885,19 @@ export default function Home() {
       }
     }
 
-    // This public installation always uses the verified GM-CRM endpoint.
-    // Replacing a stale value also fixes old tabs that saved an earlier deployment URL.
+    const savedConfig = window.localStorage.getItem(driveSyncConfigKey);
+    if (savedConfig) {
+      try {
+        const config = JSON.parse(savedConfig) as Partial<DriveSyncConfig>;
+        setDriveScriptUrl(config.scriptUrl || defaultDriveSyncConfig.scriptUrl);
+        setDriveSyncToken(config.token || "");
+        return;
+      } catch {
+        window.localStorage.removeItem(driveSyncConfigKey);
+      }
+    }
     setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
-    setDriveSyncToken(defaultDriveSyncConfig.token);
-    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
+    setDriveSyncToken("");
   }, []);
 
   const activeDriveFolder = syncedDriveFolders.find((folder) => folder.label === activeFolder);
@@ -940,12 +989,7 @@ export default function Home() {
     const month = options.month ?? selectedMonth;
     setIsLoadingDrive(true);
     try {
-      const response = await fetch("/api/drive-load", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...config, mode, year, month, query: options.query, projectId: options.projectId }),
-      });
-      const result = await response.json() as { ok?: boolean; error?: string; years?: YearFolder[] };
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId });
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
@@ -961,20 +1005,16 @@ export default function Home() {
 
   useEffect(() => {
     const currentDate = getVietnamDate();
-    void loadWorkspaceFromDrive(defaultDriveSyncConfig, true, { mode: "index", year: currentDate.year, month: currentDate.month });
-  }, []);
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (config.token) void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
+  }, [driveScriptUrl, driveSyncToken]);
 
   const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
     const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     if (!config.scriptUrl || !config.token) return;
     setLoadingCustomerId(location.record.projectId);
     try {
-      const response = await fetch("/api/drive-load", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...config, mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId }),
-      });
-      const result = await response.json() as { ok?: boolean; error?: string; record?: WorkRecord };
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId });
       if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp chi tiết hồ sơ.");
       persistRecord({ ...result.record, isHydrated: true }, location.year, location.month);
     } catch (error) {
@@ -1169,7 +1209,7 @@ export default function Home() {
   const confirmAccessCode = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!protectedAction) return;
-    if (accessCode !== "010101") {
+    if (!driveSyncToken.trim() || accessCode !== driveSyncToken.trim()) {
       setNotice("Khóa không đúng");
       return;
     }
@@ -1231,7 +1271,7 @@ export default function Home() {
 
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
     if (!startingRecord.audioNote) throw new Error("Chưa có tiến độ ghi âm để tiếp tục.");
-    const config = defaultDriveSyncConfig;
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     let workingRecord = startingRecord;
     let workingChunks = normalizeAudioNoteChunks(startingRecord.audioNote);
     const totalChunks = startingRecord.audioNote.totalChunks ?? workingChunks.length;
@@ -1242,25 +1282,9 @@ export default function Home() {
       setAudioProcessingStatus(`Đang xử lý đoạn ${index + 1}/${totalChunks}…`);
       let result: AudioProcessResponse | null = null;
       for (let attempt = 0; attempt < 5; attempt += 1) {
-        const response = await fetch("/api/audio-process", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scriptUrl: config.scriptUrl,
-            token: config.token,
-            year,
-            month,
-            projectId: startingRecord.projectId,
-            chunkIndex: index,
-            totalChunks,
-          }),
-        });
-        const responseText = await response.text();
-        try {
-          result = JSON.parse(responseText) as AudioProcessResponse;
-        } catch {
-          throw new Error("Không thể đọc phản hồi khi xử lý file ghi âm. Hãy thử lại sau.");
-        }
+        const directResponse = await postToAppsScript<AudioProcessResponse>(config, { action: "process-audio-chunk", year, month, projectId: startingRecord.projectId, chunkIndex: index, totalChunks });
+        const response = directResponse.response;
+        result = directResponse.result;
         if (response.ok && result?.ok && result.segments) break;
         const errorMessage = result?.error || "Không thể xử lý file ghi âm.";
         const retrySeconds = quotaRetrySeconds(errorMessage);
@@ -1322,7 +1346,7 @@ export default function Home() {
       return;
     }
 
-    const config = defaultDriveSyncConfig;
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     const record = selectedRecord;
     setAudioProcessingId(record.id);
     setAudioProcessingStatus("Đang chuẩn bị bản ghi…");
@@ -1330,24 +1354,21 @@ export default function Home() {
       const chunks = await splitAudioForProcessing(file);
       for (let index = 0; index < chunks.length; index += 1) {
         setAudioProcessingStatus(`Đang lưu file ghi âm ${index + 1}/${chunks.length} vào Drive…`);
-        const formData = new FormData();
-        formData.append("audio", chunks[index].file);
-        formData.append("scriptUrl", config.scriptUrl);
-        formData.append("token", config.token);
-        formData.append("year", String(selectedYear));
-        formData.append("month", String(selectedMonth));
-        formData.append("projectId", record.projectId);
-        formData.append("chunkIndex", String(index));
-        formData.append("totalChunks", String(chunks.length));
-        formData.append("originalFileName", file.name);
-        const response = await fetch("/api/audio-store", { method: "POST", body: formData });
-        const responseText = await response.text();
-        let result: { ok?: boolean; error?: string };
-        try {
-          result = JSON.parse(responseText) as typeof result;
-        } catch {
-          throw new Error("Không thể lưu file ghi âm vào Drive. Hãy cập nhật lại Apps Script.");
-        }
+        const chunkFile = chunks[index].file;
+        const mimeType = browserAudioMimeType(chunkFile);
+        if (!mimeType) throw new Error("Không xác định được định dạng đoạn ghi âm.");
+        const directResponse = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
+          action: "store-audio-chunk",
+          year: selectedYear,
+          month: selectedMonth,
+          projectId: record.projectId,
+          chunkIndex: index,
+          totalChunks: chunks.length,
+          originalFileName: file.name,
+          audio: { fileName: chunkFile.name, mimeType, data: bytesToBase64(new Uint8Array(await chunkFile.arrayBuffer())) },
+        });
+        const response = directResponse.response;
+        const result = directResponse.result;
         if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu file ghi âm vào Drive.");
       }
 
@@ -1433,6 +1454,7 @@ export default function Home() {
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
     setNotice("Đã kết nối Google Apps Script trên thiết bị này");
+    void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth });
     if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
     if (activeCustomerRecord && isDemandSelected("NCT-KT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
     if (activeCustomerRecord && isDemandSelected("NCT-NT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config, "interior");
@@ -1447,18 +1469,12 @@ export default function Home() {
     }
     setSyncingRecordId(record.id);
     try {
-      const response = await fetch("/api/drive-sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scriptUrl: config.scriptUrl,
-          token: config.token,
-          year,
-          month,
-          record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
-        }),
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; fileUrl?: string }>(config, {
+        action: "sync-customer",
+        year,
+        month,
+        record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
       });
-      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo file Excel.");
       setNotice(`Đã xuất ${record.projectId}.xlsx vào Drive`);
     } catch (error) {
@@ -1476,20 +1492,13 @@ export default function Home() {
     }
     setSyncingDesignId(record.id);
     try {
-      const response = await fetch("/api/drive-sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "sync-design-progress",
-          scriptUrl: config.scriptUrl,
-          token: config.token,
-          year,
-          month,
-          progressKind: kind,
-          record: { ...record, [designProgressDefinitions[kind].field]: normalizeDesignProgress(record, kind) },
-        }),
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; fileUrl?: string }>(config, {
+        action: "sync-design-progress",
+        year,
+        month,
+        progressKind: kind,
+        record: { ...record, [designProgressDefinitions[kind].field]: normalizeDesignProgress(record, kind) },
       });
-      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || `Không thể tạo Excel ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
       setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${record.projectId}.xlsx`);
     } catch (error) {
@@ -1507,19 +1516,12 @@ export default function Home() {
     }
     setSyncingWarrantyId(record.id);
     try {
-      const response = await fetch("/api/drive-sync", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "sync-warranty",
-          scriptUrl: config.scriptUrl,
-          token: config.token,
-          year,
-          month,
-          record: { ...record, warrantyProgress: normalizeWarrantyProgress(record) },
-        }),
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; fileUrl?: string }>(config, {
+        action: "sync-warranty",
+        year,
+        month,
+        record: { ...record, warrantyProgress: normalizeWarrantyProgress(record) },
       });
-      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel Phiếu thông tin bảo hành.");
       setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${record.projectId}.xlsx`);
     } catch (error) {
@@ -1902,7 +1904,7 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
             <p className="drive-config-dialog__hint">GM-CRM đã được gán sẵn Web app GM-Manager. Bạn không cần đăng nhập hay nhập lại khi mở web.</p>
-            <a className="script-link" href="/gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
+            <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             <label>Mã đồng bộ<input type="password" value={driveSyncToken} onChange={(event) => setDriveSyncToken(event.target.value)} placeholder="Mã bạn đã đặt trong Script" /></label>
             <button className="add-button" type="submit">Lưu kết nối</button>
