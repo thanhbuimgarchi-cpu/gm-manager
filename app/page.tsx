@@ -137,6 +137,13 @@ type DriveFolder = {
   icon: string;
 };
 
+type PersonnelCategory = {
+  id: string;
+  label: string;
+  icon: string;
+  description: string;
+};
+
 type DriveSyncConfig = {
   scriptUrl: string;
 };
@@ -210,6 +217,14 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Bảo hành", icon: "⚙" },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
+
+const personnelCategories: PersonnelCategory[] = [
+  { id: "office", label: "Nhân viên văn phòng", icon: "▤", description: "Hành chính, kế toán, kinh doanh và thiết kế" },
+  { id: "site", label: "Nhân viên công trình", icon: "⌂", description: "Chỉ huy, giám sát và điều phối công trình" },
+  { id: "construction", label: "Nhân công xây dựng", icon: "♧", description: "Đội thi công, thợ xây và thợ hoàn thiện" },
+  { id: "workshop", label: "Nhân công xưởng", icon: "▥", description: "Sản xuất, gia công và lắp đặt nội thất" },
+  { id: "partner", label: "Đối tác", icon: "◇", description: "Nhà cung cấp, thầu phụ và đơn vị phối hợp" },
+];
 
 const initialYears: YearFolder[] = [
   { year: 2024, months: buildMonths() },
@@ -838,6 +853,8 @@ export default function Home() {
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
+  const [personnelSearch, setPersonnelSearch] = useState("");
+  const [selectedPersonnelCategoryId, setSelectedPersonnelCategoryId] = useState<string | null>(null);
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -1575,6 +1592,11 @@ export default function Home() {
     ...audioDisplayChunks.flatMap((chunk) => [...chunk.segments.map((segment) => segment.text), ...chunk.keyPoints]),
   ].join(" ")).includes(consultingSearchTerm);
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
+  const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? null;
+  const visiblePersonnelCategories = personnelCategories.filter((category) => {
+    const query = personnelSearch.trim().toLocaleLowerCase("vi");
+    return !query || `${category.label} ${category.description}`.toLocaleLowerCase("vi").includes(query);
+  });
   const renderWorkflowCustomerSearch = () => (
     <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
@@ -1692,12 +1714,33 @@ export default function Home() {
           </header>
 
           {personnelView ? (
-            <div className="personnel-placeholder">
-              <button className="gateway-back" onClick={() => setPersonnelView(false)}>← Quay lại tìm khách hàng</button>
-              <span className="personnel-placeholder__icon">♙</span>
-              <p className="eyebrow">GM-Manager</p>
-              <h1>Nhân lực</h1>
-              <p>Đây là khu vực riêng cho dữ liệu nhân lực. Giao diện chi tiết sẽ được xây dựng ở bước tiếp theo.</p>
+            <div className="customer-gateway__body personnel-gateway">
+              <button className="gateway-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Quay lại tìm khách hàng</button>
+              <div className="personnel-entry customer-entry">
+                <span className="personnel-entry__icon customer-entry__icon">♙</span>
+                <span><b>{selectedPersonnelCategory?.label ?? "Nhân lực"}</b><small>{selectedPersonnelCategory ? "Quản lý nhân sự theo nhóm đã chọn" : "Chọn nhóm nhân lực để quản lý"}</small></span>
+                <em>{selectedPersonnelCategory ? "Nhóm" : `${personnelCategories.length} nhóm`}</em>
+              </div>
+              <label className="customer-search">
+                <span>⌕</span>
+                <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={selectedPersonnelCategory ? `Search trong ${selectedPersonnelCategory.label.toLocaleLowerCase("vi")}…` : "Tìm nhóm nhân sự hoặc đối tác…"} aria-label="Tìm nhóm nhân lực" autoFocus />
+              </label>
+
+              {selectedPersonnelCategory ? (
+                <div className="customer-search-results personnel-category-detail">
+                  <div className="customer-search-empty"><span>{selectedPersonnelCategory.icon}</span><p>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory.label}</b>.</p><button onClick={() => { setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Chọn nhóm khác</button></div>
+                </div>
+              ) : (
+                <div className="customer-search-results personnel-category-results">
+                  {visiblePersonnelCategories.length ? visiblePersonnelCategories.map((category) => (
+                    <button key={category.id} className="customer-result personnel-category-result" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); }}>
+                      <span className="customer-result__folder">{category.icon}</span>
+                      <span className="customer-result__identity"><b>{category.label}</b><small>{category.description}</small></span>
+                      <span className="customer-result__date">0 hồ sơ</span><span className="customer-result__arrow">→</span>
+                    </button>
+                  )) : <div className="customer-search-empty"><span>∅</span><p>Không tìm thấy nhóm nhân lực phù hợp.</p></div>}
+                </div>
+              )}
             </div>
           ) : (
             <div className="customer-gateway__body">
