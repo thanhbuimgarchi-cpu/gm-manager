@@ -137,6 +137,14 @@ type DriveFolder = {
   icon: string;
 };
 
+type WorkflowFile = {
+  id: string;
+  name: string;
+  url: string;
+  updatedAt: string;
+  mimeType: string;
+};
+
 type PersonnelCategory = {
   id: string;
   label: string;
@@ -876,6 +884,9 @@ export default function Home() {
   const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
   const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
+  const [workflowFilesByFolder, setWorkflowFilesByFolder] = useState<Record<string, WorkflowFile[]>>({});
+  const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
+  const [workflowFilesError, setWorkflowFilesError] = useState("");
   const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
@@ -1036,6 +1047,35 @@ export default function Home() {
       setLoadingCustomerId(null);
     }
   };
+
+  const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
+  const loadWorkflowFiles = async (folder = activeFolder, quietly = true) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const cacheKey = workflowFilesCacheKey(folder);
+    setLoadingWorkflowFiles(true);
+    setWorkflowFilesError("");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; files?: WorkflowFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "list-workflow-files",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        workflow: folder,
+      });
+      if (!response.ok || !result.ok || !result.files) throw new Error(result.error || "Không thể nạp danh sách tệp.");
+      setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: result.files ?? [] }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
+      setWorkflowFilesError(message);
+      if (!quietly) setNotice(message);
+    } finally {
+      setLoadingWorkflowFiles(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedCustomerLocation) void loadWorkflowFiles(activeFolder, true);
+  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim();
@@ -1597,6 +1637,25 @@ export default function Home() {
     const query = personnelSearch.trim().toLocaleLowerCase("vi");
     return !query || `${category.label} ${category.description}`.toLocaleLowerCase("vi").includes(query);
   });
+  const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
+  const renderWorkflowFiles = () => (
+    <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
+      <header className="workflow-files__heading">
+        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Không bao gồm Phiếu thông tin và các tệp Excel tiến độ đang hiển thị trên web.</span></div>
+        <button type="button" onClick={() => void loadWorkflowFiles(activeFolder, false)} disabled={loadingWorkflowFiles}>{loadingWorkflowFiles ? "Đang nạp…" : "Nạp tệp"}</button>
+      </header>
+      <div className="workflow-files__list">
+        {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
+          : workflowFilesError ? <p className="workflow-files__empty">Chưa thể nạp tệp: {workflowFilesError}</p>
+          : currentWorkflowFiles.length ? currentWorkflowFiles.map((file) => (
+            <a key={file.id} className="workflow-file" href={file.url} target="_blank" rel="noreferrer">
+              <span className="workflow-file__icon">{file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
+              <span><b>{file.name}</b><small>Chỉnh sửa: {file.updatedAt}</small></span><em>↗</em>
+            </a>
+          )) : <p className="workflow-files__empty">Chưa có tệp ngoài các phiếu Excel hệ thống trong thư mục này.</p>}
+      </div>
+    </section>
+  );
   const renderWorkflowCustomerSearch = () => (
     <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
@@ -1814,6 +1873,8 @@ export default function Home() {
               {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa nội dung Search">×</button>}
             </label>
 
+            {renderWorkflowFiles()}
+
             {selectedRecord && <section className="record-detail record-detail--inline">
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
@@ -1885,6 +1946,7 @@ export default function Home() {
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-workspace">
             {renderWorkflowCustomerSearch()}
+            {renderWorkflowFiles()}
             <section className="design-progress-view design-progress-view--bare">
               <div className="design-schedules">
                 {renderDesignSchedule("architecture")}
@@ -1895,6 +1957,7 @@ export default function Home() {
         ) : activeFolder === "Bảo hành" ? (
           <section className="design-workspace warranty-workspace">
             {renderWorkflowCustomerSearch()}
+            {renderWorkflowFiles()}
             <section className="design-progress-view design-progress-view--bare">
               {renderWarrantySchedule()}
             </section>
@@ -1902,6 +1965,7 @@ export default function Home() {
         ) : (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
+            {renderWorkflowFiles()}
             <section className="coming-soon">
               <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
               <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>

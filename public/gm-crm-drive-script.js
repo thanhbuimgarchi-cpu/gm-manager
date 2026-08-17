@@ -25,6 +25,7 @@ function doPost(event) {
         audioLock.releaseLock();
       }
     }
+    if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
     const lock = LockService.getScriptLock();
@@ -788,6 +789,49 @@ function exportXlsx_(spreadsheetId) {
 function getOrCreateFolder_(parent, name) {
   const matches = parent.getFoldersByName(name);
   return matches.hasNext() ? matches.next() : parent.createFolder(name);
+}
+
+function listWorkflowFiles_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const workflow = String(payload.workflow || "").trim();
+  const allowedWorkflows = ["T\u01b0 v\u1ea5n", "Thi\u1ebft k\u1ebf", "D\u1ef1 to\u00e1n", "Thi c\u00f4ng", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh"];
+  if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c c\u1ea7n n\u1ea1p.");
+
+  const customerFolder = getCustomerFolder_(year, month, projectId, false);
+  if (!customerFolder) return { ok: true, files: [] };
+  const workflowFolder = findFolder_(customerFolder, workflow);
+  if (!workflowFolder) return { ok: true, files: [] };
+
+  const files = [];
+  const iterator = workflowFolder.getFiles();
+  while (iterator.hasNext()) {
+    const file = iterator.next();
+    if (isSpecialWorkflowWorkbook_(file.getName())) continue;
+    files.push({
+      id: file.getId(),
+      name: file.getName(),
+      url: file.getUrl(),
+      updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+      mimeType: file.getMimeType(),
+      updatedAtMillis: file.getLastUpdated().getTime(),
+    });
+  }
+  files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
+  return { ok: true, files: files.map(function(file) {
+    return { id: file.id, name: file.name, url: file.url, updatedAt: file.updatedAt, mimeType: file.mimeType };
+  }) };
+}
+
+function isSpecialWorkflowWorkbook_(name) {
+  const normalized = String(name || "").toLowerCase();
+  return [
+    "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng",
+    "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac",
+    "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t",
+    "Phi\u1ebfu th\u00f4ng tin b\u1ea3o h\u00e0nh",
+  ].some(function(prefix) { return normalized.indexOf(prefix.toLowerCase()) === 0; });
 }
 
 function getCustomerFolder_(year, month, projectId, createMissing) {
