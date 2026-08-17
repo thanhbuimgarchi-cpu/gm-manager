@@ -137,7 +137,7 @@ type DriveFolder = {
 type WorkflowFile = {
   id: string;
   name: string;
-  url: string;
+  downloadUrl: string;
   updatedAt: string;
   mimeType: string;
 };
@@ -1616,16 +1616,15 @@ export default function Home() {
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
       <header className="workflow-files__heading">
-        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Không bao gồm Phiếu thông tin và các tệp Excel tiến độ đang hiển thị trên web.</span></div>
-        <button type="button" onClick={() => void loadWorkflowFiles(activeFolder, false)} disabled={loadingWorkflowFiles}>{loadingWorkflowFiles ? "Đang nạp…" : "Nạp tệp"}</button>
+        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Tên tệp và ngày chỉnh sửa được tự nạp. Khi bấm vào tệp, thiết bị sẽ tải tệp về.</span></div>
       </header>
       <div className="workflow-files__list">
         {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
           : workflowFilesError ? <p className="workflow-files__empty">Chưa thể nạp tệp: {workflowFilesError}</p>
           : currentWorkflowFiles.length ? currentWorkflowFiles.map((file) => (
-            <a key={file.id} className="workflow-file" href={file.url} target="_blank" rel="noreferrer">
+            <a key={file.id} className="workflow-file" href={file.downloadUrl} download={file.name} aria-label={`Tải tệp ${file.name}`}>
               <span className="workflow-file__icon">{file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
-              <span><b>{file.name}</b><small>Chỉnh sửa: {file.updatedAt}</small></span><em>↗</em>
+              <span><b>{file.name}</b><small>Chỉnh sửa: {file.updatedAt}</small></span><em>↓</em>
             </a>
           )) : <p className="workflow-files__empty">Chưa có tệp ngoài các phiếu Excel hệ thống trong thư mục này.</p>}
       </div>

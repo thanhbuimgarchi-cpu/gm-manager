@@ -809,7 +809,7 @@ function listWorkflowFiles_(payload) {
     files.push({
       id: file.getId(),
       name: file.getName(),
-      url: file.getUrl(),
+      downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()),
       updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
       mimeType: file.getMimeType(),
       updatedAtMillis: file.getLastUpdated().getTime(),
@@ -817,7 +817,7 @@ function listWorkflowFiles_(payload) {
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
   return { ok: true, files: files.map(function(file) {
-    return { id: file.id, name: file.name, url: file.url, updatedAt: file.updatedAt, mimeType: file.mimeType };
+    return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType };
   }) };
 }
 
