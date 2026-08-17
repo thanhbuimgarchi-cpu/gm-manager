@@ -1607,11 +1607,7 @@ export default function Home() {
     ...audioDisplayChunks.flatMap((chunk) => chunk.segments.map((segment) => segment.text)),
   ].join(" ")).includes(consultingSearchTerm);
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
-  const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? null;
-  const visiblePersonnelCategories = personnelCategories.filter((category) => {
-    const query = personnelSearch.trim().toLocaleLowerCase("vi");
-    return !query || `${category.label} ${category.description}`.toLocaleLowerCase("vi").includes(query);
-  });
+  const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? personnelCategories[0] ?? null;
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
@@ -1747,33 +1743,30 @@ export default function Home() {
           </header>
 
           {personnelView ? (
-            <div className="customer-gateway__body personnel-gateway">
-              <button className="gateway-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Quay lại tìm khách hàng</button>
-              <div className="personnel-entry customer-entry">
-                <span className="personnel-entry__icon customer-entry__icon">♙</span>
-                <span><b>{selectedPersonnelCategory?.label ?? "Nhân lực"}</b><small>{selectedPersonnelCategory ? "Quản lý nhân sự theo nhóm đã chọn" : "Chọn nhóm nhân lực để quản lý"}</small></span>
-                <em>{selectedPersonnelCategory ? "Nhóm" : `${personnelCategories.length} nhóm`}</em>
-              </div>
-              <label className="customer-search">
-                <span>⌕</span>
-                <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={selectedPersonnelCategory ? `Search trong ${selectedPersonnelCategory.label.toLocaleLowerCase("vi")}…` : "Tìm nhóm nhân sự hoặc đối tác…"} aria-label="Tìm nhóm nhân lực" autoFocus />
-              </label>
-
-              {selectedPersonnelCategory ? (
-                <div className="customer-search-results personnel-category-detail">
-                  <div className="customer-search-empty"><span>{selectedPersonnelCategory.icon}</span><p>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory.label}</b>.</p><button onClick={() => { setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Chọn nhóm khác</button></div>
-                </div>
-              ) : (
-                <div className="customer-search-results personnel-category-results">
-                  {visiblePersonnelCategories.length ? visiblePersonnelCategories.map((category) => (
-                    <button key={category.id} className="customer-result personnel-category-result" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); }}>
-                      <span className="customer-result__folder">{category.icon}</span>
-                      <span className="customer-result__identity"><b>{category.label}</b><small>{category.description}</small></span>
-                      <span className="customer-result__date">0 hồ sơ</span><span className="customer-result__arrow">→</span>
+            <div className="personnel-layout">
+              <aside className="personnel-sidebar">
+                <p className="sidebar-label sidebar-label--top">Nhân lực</p>
+                <nav className="main-nav" aria-label="Nhóm nhân lực">
+                  {personnelCategories.map((category) => (
+                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
+                      <span className="nav-row__icon">{category.icon}</span><span>{category.label}</span>
                     </button>
-                  )) : <div className="customer-search-empty"><span>∅</span><p>Không tìm thấy nhóm nhân lực phù hợp.</p></div>}
+                  ))}
+                </nav>
+              </aside>
+              <section className="personnel-workspace">
+                <header className="personnel-workspace__heading">
+                  <div><p className="eyebrow">Nhân lực</p><h1>{selectedPersonnelCategory?.label}</h1><p>{selectedPersonnelCategory?.description}</p></div>
+                  <button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button>
+                </header>
+                <label className="customer-search personnel-workspace__search">
+                  <span>⌕</span>
+                  <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Search trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi")}…`} aria-label={`Search ${selectedPersonnelCategory?.label}`} autoFocus />
+                </label>
+                <div className="personnel-category-detail">
+                  <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</p></div>
                 </div>
-              )}
+              </section>
             </div>
           ) : (
             <div className="customer-gateway__body">
@@ -1806,7 +1799,7 @@ export default function Home() {
                 )}
               </div>
 
-              <button className="personnel-entry" onClick={() => setPersonnelView(true)}>
+              <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
                 <span className="personnel-entry__icon">♙</span>
                 <span><b>Nhân lực</b><small>Mở khu vực quản lý nhân sự riêng</small></span>
                 <em>→</em>
