@@ -1,22 +1,19 @@
 /**
  * GM-CRM -> Google Drive
  *
- * 1. WEB_SYNC_TOKEN is the private synchronization code used by GM-CRM.
- * 2. Paste this entire file into script.google.com and deploy it as a Web app.
- * 3. Run the Web app as the Google account that owns GM-Manager.
- * 4. In Project Settings > Script properties, add GEMINI_API_KEY from Google AI Studio.
+ * 1. Paste this entire file into script.google.com and deploy it as a Web app.
+ * 2. Run the Web app as the Google account that owns GM-Manager.
+ * 3. In Project Settings > Script properties, add GEMINI_API_KEY from Google AI Studio.
+ * 4. Paste the Web app URL into GM-CRM; no synchronization code is needed.
  */
 
 const ROOT_FOLDER_ID = "PASTE_DRIVE_ROOT_FOLDER_ID_HERE";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
-// Paste the same private token that you enter in GM-CRM's Drive connection form.
-const WEB_SYNC_TOKEN = "PASTE_PRIVATE_SYNC_TOKEN_HERE";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
-    if (payload.token !== WEB_SYNC_TOKEN) throw new Error("M\u00e3 \u0111\u1ed3ng b\u1ed9 kh\u00f4ng \u0111\u00fang.");
     if (payload.action === "audio-insight") return json_(processAudioInsight_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {

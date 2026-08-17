@@ -139,7 +139,6 @@ type DriveFolder = {
 
 type DriveSyncConfig = {
   scriptUrl: string;
-  token: string;
 };
 
 type DriveLoadMode = "index" | "search" | "detail";
@@ -155,7 +154,6 @@ const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, re
 const driveSyncConfigKey = "gm-manager-apps-script";
 const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
-  token: "",
 };
 
 function isAppsScriptUrl(value: string) {
@@ -168,12 +166,12 @@ function isAppsScriptUrl(value: string) {
 }
 
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
-  if (!isAppsScriptUrl(config.scriptUrl) || !config.token) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
+  if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const response = await fetch(config.scriptUrl, {
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ ...payload, token: config.token }),
+    body: JSON.stringify(payload),
     redirect: "follow",
   });
   const responseText = await response.text();
@@ -850,13 +848,10 @@ export default function Home() {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
-  const [accessCode, setAccessCode] = useState("");
   const [renameValue, setRenameValue] = useState("");
-  const [renameUnlocked, setRenameUnlocked] = useState(false);
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
   const [driveConfigOpen, setDriveConfigOpen] = useState(false);
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
-  const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
   const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
@@ -890,20 +885,18 @@ export default function Home() {
       try {
         const config = JSON.parse(savedConfig) as Partial<DriveSyncConfig>;
         setDriveScriptUrl(config.scriptUrl || defaultDriveSyncConfig.scriptUrl);
-        setDriveSyncToken(config.token || "");
         return;
       } catch {
         window.localStorage.removeItem(driveSyncConfigKey);
       }
     }
     setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
-    setDriveSyncToken("");
   }, []);
 
   const activeDriveFolder = syncedDriveFolders.find((folder) => folder.label === activeFolder);
   const activeYear = years.find((folder) => folder.year === selectedYear);
   const activeMonthFolder = activeYear?.months[selectedMonth - 1];
-  const isDriveConnected = Boolean(driveScriptUrl.trim() && driveSyncToken.trim());
+  const isDriveConnected = Boolean(driveScriptUrl.trim());
   const availableModalYears = useMemo(() => {
     const currentYear = getVietnamDate().year;
     return Array.from(new Set([...years.map((folder) => folder.year), ...Array.from({ length: 9 }, (_, index) => currentYear - 3 + index)])).sort((a, b) => a - b);
@@ -982,8 +975,8 @@ export default function Home() {
   };
 
   const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string } = {}) => {
-    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) return;
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl) return;
     const mode = options.mode ?? "index";
     const year = options.year ?? selectedYear;
     const month = options.month ?? selectedMonth;
@@ -1005,13 +998,13 @@ export default function Home() {
 
   useEffect(() => {
     const currentDate = getVietnamDate();
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (config.token) void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
-  }, [driveScriptUrl, driveSyncToken]);
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (config.scriptUrl) void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
+  }, [driveScriptUrl]);
 
   const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) return;
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl) return;
     setLoadingCustomerId(location.record.projectId);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId });
@@ -1200,26 +1193,13 @@ export default function Home() {
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
     setOpenMenuId(null);
+    if (type === "delete") {
+      deleteRecord(record.id);
+      setNotice(`Đã xóa ${record.projectId}`);
+      return;
+    }
     setProtectedAction({ type, record });
-    setAccessCode("");
     setRenameValue(record.name);
-    setRenameUnlocked(false);
-  };
-
-  const confirmAccessCode = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!protectedAction) return;
-    if (!driveSyncToken.trim() || accessCode !== driveSyncToken.trim()) {
-      setNotice("Khóa không đúng");
-      return;
-    }
-    if (protectedAction.type === "delete") {
-      deleteRecord(protectedAction.record.id);
-      setProtectedAction(null);
-      setNotice(`Đã xóa ${protectedAction.record.projectId}`);
-      return;
-    }
-    setRenameUnlocked(true);
   };
 
   const renameRecord = (event: FormEvent<HTMLFormElement>) => {
@@ -1235,8 +1215,6 @@ export default function Home() {
     });
     persist(nextYears);
     queueDriveSync(updatedRecord);
-    if (value && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
-    if (value && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
     setProtectedAction(null);
     setNotice("Đã đổi tên hồ sơ");
   };
@@ -1253,6 +1231,8 @@ export default function Home() {
     });
     persist(nextYears);
     queueDriveSync(updatedRecord);
+    if (value && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
+    if (value && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
   };
 
   const updateRecordName = (value: string) => {
@@ -1271,7 +1251,7 @@ export default function Home() {
 
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
     if (!startingRecord.audioNote) throw new Error("Chưa có tiến độ ghi âm để tiếp tục.");
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    const config = { scriptUrl: driveScriptUrl.trim() };
     let workingRecord = startingRecord;
     let workingChunks = normalizeAudioNoteChunks(startingRecord.audioNote);
     const totalChunks = startingRecord.audioNote.totalChunks ?? workingChunks.length;
@@ -1346,7 +1326,7 @@ export default function Home() {
       return;
     }
 
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    const config = { scriptUrl: driveScriptUrl.trim() };
     const record = selectedRecord;
     setAudioProcessingId(record.id);
     setAudioProcessingStatus("Đang chuẩn bị bản ghi…");
@@ -1446,9 +1426,9 @@ export default function Home() {
 
   const saveDriveConfig = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl.startsWith("https://script.google.com/macros/s/") || !config.token) {
-      setNotice("Hãy nhập Web app URL và mã đồng bộ từ Google Apps Script.");
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (!isAppsScriptUrl(config.scriptUrl)) {
+      setNotice("Hãy nhập Web app URL hợp lệ từ Google Apps Script.");
       return;
     }
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
@@ -1462,8 +1442,8 @@ export default function Home() {
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
-    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl) {
       setDriveConfigOpen(true);
       return;
     }
@@ -1485,8 +1465,8 @@ export default function Home() {
   };
 
   const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig, kind: DesignProgressKind = "architecture") => {
-    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl) {
       setDriveConfigOpen(true);
       return;
     }
@@ -1509,8 +1489,8 @@ export default function Home() {
   };
 
   const syncWarrantyToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
-    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
-    if (!config.scriptUrl || !config.token) {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl) {
       setDriveConfigOpen(true);
       return;
     }
@@ -1775,7 +1755,7 @@ export default function Home() {
             <span className="customer-context__back">←</span>
             <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
           </button>
-          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button><button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button></div>
+          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (
@@ -1903,10 +1883,9 @@ export default function Home() {
           <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
-            <p className="drive-config-dialog__hint">GM-CRM đã được gán sẵn Web app GM-Manager. Bạn không cần đăng nhập hay nhập lại khi mở web.</p>
+            <p className="drive-config-dialog__hint">Chỉ cần dán Web app URL. GM-CRM sẽ nhớ kết nối trên thiết bị này.</p>
             <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
-            <label>Mã đồng bộ<input type="password" value={driveSyncToken} onChange={(event) => setDriveSyncToken(event.target.value)} placeholder="Mã bạn đã đặt trong Script" /></label>
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
         </div>
@@ -1914,23 +1893,13 @@ export default function Home() {
 
       {protectedAction && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setProtectedAction(null)}>
-          {!renameUnlocked ? (
-            <form className="security-dialog" onSubmit={confirmAccessCode} onMouseDown={(event) => event.stopPropagation()}>
-              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.type === "delete" ? "Delete" : "Rename"} · {protectedAction.record.projectId}</p>
-              <h2>Nhập khóa bảo vệ</h2>
-              <label>Khóa truy cập<input type="password" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} autoFocus placeholder="••••••" /></label>
-              <button className="add-button" type="submit">Xác nhận</button>
-            </form>
-          ) : (
-            <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
-              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.record.projectId}</p>
-              <h2>Rename hồ sơ</h2>
-              <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
-              <button className="add-button" type="submit">Lưu tên mới</button>
-            </form>
-          )}
+          <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">{protectedAction.record.projectId}</p>
+            <h2>Rename hồ sơ</h2>
+            <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
+            <button className="add-button" type="submit">Lưu tên mới</button>
+          </form>
         </div>
       )}
 
