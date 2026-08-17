@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 type SyncRequest = {
-  action?: "sync-customer" | "sync-design-progress";
+  action?: "sync-customer" | "sync-design-progress" | "sync-warranty";
   scriptUrl?: string;
   token?: string;
   year?: number;

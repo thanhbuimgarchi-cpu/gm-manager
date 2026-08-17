@@ -3,6 +3,11 @@ import { NextResponse } from "next/server";
 type LoadRequest = {
   scriptUrl?: string;
   token?: string;
+  mode?: "index" | "search" | "detail";
+  year?: number;
+  month?: number;
+  query?: string;
+  projectId?: string;
 };
 
 function isAllowedAppsScriptUrl(value: string) {
@@ -31,20 +36,20 @@ export async function POST(request: Request) {
       method: "POST",
       cache: "no-store",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "load-consulting", token: body.token }),
+      body: JSON.stringify({ action: "load-consulting", token: body.token, mode: body.mode ?? "index", year: body.year, month: body.month, query: body.query, projectId: body.projectId }),
       redirect: "follow",
     });
     const responseText = await scriptResponse.text();
-    let result: { ok?: boolean; error?: string; years?: unknown[] };
+    let result: { ok?: boolean; error?: string; years?: unknown[]; record?: unknown; year?: number; month?: number };
     try {
       result = JSON.parse(responseText) as typeof result;
     } catch {
       return NextResponse.json({ ok: false, error: "Google Apps Script trả về dữ liệu không hợp lệ." }, { status: 502 });
     }
-    if (!scriptResponse.ok || !result.ok || !Array.isArray(result.years)) {
+    if (!scriptResponse.ok || !result.ok || (!Array.isArray(result.years) && !result.record)) {
       return NextResponse.json({ ok: false, error: result.error || "Không thể nạp dữ liệu Excel từ Drive." }, { status: 502 });
     }
-    return NextResponse.json({ ok: true, years: result.years }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ ok: true, years: result.years, record: result.record, year: result.year, month: result.month }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ ok: false, error: "Không thể kết nối Google Apps Script để nạp Drive." }, { status: 502 });
   }

@@ -28,7 +28,7 @@ function doPost(event) {
         audioLock.releaseLock();
       }
     }
-    if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_());
+    if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
@@ -38,6 +38,11 @@ function doPost(event) {
       if (payload.action === "sync-design-progress") {
         const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month), payload.progressKind);
         return json_({ ok: true, ...designResult });
+      }
+
+      if (payload.action === "sync-warranty") {
+        const warrantyResult = exportWarrantyWorkbook_(payload.record, Number(payload.year), Number(payload.month));
+        return json_({ ok: true, ...warrantyResult });
       }
 
       const result = exportCustomerWorkbook_(payload.record, Number(payload.year), Number(payload.month));
@@ -187,50 +192,148 @@ function splitTranscript_(text) {
   return chunks;
 }
 
-function loadConsultingWorkspace_() {
+function loadConsultingWorkspace_(payload) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  const yearsByNumber = {};
-  const seenProjects = {};
-  // Only supported structure: GM-Manager / Khach hang / year / month / project.
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
-  if (customers) collectCustomerWorkbooks_(customers, yearsByNumber, seenProjects);
-  const years = Object.keys(yearsByNumber).map(function(year) { return yearsByNumber[year]; });
-  years.sort(function(a, b) { return a.year - b.year; });
-  return { ok: true, years: years };
+  if (!customers) return { ok: true, years: [] };
+
+  const mode = String(payload.mode || "index");
+  if (mode === "detail") return loadCustomerDetail_(customers, payload);
+  if (mode === "search") return { ok: true, years: searchCustomerIndex_(customers, String(payload.query || "")) };
+
+  const timezone = "Asia/Ho_Chi_Minh";
+  const now = new Date();
+  const year = Number(payload.year || Utilities.formatDate(now, timezone, "yyyy"));
+  const month = Number(payload.month || Utilities.formatDate(now, timezone, "M"));
+  return { ok: true, years: loadMonthCustomerIndex_(customers, year, month) };
 }
 
-function collectCustomerWorkbooks_(container, yearsByNumber, seenProjects) {
-  const yearFolders = container.getFolders();
-  while (yearFolders.hasNext()) {
+function monthResult_(year, month, records) {
+  return [{ year: Number(year), months: [{ label: "T" + Number(month), records: records }] }];
+}
+
+function loadMonthCustomerIndex_(customers, year, month) {
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12) return [];
+  const yearFolder = findFolder_(customers, String(year));
+  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
+  if (!monthFolder) return monthResult_(year, month, []);
+  const records = [];
+  const customerFolders = monthFolder.getFolders();
+  while (customerFolders.hasNext()) {
+    const customerFolder = customerFolders.next();
+    const projectId = customerFolder.getName();
+    if (projectId.indexOf("-") === 0) continue;
+    const record = customerIndexFromFolder_(customerFolder, projectId);
+    if (record) records.push(record);
+  }
+  return monthResult_(year, month, records);
+}
+
+function loadCustomerDetail_(customers, payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !projectId) {
+    throw new Error("Thi\u1ebfu th\u00f4ng tin h\u1ed3 s\u01a1 c\u1ea7n n\u1ea1p.");
+  }
+  const yearFolder = findFolder_(customers, String(year));
+  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
+  const customerFolder = monthFolder && findFolder_(monthFolder, projectId);
+  if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c h\u1ed3 s\u01a1 tr\u00ean Drive.");
+  const workbook = latestCustomerWorkbook_(customerFolder, projectId);
+  if (!workbook) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng trong th\u01b0 m\u1ee5c T\u01b0 v\u1ea5n.");
+  const record = recordFromWorkbook_(workbook, projectId, customerFolder);
+  record.isHydrated = true;
+  return { ok: true, year: year, month: month, record: record };
+}
+
+function customerIndexFromFolder_(customerFolder, projectId) {
+  const workbook = latestCustomerWorkbook_(customerFolder, projectId);
+  return workbook ? customerIndexFromWorkbook_(workbook, projectId) : null;
+}
+
+function customerIndexFromWorkbook_(file, projectId) {
+  const sheets = readXlsxSheets_(file);
+  const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
+  const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
+  return {
+    id: "drive-" + projectId,
+    name: metadata.name || projectId,
+    houseId: metadata.houseId || "",
+    projectId: metadata.projectId || projectId,
+    createdAt: metadata.createdAt || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : ""),
+    details: {},
+    isHydrated: false,
+  };
+}
+
+function searchCustomerIndex_(customers, query) {
+  const normalized = String(query || "").trim().toLowerCase();
+  if (!normalized) return [];
+  const directProjectMatches = searchExactProjectId_(customers, String(query || "").trim());
+  if (directProjectMatches.length) return directProjectMatches;
+  const resultsByPeriod = {};
+  let resultCount = 0;
+  const yearFolders = customers.getFolders();
+  while (yearFolders.hasNext() && resultCount < 16) {
     const yearFolder = yearFolders.next();
     const yearName = yearFolder.getName();
     if (yearName.indexOf("-") === 0 || !/^\d{4}$/.test(yearName)) continue;
-    if (!yearsByNumber[yearName]) {
-      yearsByNumber[yearName] = {
-        year: Number(yearName),
-        months: Array.from({ length: 12 }, function(_, index) { return { label: "T" + (index + 1), records: [] }; }),
-      };
-    }
-    const months = yearsByNumber[yearName].months;
     const monthFolders = yearFolder.getFolders();
-    while (monthFolders.hasNext()) {
+    while (monthFolders.hasNext() && resultCount < 16) {
       const monthFolder = monthFolders.next();
       const match = /^T(1[0-2]|[1-9])$/.exec(monthFolder.getName());
       if (monthFolder.getName().indexOf("-") === 0 || !match) continue;
       const customerFolders = monthFolder.getFolders();
-      while (customerFolders.hasNext()) {
+      while (customerFolders.hasNext() && resultCount < 16) {
         const customerFolder = customerFolders.next();
         const projectId = customerFolder.getName();
         if (projectId.indexOf("-") === 0) continue;
-        const projectKey = yearName + "/" + match[1] + "/" + projectId;
-        if (seenProjects[projectKey]) continue;
-        const workbook = latestCustomerWorkbook_(customerFolder, projectId);
-        if (!workbook) continue;
-        months[Number(match[1]) - 1].records.push(recordFromWorkbook_(workbook, projectId, customerFolder));
-        seenProjects[projectKey] = true;
+        const record = customerIndexFromFolder_(customerFolder, projectId);
+        if (!record) continue;
+        const haystack = [record.name, record.houseId, record.projectId].join(" ").toLowerCase();
+        if (haystack.indexOf(normalized) === -1) continue;
+        const periodKey = yearName + "/" + match[1];
+        if (!resultsByPeriod[periodKey]) resultsByPeriod[periodKey] = { year: Number(yearName), months: [{ label: "T" + Number(match[1]), records: [] }] };
+        resultsByPeriod[periodKey].months[0].records.push(record);
+        resultCount += 1;
       }
     }
   }
+  return Object.keys(resultsByPeriod).map(function(key) { return resultsByPeriod[key]; }).sort(function(a, b) {
+    return b.year - a.year || Number(b.months[0].label.slice(1)) - Number(a.months[0].label.slice(1));
+  });
+}
+
+function searchExactProjectId_(customers, projectId) {
+  // Drive resolves an exact folder name from its index. This keeps a pasted
+  // project ID from triggering a month-by-month scan of every customer.
+  if (!/^GM\d{8}[A-Za-z0-9-]*$/i.test(projectId)) return [];
+  const resultsByPeriod = {};
+  const folders = DriveApp.getFoldersByName(projectId);
+  while (folders.hasNext()) {
+    const customerFolder = folders.next();
+    const monthParents = customerFolder.getParents();
+    if (!monthParents.hasNext()) continue;
+    const monthFolder = monthParents.next();
+    const monthMatch = /^T(1[0-2]|[1-9])$/.exec(monthFolder.getName());
+    if (!monthMatch) continue;
+    const yearParents = monthFolder.getParents();
+    if (!yearParents.hasNext()) continue;
+    const yearFolder = yearParents.next();
+    const yearName = yearFolder.getName();
+    if (!/^\d{4}$/.test(yearName)) continue;
+    const customersParents = yearFolder.getParents();
+    if (!customersParents.hasNext() || customersParents.next().getId() !== customers.getId()) continue;
+    const record = customerIndexFromFolder_(customerFolder, projectId);
+    if (!record) continue;
+    const key = yearName + "/" + monthMatch[1];
+    if (!resultsByPeriod[key]) resultsByPeriod[key] = { year: Number(yearName), months: [{ label: "T" + Number(monthMatch[1]), records: [] }] };
+    resultsByPeriod[key].months[0].records.push(record);
+  }
+  return Object.keys(resultsByPeriod).map(function(key) { return resultsByPeriod[key]; }).sort(function(a, b) {
+    return b.year - a.year || Number(b.months[0].label.slice(1)) - Number(a.months[0].label.slice(1));
+  });
 }
 
 function latestWorkbook_(folder) {
@@ -347,6 +450,7 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   };
   record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
   record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
+  record.warrantyProgress = readWarrantyProgress_(customerFolder, projectId);
   if (segments.length || keyPoints.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
       fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
@@ -390,6 +494,42 @@ function readDesignProgress_(customerFolder, projectId, progressKind) {
       actualDate: String(row[2] || ""),
       assignee: hasAssignee ? String(row[3] || "") : "",
       note: String(row[noteColumn] || ""),
+    };
+  });
+}
+
+function latestWarrantyWorkbook_(customerFolder) {
+  const warrantyFolder = findFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
+  if (!warrantyFolder) return null;
+  const files = warrantyFolder.getFiles();
+  let latest = null;
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!/^Phi\u1ebfu th\u00f4ng tin b\u1ea3o h\u00e0nh.*\.xlsx$/i.test(file.getName())) continue;
+    if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
+  }
+  return latest;
+}
+
+function readWarrantyProgress_(customerFolder, projectId) {
+  const workbook = latestWarrantyWorkbook_(customerFolder);
+  if (!workbook) return [];
+  const sheets = readXlsxSheets_(workbook);
+  const rows = sheets["B\u1ea3o h\u00e0nh"] || sheets[Object.keys(sheets)[0]] || [];
+  const fixedContents = ["Ng\u00e0y ho\u00e0n th\u00e0nh thi c\u00f4ng n\u1ed9i th\u1ea5t", "Ng\u00e0y ho\u00e0n th\u00e0nh thi c\u00f4ng ki\u1ebfn tr\u00fac", "Th\u1eddi gian b\u1ea3o h\u00e0nh", "Chi ph\u00ed b\u1ea3o h\u00e0nh l\u1ea7n 1", "Chi ph\u00ed b\u1ea3o h\u00e0nh l\u1ea7n 2"];
+  return rows.slice(1).filter(function(row) {
+    return row.slice(0, 7).some(function(value) { return String(value || "").trim(); });
+  }).map(function(row, index) {
+    const content = String(row[0] || "");
+    const customCell = String(row[6] || "").toLowerCase();
+    return {
+      id: String(row[5] || ("warranty-drive-" + projectId + "-" + index)),
+      isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedContents.indexOf(content) === -1,
+      content: content,
+      reportedDate: String(row[1] || ""),
+      completedDate: String(row[2] || ""),
+      assignee: String(row[3] || ""),
+      note: String(row[4] || ""),
     };
   });
 }
@@ -521,6 +661,37 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
     trashFilesByName_(designFolder, fileName);
     const xlsxFile = designFolder.createFile(xlsxBlob);
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: designFolder.getUrl(), fileName: fileName };
+  } finally {
+    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+  }
+}
+
+function exportWarrantyWorkbook_(record, year, month) {
+  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const warrantyFolder = getOrCreateFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
+  const fileName = "Phi\u1ebfu th\u00f4ng tin b\u1ea3o h\u00e0nh " + record.projectId + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM warranty temporary " + record.projectId);
+  try {
+    const sheet = spreadsheet.getSheets()[0];
+    sheet.setName("B\u1ea3o h\u00e0nh");
+    const rows = (record.warrantyProgress || []).map(function(row) {
+      return [String(row.content || ""), String(row.reportedDate || ""), String(row.completedDate || ""), String(row.assignee || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false"];
+    });
+    const values = [["N\u1ed9i dung", "Ng\u00e0y b\u00e1o", "Ng\u00e0y ho\u00e0n th\u00e0nh", "Ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh"]].concat(rows);
+    sheet.getRange(1, 1, values.length, 7).setValues(values).setVerticalAlignment("top").setWrap(true).setFontFamily("Roboto");
+    sheet.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
+    sheet.setFrozenRows(1);
+    sheet.setColumnWidth(1, 270);
+    sheet.setColumnWidth(2, 125);
+    sheet.setColumnWidth(3, 145);
+    sheet.setColumnWidth(4, 160);
+    sheet.setColumnWidth(5, 420);
+    sheet.hideColumns(6, 2);
+    sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
+    const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
+    trashFilesByName_(warrantyFolder, fileName);
+    const xlsxFile = warrantyFolder.createFile(xlsxBlob);
+    return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: warrantyFolder.getUrl(), fileName: fileName };
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
   }

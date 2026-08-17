@@ -75,6 +75,8 @@
 .record-detail--inline .detail-scroll { overflow: visible; }
 .record-detail--inline .record-detail__footer { border-radius: 0 0 10px 10px; }
 .record-detail--inline .record-detail__footer > span:last-child { max-width: 55%; color: #9a968f; text-align: right; overflow-wrap: anywhere; }
+.customer-detail-loading { margin: 16px 0; padding: 11px 13px; border: 1px solid #eadfce; border-left: 3px solid #a8784f; border-radius: 5px; background: #fcfaf6; color: #735f4a; font-size: 11px; }
+.warranty-workspace .design-progress-view { overflow: visible; }
 .consulting-profile-actions { display: flex; align-items: center; gap: 14px; padding-top: 6px; }
 .consulting-profile-actions .project-menu { top: 30px; }
 .consulting-search-empty { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 8px; color: #98958e; text-align: center; }

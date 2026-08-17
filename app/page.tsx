@@ -73,8 +73,10 @@ type WorkRecord = {
   createdAt: string;
   details: Record<string, string>;
   audioNote?: AudioNote;
+  isHydrated?: boolean;
   designProgress?: DesignProgressRow[];
   interiorDesignProgress?: DesignProgressRow[];
+  warrantyProgress?: WarrantyProgressRow[];
   functionalFloors?: FunctionalFloor[];
   functionalRows?: LegacyFunctionalRow[];
 };
@@ -85,6 +87,16 @@ type DesignProgressRow = {
   content: string;
   plannedDate: string;
   actualDate: string;
+  assignee: string;
+  note: string;
+};
+
+type WarrantyProgressRow = {
+  id: string;
+  isCustom: boolean;
+  content: string;
+  reportedDate: string;
+  completedDate: string;
   assignee: string;
   note: string;
 };
@@ -129,6 +141,8 @@ type DriveSyncConfig = {
   scriptUrl: string;
   token: string;
 };
+
+type DriveLoadMode = "index" | "search" | "detail";
 
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
 const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
@@ -235,6 +249,14 @@ const interiorDesignProgressContents = [
   "Nghiệm thu và bàn giao",
 ] as const;
 
+const warrantyProgressContents = [
+  "Ngày hoàn thành thi công nội thất",
+  "Ngày hoàn thành thi công kiến trúc",
+  "Thời gian bảo hành",
+  "Chi phí bảo hành lần 1",
+  "Chi phí bảo hành lần 2",
+] as const;
+
 type DesignProgressKind = "architecture" | "interior";
 
 const designProgressDefinitions: Record<DesignProgressKind, {
@@ -264,6 +286,7 @@ const designProgressDefinitions: Record<DesignProgressKind, {
 };
 
 type DesignDateKey = "plannedDate" | "actualDate";
+type WarrantyDateKey = "reportedDate" | "completedDate";
 
 const isFixedDesignContent = (content: string, kind: DesignProgressKind) => designProgressDefinitions[kind].fixedContents.some((item) => item === content);
 const createFixedDesignRow = (content: string, index: number, kind: DesignProgressKind): DesignProgressRow => ({
@@ -309,6 +332,45 @@ const normalizeDesignProgress = (record?: WorkRecord | null, kind: DesignProgres
   return [...normalized, ...missingFixed];
 };
 
+const isFixedWarrantyContent = (content: string) => warrantyProgressContents.some((item) => item === content);
+const createFixedWarrantyRow = (content: string, index: number): WarrantyProgressRow => ({
+  id: `warranty-fixed-${index}`,
+  isCustom: false,
+  content,
+  reportedDate: "",
+  completedDate: "",
+  assignee: "",
+  note: "",
+});
+const createCustomWarrantyRow = (): WarrantyProgressRow => ({
+  id: `warranty-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  isCustom: true,
+  content: "",
+  reportedDate: "",
+  completedDate: "",
+  assignee: "",
+  note: "",
+});
+const createWarrantyProgress = (): WarrantyProgressRow[] => warrantyProgressContents.map(createFixedWarrantyRow);
+const normalizeWarrantyProgress = (record?: WorkRecord | null): WarrantyProgressRow[] => {
+  const existing = record?.warrantyProgress ?? [];
+  if (!existing.length) return createWarrantyProgress();
+  const normalized = existing.map((row, index) => {
+    const isCustom = row.isCustom ?? !isFixedWarrantyContent(row.content ?? "");
+    return {
+      id: row.id || `warranty-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
+      isCustom,
+      content: row.content ?? "",
+      reportedDate: row.reportedDate ?? "",
+      completedDate: row.completedDate ?? "",
+      assignee: row.assignee ?? "",
+      note: row.note ?? "",
+    };
+  });
+  const existingFixed = new Set(normalized.filter((row) => !row.isCustom).map((row) => row.content));
+  return [...normalized, ...warrantyProgressContents.map(createFixedWarrantyRow).filter((row) => !existingFixed.has(row.content))];
+};
+
 const formatDesignDateInput = (value: string) => {
   const digits = value.replace(/\D/g, "").slice(0, 8);
   if (digits.length <= 2) return digits;
@@ -328,6 +390,17 @@ const parseDesignDate = (value: string) => {
 };
 
 const hasSequentialDesignDates = (rows: DesignProgressRow[], key: DesignDateKey) => {
+  let previousDay: number | null = null;
+  for (const row of rows) {
+    const parsed = parseDesignDate(row[key]);
+    if (!parsed) continue;
+    if (previousDay !== null && parsed.dayNumber < previousDay) return false;
+    previousDay = parsed.dayNumber;
+  }
+  return true;
+};
+
+const hasSequentialWarrantyDates = (rows: WarrantyProgressRow[], key: WarrantyDateKey) => {
   let previousDay: number | null = null;
   for (const row of rows) {
     const parsed = parseDesignDate(row[key]);
@@ -682,10 +755,18 @@ function saveWorkspace(years: YearFolder[]) {
 
 function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
   const localByProjectId = new Map(localYears.flatMap((year) => year.months.flatMap((month) => month.records)).map((record) => [record.projectId, record]));
-  return driveYears.map((year) => ({
-    ...year,
-    months: monthLabels.map((label, index) => {
-      const driveMonth = year.months?.find((month) => month.label === label) ?? year.months?.[index] ?? { label, records: [] };
+  const driveByYear = new Map(driveYears.map((year) => [year.year, year]));
+  const localByYear = new Map(localYears.map((year) => [year.year, year]));
+  const mergedYears = Array.from(new Set([...localYears.map((year) => year.year), ...driveYears.map((year) => year.year)])).sort((a, b) => a - b);
+  return mergedYears.map((yearNumber) => {
+    const driveYear = driveByYear.get(yearNumber);
+    const localYear = localByYear.get(yearNumber);
+    return {
+      year: yearNumber,
+      months: monthLabels.map((label, index) => {
+        const driveMonth = driveYear?.months?.find((month) => month.label === label);
+        const localMonth = localYear?.months?.find((month) => month.label === label) ?? localYear?.months?.[index] ?? { label, records: [] };
+        if (!driveMonth) return localMonth;
       return {
         label,
         records: (driveMonth.records ?? []).map((record) => {
@@ -695,14 +776,17 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             id: record.id || `drive-${record.projectId}`,
             name: record.name || localRecord?.name || record.details?.HVT || record.projectId,
             houseId: record.houseId || localRecord?.houseId || "",
-            details: record.details ?? {},
-            designProgress: record.designProgress ?? localRecord?.designProgress ?? createDesignProgress(),
-            interiorDesignProgress: record.interiorDesignProgress ?? localRecord?.interiorDesignProgress ?? createDesignProgress("interior"),
+            details: record.isHydrated ? record.details ?? {} : localRecord?.details ?? record.details ?? {},
+            isHydrated: record.isHydrated ?? localRecord?.isHydrated ?? false,
+            designProgress: record.isHydrated ? record.designProgress ?? createDesignProgress() : localRecord?.designProgress ?? record.designProgress ?? createDesignProgress(),
+            interiorDesignProgress: record.isHydrated ? record.interiorDesignProgress ?? createDesignProgress("interior") : localRecord?.interiorDesignProgress ?? record.interiorDesignProgress ?? createDesignProgress("interior"),
+            warrantyProgress: record.isHydrated ? record.warrantyProgress ?? createWarrantyProgress() : localRecord?.warrantyProgress ?? record.warrantyProgress ?? createWarrantyProgress(),
           };
         }),
       };
-    }),
-  }));
+      }),
+    };
+  });
 }
 
 export default function Home() {
@@ -734,11 +818,15 @@ export default function Home() {
   const [driveSyncToken, setDriveSyncToken] = useState(defaultDriveSyncConfig.token);
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
+  const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
+  const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const driveSyncTimer = useRef<number | null>(null);
   const designSyncTimers = useRef<Partial<Record<DesignProgressKind, number>>>({});
+  const warrantySyncTimer = useRef<number | null>(null);
+  const customerSearchTimer = useRef<number | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -796,6 +884,7 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
+    void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
   const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation) => {
@@ -808,6 +897,7 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
+    void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
   const returnToCustomerSearch = () => {
@@ -842,22 +932,25 @@ export default function Home() {
     });
   };
 
-  const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false) => {
+  const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string } = {}) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
     if (!config.scriptUrl || !config.token) return;
+    const mode = options.mode ?? "index";
+    const year = options.year ?? selectedYear;
+    const month = options.month ?? selectedMonth;
     setIsLoadingDrive(true);
     try {
       const response = await fetch("/api/drive-load", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
+        body: JSON.stringify({ ...config, mode, year, month, query: options.query, projectId: options.projectId }),
       });
       const result = await response.json() as { ok?: boolean; error?: string; years?: YearFolder[] };
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
         persist(driveYears);
-        if (!quietly) setNotice("Đã nạp lại hồ sơ từ Excel trên Drive.");
+        if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
     } catch (error) {
       if (!quietly) setNotice(error instanceof Error ? error.message : "Không thể nạp dữ liệu Excel từ Drive.");
@@ -867,8 +960,40 @@ export default function Home() {
   };
 
   useEffect(() => {
-    void loadWorkspaceFromDrive(defaultDriveSyncConfig, true);
+    const currentDate = getVietnamDate();
+    void loadWorkspaceFromDrive(defaultDriveSyncConfig, true, { mode: "index", year: currentDate.year, month: currentDate.month });
   }, []);
+
+  const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
+    const config = { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) return;
+    setLoadingCustomerId(location.record.projectId);
+    try {
+      const response = await fetch("/api/drive-load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...config, mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId }),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string; record?: WorkRecord };
+      if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp chi tiết hồ sơ.");
+      persistRecord({ ...result.record, isHydrated: true }, location.year, location.month);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể nạp chi tiết hồ sơ.");
+    } finally {
+      setLoadingCustomerId(null);
+    }
+  };
+
+  const searchCustomersOnDrive = (value: string) => {
+    const query = value.trim();
+    if (customerSearchTimer.current) window.clearTimeout(customerSearchTimer.current);
+    if (query.length < 2) return;
+    const isProjectOrHouseCode = /^GM\d/i.test(query) || (/^[A-Za-z0-9-]+$/.test(query) && !query.includes(" "));
+    customerSearchTimer.current = window.setTimeout(() => {
+      customerSearchTimer.current = null;
+      void loadWorkspaceFromDrive(undefined, true, { mode: "search", query });
+    }, isProjectOrHouseCode ? 100 : 420);
+  };
 
   const openAddDialog = () => {
     const currentDate = getVietnamDate();
@@ -899,8 +1024,10 @@ export default function Home() {
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
+      isHydrated: true,
       designProgress: createDesignProgress(),
       interiorDesignProgress: createDesignProgress("interior"),
+      warrantyProgress: createWarrantyProgress(),
       functionalFloors: [createFunctionalFloor()],
     };
     const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
@@ -933,6 +1060,7 @@ export default function Home() {
   const selectedRecord = activeCustomerRecord;
   const architectureDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "architecture");
   const interiorDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "interior");
+  const warrantyProgressRows = normalizeWarrantyProgress(activeCustomerRecord);
   const designScheduleAnalysis = analyzeDesignProgress(architectureDesignProgressRows);
   const interiorDesignScheduleAnalysis = analyzeDesignProgress(interiorDesignProgressRows);
   const isDemandSelected = (code: string) => Boolean(activeCustomerRecord?.details?.[code]?.trim());
@@ -945,6 +1073,13 @@ export default function Home() {
     const updatedRecord = { ...activeCustomerRecord, [field]: nextRows };
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
     queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month, kind);
+  };
+
+  const commitWarrantyProgressRows = (nextRows: WarrantyProgressRow[]) => {
+    if (!activeCustomerRecord || !selectedCustomerLocation) return;
+    const updatedRecord = { ...activeCustomerRecord, warrantyProgress: nextRows };
+    persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
+    queueWarrantySync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
@@ -985,6 +1120,42 @@ export default function Home() {
       return;
     }
     commitDesignProgressRows(kind, nextRows);
+  };
+
+  const updateWarrantyProgress = (rowIndex: number, key: "content" | WarrantyDateKey | "assignee" | "note", value: string) => {
+    let nextValue = value;
+    if (key === "reportedDate" || key === "completedDate") {
+      nextValue = formatDesignDateInput(value);
+      if (nextValue.length === 10 && !parseDesignDate(nextValue)) {
+        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 12/04/2026.");
+        return;
+      }
+    }
+    const nextRows = warrantyProgressRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue } : row);
+    if ((key === "reportedDate" || key === "completedDate") && nextValue.length === 10 && !hasSequentialWarrantyDates(nextRows, key)) {
+      setNotice(`${key === "reportedDate" ? "Ngày báo" : "Ngày hoàn thành"} phải tăng dần theo thứ tự từ trên xuống.`);
+      return;
+    }
+    commitWarrantyProgressRows(nextRows);
+  };
+
+  const addWarrantyProgressRow = () => commitWarrantyProgressRows([...warrantyProgressRows, createCustomWarrantyRow()]);
+
+  const deleteWarrantyProgressRow = (rowIndex: number) => {
+    if (!warrantyProgressRows[rowIndex]?.isCustom) return;
+    commitWarrantyProgressRows(warrantyProgressRows.filter((_, index) => index !== rowIndex));
+  };
+
+  const moveWarrantyProgressRow = (rowIndex: number, direction: -1 | 1) => {
+    const destination = rowIndex + direction;
+    if (destination < 0 || destination >= warrantyProgressRows.length) return;
+    const nextRows = [...warrantyProgressRows];
+    [nextRows[rowIndex], nextRows[destination]] = [nextRows[destination], nextRows[rowIndex]];
+    if (!hasSequentialWarrantyDates(nextRows, "reportedDate") || !hasSequentialWarrantyDates(nextRows, "completedDate")) {
+      setNotice("Không thể đổi vị trí vì sẽ làm thứ tự ngày bị lùi. Hãy điều chỉnh ngày trước.");
+      return;
+    }
+    commitWarrantyProgressRows(nextRows);
   };
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
@@ -1265,6 +1436,7 @@ export default function Home() {
     if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
     if (activeCustomerRecord && isDemandSelected("NCT-KT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
     if (activeCustomerRecord && isDemandSelected("NCT-NT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config, "interior");
+    if (activeCustomerRecord) void syncWarrantyToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
@@ -1327,6 +1499,36 @@ export default function Home() {
     }
   };
 
+  const syncWarrantyToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
+    const config = configOverride ?? { scriptUrl: driveScriptUrl.trim(), token: driveSyncToken.trim() };
+    if (!config.scriptUrl || !config.token) {
+      setDriveConfigOpen(true);
+      return;
+    }
+    setSyncingWarrantyId(record.id);
+    try {
+      const response = await fetch("/api/drive-sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "sync-warranty",
+          scriptUrl: config.scriptUrl,
+          token: config.token,
+          year,
+          month,
+          record: { ...record, warrantyProgress: normalizeWarrantyProgress(record) },
+        }),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string; fileUrl?: string };
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel Phiếu thông tin bảo hành.");
+      setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${record.projectId}.xlsx`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể đồng bộ Phiếu thông tin bảo hành.");
+    } finally {
+      setSyncingWarrantyId(null);
+    }
+  };
+
   const queueDriveSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
     if (!isDriveConnected) return;
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
@@ -1346,11 +1548,22 @@ export default function Home() {
     }, 900);
   };
 
+  const queueWarrantySync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+    if (!isDriveConnected) return;
+    if (warrantySyncTimer.current) window.clearTimeout(warrantySyncTimer.current);
+    warrantySyncTimer.current = window.setTimeout(() => {
+      warrantySyncTimer.current = null;
+      void syncWarrantyToDrive(record, year, month);
+    }, 900);
+  };
+
   useEffect(() => () => {
     if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
     Object.values(designSyncTimers.current).forEach((timer) => {
       if (timer) window.clearTimeout(timer);
     });
+    if (warrantySyncTimer.current) window.clearTimeout(warrantySyncTimer.current);
+    if (customerSearchTimer.current) window.clearTimeout(customerSearchTimer.current);
   }, []);
 
   const selectedAudioNote = selectedRecord?.audioNote;
@@ -1379,7 +1592,7 @@ export default function Home() {
     <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
         <span>⌕</span>
-        <input value={workflowSearch} onChange={(event) => setWorkflowSearch(event.target.value)} placeholder="Search khách hàng, mã nhà hoặc ID dự án…" aria-label="Search khách hàng" />
+        <input value={workflowSearch} onChange={(event) => { setWorkflowSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Search khách hàng, mã nhà hoặc ID dự án…" aria-label="Search khách hàng" />
         {workflowSearch && <button type="button" onClick={() => setWorkflowSearch("")} aria-label="Xóa nội dung Search">×</button>}
       </label>
       {workflowSearch && <div className="workflow-customer-search__results">
@@ -1446,6 +1659,38 @@ export default function Home() {
     </section>;
   };
 
+  const renderWarrantySchedule = () => <section className="design-schedule warranty-schedule">
+    <header className="design-schedule__heading">
+      <div><p className="eyebrow">Bảo hành</p><h2>Phiếu thông tin bảo hành</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
+      <div className="design-progress-view__status"><i className={syncingWarrantyId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingWarrantyId === activeCustomerRecord?.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
+    </header>
+    <div className="design-progress-table-wrap">
+      <table className="design-progress-table warranty-progress-table">
+        <thead><tr><th>Nội dung</th><th>Ngày báo</th><th>Ngày hoàn thành</th><th>Người phụ trách</th><th>Ghi chú</th></tr></thead>
+        <tbody>{warrantyProgressRows.map((row, index) => (
+          <tr key={row.id}>
+            <td><div className="design-progress-content">
+              {row.isCustom
+                ? <GrowingTextarea value={row.content} onChange={(event) => updateWarrantyProgress(index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
+                : <b>{row.content}</b>}
+              <span className="design-progress-content__actions">
+                <button type="button" onClick={() => moveWarrantyProgressRow(index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
+                <button type="button" onClick={() => moveWarrantyProgressRow(index, 1)} disabled={index === warrantyProgressRows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
+                {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteWarrantyProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
+              </span>
+            </div></td>
+            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
+            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
+            <td><GrowingTextarea value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
+            <td><GrowingTextarea value={row.note} onChange={(event) => updateWarrantyProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+          </tr>
+        ))}</tbody>
+      </table>
+      <button type="button" className="design-progress-add-row" onClick={addWarrantyProgressRow}><span>＋</span> Thêm dòng bảo hành</button>
+    </div>
+    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
+  </section>;
+
   return (
     <main className="crm-shell">
       {!selectedCustomerProjectId && (
@@ -1476,12 +1721,12 @@ export default function Home() {
               </div>
               <label className="customer-search">
                 <span>⌕</span>
-                <input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Tìm tên, mã nhà hoặc ID dự án…" aria-label="Tìm khách hàng" />
+                <input autoFocus value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên, mã nhà hoặc ID dự án…" aria-label="Tìm khách hàng" />
               </label>
 
               <div className="customer-period" aria-label="Chọn thời gian khách hàng">
-                <label>Tháng<select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
-                <label>Năm<select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+                <label>Tháng<select value={selectedMonth} onChange={(event) => { const month = Number(event.target.value); setSelectedMonth(month); void loadWorkspaceFromDrive(undefined, true, { mode: "index", year: selectedYear, month }); }}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
+                <label>Năm<select value={selectedYear} onChange={(event) => { const year = Number(event.target.value); setSelectedYear(year); void loadWorkspaceFromDrive(undefined, true, { mode: "index", year, month: selectedMonth }); }}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
                 <span>Đang hiện hồ sơ trong <b>T{selectedMonth} / {selectedYear}</b></span>
               </div>
 
@@ -1543,7 +1788,7 @@ export default function Home() {
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                 <div className="consulting-profile-actions">
-                  <div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
+                  <div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel…" : "Tự động lưu vào Drive"}</div>
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
@@ -1554,6 +1799,7 @@ export default function Home() {
                 </div>
               </header>
               <div className="detail-scroll">
+                {loadingCustomerId === selectedRecord.projectId && <div className="customer-detail-loading">Đang nạp Excel chi tiết của {selectedRecord.projectId}…</div>}
                 {!hasConsultingSearchResults && <div className="consulting-search-empty"><span>∅</span><p>Không tìm thấy nội dung phù hợp với “{consultingSearch}”.</p></div>}
                 {visibleDetailSections.length > 0 && <table className="information-table">
                   <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
@@ -1614,6 +1860,13 @@ export default function Home() {
                 {renderDesignSchedule("architecture")}
                 {renderDesignSchedule("interior")}
               </div>
+            </section>
+          </section>
+        ) : activeFolder === "Bảo hành" ? (
+          <section className="design-workspace warranty-workspace">
+            {renderWorkflowCustomerSearch()}
+            <section className="design-progress-view design-progress-view--bare">
+              {renderWarrantySchedule()}
             </section>
           </section>
         ) : (
