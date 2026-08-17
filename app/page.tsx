@@ -152,6 +152,9 @@ const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
+// The currently deployed Apps Script still verifies its historical token. It is
+// supplied automatically for compatibility, so users only ever enter the URL.
+const deployedAppsScriptCompatibilityToken = "010101";
 const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
 };
@@ -171,7 +174,7 @@ async function postToAppsScript<T extends { ok?: boolean; error?: string }>(conf
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...payload, token: deployedAppsScriptCompatibilityToken }),
     redirect: "follow",
   });
   const responseText = await response.text();
