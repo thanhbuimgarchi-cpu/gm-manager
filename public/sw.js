@@ -1,5 +1,5 @@
-const CACHE_NAME = "gm-crm-shell-v2";
-const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-crm-icon.svg", "./gm-crm-logo.png"];
+const CACHE_NAME = "gm-crm-shell-v3";
+const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
@@ -23,8 +23,8 @@ self.addEventListener("fetch", (event) => {
 function notificationOptions(payload = {}) {
   return {
     body: payload.body || "GM-CRM có cập nhật mới.",
-    icon: "./gm-crm-logo.png",
-    badge: "./gm-crm-icon.svg",
+    icon: "./gm-logo.png",
+    badge: "./gm-logo.png",
     tag: payload.tag || "gm-crm-notification",
     data: { url: payload.url || "./" },
   };
