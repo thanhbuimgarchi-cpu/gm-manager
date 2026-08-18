@@ -1,0 +1,21 @@
+{
+  "name": "GM-CRM | GM-Manager",
+  "short_name": "GM-CRM",
+  "description": "Quản lý khách hàng và quy trình GM-Manager.",
+  "lang": "vi",
+  "start_url": "/gm-manager/",
+  "scope": "/gm-manager/",
+  "display": "standalone",
+  "background_color": "#f7f7f1",
+  "theme_color": "#1d1d1c",
+  "icons": [
+    {
+      "src": "/gm-manager/gm-crm-logo.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    { "src": "/gm-manager/gm-crm-icon.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/gm-manager/gm-crm-icon.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

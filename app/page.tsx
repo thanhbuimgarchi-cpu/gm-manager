@@ -153,6 +153,11 @@ type DriveSyncConfig = {
   scriptUrl: string;
 };
 
+type InstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
+
 type DriveLoadMode = "index" | "search" | "detail";
 
 const monthLabels = Array.from({ length: 12 }, (_, index) => `T${index + 1}`);
@@ -878,6 +883,10 @@ export default function Home() {
   const [customerName, setCustomerName] = useState("");
   const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [isAppInstalled, setIsAppInstalled] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [iosInstallHelpOpen, setIosInstallHelpOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
@@ -928,6 +937,30 @@ export default function Home() {
       }
     }
     setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
+  }, []);
+
+  useEffect(() => {
+    const standaloneQuery = window.matchMedia("(display-mode: standalone)");
+    const updateInstallState = () => setIsAppInstalled(standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+    const captureInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setDeferredInstallPrompt(event as InstallPromptEvent);
+    };
+    const markInstalled = () => {
+      setIsAppInstalled(true);
+      setDeferredInstallPrompt(null);
+    };
+    updateInstallState();
+    if ("Notification" in window) setNotificationPermission(Notification.permission);
+    if ("serviceWorker" in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => undefined);
+    window.addEventListener("beforeinstallprompt", captureInstallPrompt);
+    window.addEventListener("appinstalled", markInstalled);
+    standaloneQuery.addEventListener("change", updateInstallState);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", captureInstallPrompt);
+      window.removeEventListener("appinstalled", markInstalled);
+      standaloneQuery.removeEventListener("change", updateInstallState);
+    };
   }, []);
 
   const activeDriveFolder = syncedDriveFolders.find((folder) => folder.label === activeFolder);
@@ -991,6 +1024,55 @@ export default function Home() {
     setConsultingSearch("");
     setWorkflowSearch("");
   };
+
+  const installGMCRM = async () => {
+    if (isAppInstalled) {
+      setNotice("GM-CRM đã được cài trên thiết bị này.");
+      return;
+    }
+    if (deferredInstallPrompt) {
+      await deferredInstallPrompt.prompt();
+      const choice = await deferredInstallPrompt.userChoice;
+      if (choice.outcome === "accepted") setNotice("Đã cài GM-CRM lên màn hình chính.");
+      setDeferredInstallPrompt(null);
+      return;
+    }
+    const isAppleMobile = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (isAppleMobile) {
+      setIosInstallHelpOpen(true);
+      return;
+    }
+    setNotice("Mở menu trình duyệt và chọn Cài đặt ứng dụng hoặc Thêm vào màn hình chính.");
+  };
+
+  const sendTestNotification = async () => {
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+      setNotificationPermission("unsupported");
+      setNotice("Trình duyệt này chưa hỗ trợ thông báo ứng dụng.");
+      return;
+    }
+    let permission = Notification.permission;
+    if (permission === "default") permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    if (permission !== "granted") {
+      setNotice("Bạn cần cho phép thông báo trong cài đặt trình duyệt.");
+      return;
+    }
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification("GM-CRM", {
+      body: "Thông báo trên điện thoại đã được bật thành công.",
+      icon: `${import.meta.env.BASE_URL}gm-crm-logo.png`,
+      badge: `${import.meta.env.BASE_URL}gm-crm-icon.svg`,
+      tag: "gm-crm-notification-test",
+      data: { url: `${import.meta.env.BASE_URL}` },
+    });
+    setNotice("Đã gửi thông báo thử đến thiết bị này.");
+  };
+
+  const renderMobileAppActions = () => <>
+    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM}>⇩ Cài ứng dụng</button>}
+    <button type="button" className="pwa-action" onClick={() => void sendTestNotification}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
+  </>;
 
   const persist = (nextYears: YearFolder[]) => {
     setYears(nextYears);
@@ -1832,8 +1914,9 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand">GM<span>-CRM</span></div>
+            <div className="brand customer-gateway__brand brand--with-subtitle">GM<span>-CRM</span><small>CRM-GM</small></div>
             <div className="customer-gateway__actions">
+              {renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
               <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
               {!personnelView && <button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button>}
@@ -1909,7 +1992,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand">GM<span>-CRM</span></div>
+        <div className="brand brand--with-subtitle">GM<span>-CRM</span><small>CRM-GM</small></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
@@ -1927,7 +2010,7 @@ export default function Home() {
             <span className="customer-context__back">←</span>
             <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
           </button>
-          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions">{renderMobileAppActions()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (
@@ -2065,6 +2148,17 @@ export default function Home() {
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
+        </div>
+      )}
+
+      {iosInstallHelpOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setIosInstallHelpOpen(false)}>
+          <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM trên iPhone" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setIosInstallHelpOpen(false)} aria-label="Đóng">×</button>
+            <p className="eyebrow">iPhone / iPad</p><h2>Cài GM-CRM</h2>
+            <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol>
+            <p>Icon GM-CRM sẽ xuất hiện trên màn hình chính như một ứng dụng.</p>
+          </section>
         </div>
       )}
 
