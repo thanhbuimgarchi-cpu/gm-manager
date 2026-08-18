@@ -7,7 +7,7 @@
  * 4. Paste the Web app URL into GM-CRM; no synchronization code is needed.
  */
 
-const ROOT_FOLDER_ID = "PASTE_DRIVE_ROOT_FOLDER_ID_HERE";
+const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
