@@ -1475,6 +1475,38 @@ export default function Home() {
     }
   };
 
+  const deleteAudioNote = async (record: WorkRecord) => {
+    if (!record.audioNote || audioProcessingId) return;
+    if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${record.projectId}?`)) return;
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (!isAppsScriptUrl(config.scriptUrl)) {
+      setDriveConfigOpen(true);
+      return;
+    }
+    setAudioProcessingId(record.id);
+    setAudioProcessingStatus("Đang xóa ghi âm…");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; deletedCount?: number }>(config, {
+        action: "delete-audio-note",
+        year: selectedYear,
+        month: selectedMonth,
+        projectId: record.projectId,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa file ghi âm trên Drive.");
+      const updatedRecord = { ...record };
+      delete updatedRecord.audioNote;
+      persistRecord(updatedRecord, selectedYear, selectedMonth);
+      setAudioProcessingStatus("Đang xóa nội dung ghi âm khỏi Excel…");
+      await syncRecordToDrive(updatedRecord, selectedYear, selectedMonth, config);
+      setNotice(`Đã xóa ${result.deletedCount ?? 0} file ghi âm. Bạn có thể Add ghi âm mới.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể xóa ghi âm.");
+    } finally {
+      setAudioProcessingId(null);
+      setAudioProcessingStatus("");
+    }
+  };
+
   const functionalFloors = selectedRecord ? normalizeFunctionalFloors(selectedRecord) : [createFunctionalFloor()];
 
   const updateFunctionalFloors = (nextFloors: FunctionalFloor[]) => {
@@ -1959,7 +1991,7 @@ export default function Home() {
 
                 {consultingSearchMatchesAudio && <section className="dynamic-information system-information audio-information">
                   <div className="audio-information__heading"><div><h3>6. Thông tin ghi âm</h3><p>File được lưu trong thư mục khách hàng. Mỗi đoạn xong sẽ ghi ngay vào Excel; nếu dừng giữa chừng, lần sau tiếp tục từ đoạn chưa làm.</p></div>
-                    {audioProcessingId === selectedRecord.id ? <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button> : hasPendingAudio ? <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}</button> : <label className="audio-import-button"><input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />Import ghi âm</label>}
+                    <div className="audio-information__actions">{audioProcessingId === selectedRecord.id ? <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button> : hasPendingAudio ? <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}</button> : <label className="audio-import-button"><input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />{selectedAudioNote ? "Add ghi âm mới" : "Add ghi âm"}</label>}{selectedAudioNote && audioProcessingId !== selectedRecord.id && <button type="button" className="audio-delete-button" onClick={() => void deleteAudioNote(selectedRecord)}>Xóa ghi âm</button>}</div>
                   </div>
                   {selectedAudioNote && <div className="audio-note">
                     <p className="audio-note__meta">{selectedAudioNote.fileName} · {selectedAudioNote.language} · Đã hoàn thành {audioCompletedChunks}/{audioTotalChunks} đoạn · {selectedAudioNote.updatedAt}</p>
@@ -2145,18 +2177,21 @@ export default function Home() {
                     <h3>6. Thông tin ghi âm</h3>
                     <p>File được lưu trong thư mục khách hàng. Mỗi đoạn xong sẽ ghi ngay vào Excel; nếu dừng giữa chừng, lần sau tiếp tục từ đoạn chưa làm.</p>
                   </div>
-                  {audioProcessingId === selectedRecord.id ? (
-                    <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button>
-                  ) : hasPendingAudio ? (
-                    <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>
-                      Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}
-                    </button>
-                  ) : (
-                    <label className="audio-import-button">
-                      <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />
-                      Import ghi âm
-                    </label>
-                  )}
+                  <div className="audio-information__actions">
+                    {audioProcessingId === selectedRecord.id ? (
+                      <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button>
+                    ) : hasPendingAudio ? (
+                      <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>
+                        Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}
+                      </button>
+                    ) : (
+                      <label className="audio-import-button">
+                        <input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />
+                        {selectedAudioNote ? "Add ghi âm mới" : "Add ghi âm"}
+                      </label>
+                    )}
+                    {selectedAudioNote && audioProcessingId !== selectedRecord.id && <button type="button" className="audio-delete-button" onClick={() => void deleteAudioNote(selectedRecord)}>Xóa ghi âm</button>}
+                  </div>
                 </div>
                 {selectedAudioNote && (
                   <div className="audio-note">

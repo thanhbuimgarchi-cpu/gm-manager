@@ -25,6 +25,15 @@ function doPost(event) {
         audioLock.releaseLock();
       }
     }
+    if (payload.action === "delete-audio-note") {
+      const audioLock = LockService.getScriptLock();
+      audioLock.waitLock(30000);
+      try {
+        return json_(deleteAudioNote_(payload));
+      } finally {
+        audioLock.releaseLock();
+      }
+    }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
@@ -116,6 +125,22 @@ function storeAudioChunk_(payload) {
   const blob = Utilities.newBlob(Utilities.base64Decode(audio.data), audio.mimeType, fileName);
   const file = audioFolder.createFile(blob);
   return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName, folderUrl: audioFolder.getUrl() };
+}
+
+function deleteAudioNote_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thi\u1ebfu th\u00f4ng tin ghi \u00e2m c\u1ea7n x\u00f3a.");
+  const audioFolder = getAudioFolder_(year, month, projectId, false);
+  if (!audioFolder) return { ok: true, deletedCount: 0 };
+  let deletedCount = 0;
+  const files = audioFolder.getFiles();
+  while (files.hasNext()) {
+    files.next().setTrashed(true);
+    deletedCount += 1;
+  }
+  return { ok: true, deletedCount: deletedCount };
 }
 
 function processStoredAudioChunk_(payload) {
