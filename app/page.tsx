@@ -886,7 +886,7 @@ export default function Home() {
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
-  const [iosInstallHelpOpen, setIosInstallHelpOpen] = useState(false);
+  const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
@@ -1039,10 +1039,10 @@ export default function Home() {
     }
     const isAppleMobile = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     if (isAppleMobile) {
-      setIosInstallHelpOpen(true);
+      setMobileInstallHelp("ios");
       return;
     }
-    setNotice("Mở menu trình duyệt và chọn Cài đặt ứng dụng hoặc Thêm vào màn hình chính.");
+    setMobileInstallHelp("android");
   };
 
   const sendTestNotification = async () => {
@@ -1070,8 +1070,8 @@ export default function Home() {
   };
 
   const renderMobileAppActions = () => <>
-    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM}>⇩ Cài ứng dụng</button>}
-    <button type="button" className="pwa-action" onClick={() => void sendTestNotification}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
+    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
+    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
   </>;
 
   const persist = (nextYears: YearFolder[]) => {
@@ -1914,7 +1914,7 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-subtitle">GM<span>-CRM</span><small>CRM-GM</small></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" />GM<span>-CRM</span></div>
             <div className="customer-gateway__actions">
               {renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
@@ -1992,7 +1992,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand brand--with-subtitle">GM<span>-CRM</span><small>CRM-GM</small></div>
+        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" />GM<span>-CRM</span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
@@ -2151,13 +2151,13 @@ export default function Home() {
         </div>
       )}
 
-      {iosInstallHelpOpen && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setIosInstallHelpOpen(false)}>
-          <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM trên iPhone" onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="dialog-close" onClick={() => setIosInstallHelpOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">iPhone / iPad</p><h2>Cài GM-CRM</h2>
-            <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol>
-            <p>Icon GM-CRM sẽ xuất hiện trên màn hình chính như một ứng dụng.</p>
+      {mobileInstallHelp && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileInstallHelp(null)}>
+          <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM lên điện thoại" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : "Android"}</p><h2>Cài GM-CRM</h2>
+            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol>}
+            <p>Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng.</p>
           </section>
         </div>
       )}
