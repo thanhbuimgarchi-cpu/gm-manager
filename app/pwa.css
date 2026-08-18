@@ -20,14 +20,13 @@
 .brand--with-logo {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  line-height: 0;
 }
 
 .brand--with-logo img {
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  object-fit: cover;
+  width: 50px;
+  height: 50px;
+  object-fit: contain;
 }
 
 .install-help-dialog {

@@ -1914,7 +1914,7 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" />GM<span>-CRM</span></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" /></div>
             <div className="customer-gateway__actions">
               {renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
@@ -1992,7 +1992,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" />GM<span>-CRM</span></div>
+        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-crm-logo.png`} alt="GM" /></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
