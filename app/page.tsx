@@ -160,6 +160,11 @@ const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
 // Keep every browser upload below 1 MB. The hosting edge can reject larger
 // multipart bodies before the request reaches the application worker.
 const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
+const DRIVE_INDEX_CACHE_MS = 10 * 60 * 1000;
+const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
+const DRIVE_DETAIL_CACHE_MS = 4 * 60 * 1000;
+const DRIVE_FILE_LIST_CACHE_MS = 3 * 60 * 1000;
+const driveCachePrefix = "gm-manager-drive-cache-v1:";
 const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
@@ -794,6 +799,29 @@ function saveWorkspace(years: YearFolder[]) {
   window.localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
 }
 
+function readDriveCache<T>(key: string, maxAgeMs: number): T | null {
+  try {
+    const raw = window.localStorage.getItem(`${driveCachePrefix}${key}`);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as { savedAt?: number; value?: T };
+    if (!cached.savedAt || Date.now() - cached.savedAt > maxAgeMs) {
+      window.localStorage.removeItem(`${driveCachePrefix}${key}`);
+      return null;
+    }
+    return cached.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDriveCache<T>(key: string, value: T) {
+  try {
+    window.localStorage.setItem(`${driveCachePrefix}${key}`, JSON.stringify({ savedAt: Date.now(), value }));
+  } catch {
+    // Storage can be unavailable or full. Drive loading still works normally.
+  }
+}
+
 function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
   const localByProjectId = new Map(localYears.flatMap((year) => year.months.flatMap((month) => month.records)).map((record) => [record.projectId, record]));
   const driveByYear = new Map(driveYears.map((year) => [year.year, year]));
@@ -870,6 +898,7 @@ export default function Home() {
   const designSyncTimers = useRef<Partial<Record<DesignProgressKind, number>>>({});
   const warrantySyncTimer = useRef<number | null>(null);
   const customerSearchTimer = useRef<number | null>(null);
+  const driveRequestsInFlight = useRef(new Set<string>());
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -968,6 +997,7 @@ export default function Home() {
   };
 
   const persistRecord = (record: WorkRecord, year: number, month: number) => {
+    writeDriveCache(`detail:${year}:${month}:${record.projectId}`, record);
     setYears((currentYears) => {
       const nextYears = currentYears.map((yearFolder) => yearFolder.year !== year ? yearFolder : {
         ...yearFolder,
@@ -981,16 +1011,28 @@ export default function Home() {
     });
   };
 
-  const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string } = {}) => {
+  const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string; force?: boolean } = {}) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) return;
     const mode = options.mode ?? "index";
     const year = options.year ?? selectedYear;
     const month = options.month ?? selectedMonth;
+    const cacheKey = `workspace:${mode}:${year}:${month}:${options.projectId ?? ""}:${normalizeSearchText(options.query ?? "")}`;
+    const cacheAge = mode === "index" ? DRIVE_INDEX_CACHE_MS : mode === "search" ? DRIVE_SEARCH_CACHE_MS : 0;
+    if (!options.force && cacheAge) {
+      const cachedYears = readDriveCache<YearFolder[]>(cacheKey, cacheAge);
+      if (cachedYears) {
+        persist(preserveDriveRecordMetadata(cachedYears, years));
+        return;
+      }
+    }
+    if (driveRequestsInFlight.current.has(cacheKey)) return;
+    driveRequestsInFlight.current.add(cacheKey);
     setIsLoadingDrive(true);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId, refresh: Boolean(options.force) });
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
+      if (cacheAge) writeDriveCache(cacheKey, result.years);
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
         persist(driveYears);
@@ -999,6 +1041,7 @@ export default function Home() {
     } catch (error) {
       if (!quietly) setNotice(error instanceof Error ? error.message : "Không thể nạp dữ liệu Excel từ Drive.");
     } finally {
+      driveRequestsInFlight.current.delete(cacheKey);
       setIsLoadingDrive(false);
     }
   };
@@ -1012,10 +1055,17 @@ export default function Home() {
   const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) return;
+    const cacheKey = `detail:${location.year}:${location.month}:${location.record.projectId}`;
+    const cachedRecord = readDriveCache<WorkRecord>(cacheKey, DRIVE_DETAIL_CACHE_MS);
+    if (cachedRecord) {
+      persistRecord({ ...cachedRecord, isHydrated: true }, location.year, location.month);
+      return;
+    }
     setLoadingCustomerId(location.record.projectId);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId });
       if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp chi tiết hồ sơ.");
+      writeDriveCache(cacheKey, result.record);
       persistRecord({ ...result.record, isHydrated: true }, location.year, location.month);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể nạp chi tiết hồ sơ.");
@@ -1028,6 +1078,14 @@ export default function Home() {
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = workflowFilesCacheKey(folder);
+    const clientCacheKey = `files:${cacheKey}`;
+    const cachedFiles = readDriveCache<WorkflowFile[]>(clientCacheKey, DRIVE_FILE_LIST_CACHE_MS);
+    if (cachedFiles) {
+      setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: cachedFiles }));
+      return;
+    }
+    if (driveRequestsInFlight.current.has(clientCacheKey)) return;
+    driveRequestsInFlight.current.add(clientCacheKey);
     setLoadingWorkflowFiles(true);
     setWorkflowFilesError("");
     try {
@@ -1039,6 +1097,7 @@ export default function Home() {
         workflow: folder,
       });
       if (!response.ok || !result.ok || !result.files) throw new Error(result.error || "Không thể nạp danh sách tệp.");
+      writeDriveCache(clientCacheKey, result.files ?? []);
       setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: result.files ?? [] }));
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
@@ -1046,6 +1105,7 @@ export default function Home() {
       setWorkflowFilesError(message);
       if (!quietly) setNotice(message);
     } finally {
+      driveRequestsInFlight.current.delete(clientCacheKey);
       setLoadingWorkflowFiles(false);
     }
   };
@@ -1737,7 +1797,7 @@ export default function Home() {
             <div className="brand customer-gateway__brand">GM<span>-CRM</span></div>
             <div className="customer-gateway__actions">
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
-              <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
+              <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
               {!personnelView && <button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button>}
             </div>
           </header>
@@ -1829,7 +1889,7 @@ export default function Home() {
             <span className="customer-context__back">←</span>
             <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
           </button>
-          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive()} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (

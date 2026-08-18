@@ -188,20 +188,51 @@ function splitTranscript_(text) {
   return chunks;
 }
 
+function readCachedJson_(key) {
+  try {
+    const raw = CacheService.getScriptCache().get(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function cacheJson_(key, value, seconds) {
+  try {
+    CacheService.getScriptCache().put(key, JSON.stringify(value), seconds);
+  } catch (error) {
+    // A large result simply bypasses the server cache; Drive loading still works.
+  }
+}
+
 function loadConsultingWorkspace_(payload) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
   if (!customers) return { ok: true, years: [] };
 
   const mode = String(payload.mode || "index");
+  const refresh = Boolean(payload.refresh);
   if (mode === "detail") return loadCustomerDetail_(customers, payload);
-  if (mode === "search") return { ok: true, years: searchCustomerIndex_(customers, String(payload.query || "")) };
+  if (mode === "search") {
+    const query = String(payload.query || "").trim();
+    const cacheKey = "gmcrm-search-" + Utilities.base64EncodeWebSafe(query).slice(0, 120);
+    const cached = refresh ? null : readCachedJson_(cacheKey);
+    if (cached) return cached;
+    const result = { ok: true, years: searchCustomerIndex_(customers, query) };
+    cacheJson_(cacheKey, result, 180);
+    return result;
+  }
 
   const timezone = "Asia/Ho_Chi_Minh";
   const now = new Date();
   const year = Number(payload.year || Utilities.formatDate(now, timezone, "yyyy"));
   const month = Number(payload.month || Utilities.formatDate(now, timezone, "M"));
-  return { ok: true, years: loadMonthCustomerIndex_(customers, year, month) };
+  const cacheKey = "gmcrm-index-" + year + "-" + month;
+  const cached = refresh ? null : readCachedJson_(cacheKey);
+  if (cached) return cached;
+  const result = { ok: true, years: loadMonthCustomerIndex_(customers, year, month) };
+  cacheJson_(cacheKey, result, 300);
+  return result;
 }
 
 function monthResult_(year, month, records) {
@@ -796,6 +827,10 @@ function listWorkflowFiles_(payload) {
   const allowedWorkflows = ["T\u01b0 v\u1ea5n", "Thi\u1ebft k\u1ebf", "D\u1ef1 to\u00e1n", "Thi c\u00f4ng", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh"];
   if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c c\u1ea7n n\u1ea1p.");
 
+  const cacheKey = "gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
+  const cached = payload.refresh ? null : readCachedJson_(cacheKey);
+  if (cached) return cached;
+
   const customerFolder = getCustomerFolder_(year, month, projectId, false);
   if (!customerFolder) return { ok: true, files: [] };
   const workflowFolder = findFolder_(customerFolder, workflow);
@@ -816,9 +851,11 @@ function listWorkflowFiles_(payload) {
     });
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
-  return { ok: true, files: files.map(function(file) {
+  const result = { ok: true, files: files.map(function(file) {
     return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType };
   }) };
+  cacheJson_(cacheKey, result, 180);
+  return result;
 }
 
 function isSpecialWorkflowWorkbook_(name) {
