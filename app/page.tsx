@@ -285,6 +285,7 @@ const detailSections: Array<{ title: string; fields: DetailField[] }> = [
 ];
 
 const demandCheckboxCodes = new Set(["NCT-KT", "NCT-NT", "NCC-KT", "NCC-NT"]);
+const dateDetailCodes = new Set(["NS"]);
 
 const systemFields: DetailField[] = [
   { code: "D", label: "Điện" },
@@ -1218,7 +1219,7 @@ export default function Home() {
     if (key === "plannedDate" || key === "actualDate") {
       nextValue = formatDesignDateInput(value);
       if (nextValue.length === 10 && !parseDesignDate(nextValue)) {
-        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 12/04/2026.");
+        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 11/11/1999.");
         return;
       }
     }
@@ -1257,7 +1258,7 @@ export default function Home() {
     if (key === "reportedDate" || key === "completedDate") {
       nextValue = formatDesignDateInput(value);
       if (nextValue.length === 10 && !parseDesignDate(nextValue)) {
-        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 12/04/2026.");
+        setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 11/11/1999.");
         return;
       }
     }
@@ -1320,7 +1321,12 @@ export default function Home() {
 
   const updateRecordDetail = (key: string, value: string) => {
     if (!selectedRecord) return;
-    const updatedRecord = { ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: value } };
+    const nextValue = dateDetailCodes.has(key) ? formatDesignDateInput(value) : value;
+    if (dateDetailCodes.has(key) && nextValue.length === 10 && !parseDesignDate(nextValue)) {
+      setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 11/11/1999.");
+      return;
+    }
+    const updatedRecord = { ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: nextValue } };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
@@ -1330,8 +1336,8 @@ export default function Home() {
     });
     persist(nextYears);
     queueDriveSync(updatedRecord);
-    if (value && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
-    if (value && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
+    if (nextValue && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
+    if (nextValue && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
   };
 
   const updateRecordName = (value: string) => {
@@ -1765,8 +1771,8 @@ export default function Home() {
                   {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
                 </span>
               </div></td>
-              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
+              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
               <td><GrowingTextarea value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
@@ -1809,8 +1815,8 @@ export default function Home() {
                 {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteWarrantyProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
               </span>
             </div></td>
-            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
-            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="12/04/2026" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
+            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
+            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
             <td><GrowingTextarea value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
             <td><GrowingTextarea value={row.note} onChange={(event) => updateWarrantyProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
           </tr>
@@ -1957,7 +1963,7 @@ export default function Home() {
                     <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
                     {section.fields.map((field) => <tr key={field.code}>
                       <td>{field.label} <span className="field-code">({field.code})</span></td>
-                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="11/11/1999" /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                         <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
                       </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                     </tr>)}
@@ -2101,7 +2107,9 @@ export default function Home() {
                       {section.fields.map((field) => (
                         <tr key={field.code}>
                           <td>{field.label} <span className="field-code">({field.code})</span></td>
-                          <td>{field.options ? (
+                          <td>{dateDetailCodes.has(field.code) ? (
+                            <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="11/11/1999" />
+                          ) : field.options ? (
                             <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                               <option value="">Chọn giá trị</option>
                               {field.options.map((option) => <option key={option} value={option}>{option}</option>)}
