@@ -1061,7 +1061,7 @@ function clearDocumentCache_(year, month, projectId) {
   CacheService.getScriptCache().remove(documentCachePrefix_(year, month, projectId) + "-latest");
 }
 
-function archiveDocumentFile_(customerFolder, sourceFile, work) {
+function archiveDocumentFile_(customerFolder, sourceFile, work, replaceExisting) {
   const projectId = customerFolder.getName();
   const warrantyFolder = getOrCreateFolder_(customerFolder, "Bảo hành");
   const documentsFolder = getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
@@ -1082,6 +1082,11 @@ function archiveDocumentFile_(customerFolder, sourceFile, work) {
     const candidate = currentFiles.next();
     const candidateMeta = normalizeDocumentMeta_(manifest.files[candidate.getId()], candidate, work);
     if (candidateMeta.documentKey === documentKey || candidate.getName() === sourceFile.getName()) {
+      if (replaceExisting === false) {
+        manifest.files[candidate.getId()] = normalized;
+        writeDocumentManifest_(documentsFolder, manifest);
+        return candidate;
+      }
       delete manifest.files[candidate.getId()];
       candidate.setTrashed(true);
     }
@@ -1090,6 +1095,25 @@ function archiveDocumentFile_(customerFolder, sourceFile, work) {
   manifest.files[archived.getId()] = normalized;
   writeDocumentManifest_(documentsFolder, manifest);
   return archived;
+}
+
+function seedExistingDocuments_(year, month, projectId) {
+  const seedKey = documentCachePrefix_(year, month, projectId) + "-seed";
+  if (CacheService.getScriptCache().get(seedKey)) return;
+  const customerFolder = getCustomerFolder_(year, month, projectId, false);
+  if (!customerFolder) return;
+  DOCUMENT_WORK_OPTIONS.forEach(function(work) {
+    const workflowFolder = findFolder_(customerFolder, work);
+    if (!workflowFolder) return;
+    const files = workflowFolder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      // Existing files are copied once into the latest daily folder, then the
+      // user can decide whether they are continuous or daily documents.
+      archiveDocumentFile_(customerFolder, file, work, false);
+    }
+  });
+  CacheService.getScriptCache().put(seedKey, "1", 120);
 }
 
 function documentFileOutput_(file, meta) {
@@ -1111,6 +1135,7 @@ function listDocuments_(payload) {
   const projectId = String(payload.projectId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  seedExistingDocuments_(year, month, projectId);
   const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const requestedId = String(payload.snapshotId || "");
   const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
