@@ -132,6 +132,7 @@ type CustomerLocation = {
 type DriveFolder = {
   label: string;
   icon: string;
+  isDocument?: boolean;
 };
 
 type WorkflowFile = {
@@ -141,6 +142,24 @@ type WorkflowFile = {
   updatedAt: string;
   mimeType: string;
   isFolder?: boolean;
+};
+
+type DocumentNature = "Xuyên suốt" | "Theo ngày";
+
+type DocumentFile = {
+  id: string;
+  name: string;
+  downloadUrl: string;
+  updatedAt: string;
+  mimeType: string;
+  work: string;
+  nature: DocumentNature;
+};
+
+type DocumentSnapshot = {
+  id: string;
+  name: string;
+  date: string;
 };
 
 type PersonnelCategory = {
@@ -249,8 +268,12 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Thi công", icon: "♧" },
   { label: "Nghiệm thu", icon: "✓" },
   { label: "Bảo hành", icon: "⚙" },
+  { label: "Tài liệu", icon: "▱", isDocument: true },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
+
+const documentWorkOptions = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
+const documentNatureOptions: DocumentNature[] = ["Xuyên suốt", "Theo ngày"];
 
 const personnelCategories: PersonnelCategory[] = [
   { id: "management", label: "Ban quản lý", icon: "♛", description: "Ban giám đốc và đội ngũ quản lý GM" },
@@ -977,6 +1000,11 @@ export default function Home() {
   const [workflowFilesByFolder, setWorkflowFilesByFolder] = useState<Record<string, WorkflowFile[]>>({});
   const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
   const [workflowFilesError, setWorkflowFilesError] = useState("");
+  const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
+  const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
+  const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
+  const [documentsError, setDocumentsError] = useState("");
   const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
@@ -1304,8 +1332,88 @@ export default function Home() {
     }
   };
 
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const cacheKey = documentCacheKey(snapshotId);
+    const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
+    const fresh = isDriveCacheFresh(cacheKey, DRIVE_FILE_LIST_FRESH_MS);
+    if (cached && !refresh) {
+      setDocumentSnapshots(cached.snapshots);
+      setDocumentFiles(cached.files);
+      setSelectedDocumentSnapshotId((current) => current || cached.activeSnapshotId);
+    }
+    if (fresh && !refresh) return;
+    setLoadingDocuments(!cached);
+    setDocumentsError("");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "list-documents",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        snapshotId: snapshotId || undefined,
+        refresh,
+      });
+      if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
+      const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: result.files };
+      writeDriveCache(cacheKey, next);
+      setDocumentSnapshots(next.snapshots);
+      setDocumentFiles(next.files);
+      setSelectedDocumentSnapshotId((current) => snapshotId || current || next.activeSnapshotId);
+    } catch (error) {
+      if (!cached) setDocumentsError(error instanceof Error ? error.message : "Không thể nạp Tài liệu.");
+    } finally {
+      setLoadingDocuments(false);
+    }
+  };
+
+  const createDocumentSnapshot = async () => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    setLoadingDocuments(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; copiedCount?: number }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "create-document-snapshot",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+      });
+      if (!response.ok || !result.ok || !result.snapshot) throw new Error(result.error || "Không thể tạo bản Tài liệu hôm nay.");
+      setSelectedDocumentSnapshotId(result.snapshot.id);
+      await loadDocuments(result.snapshot.id, true);
+      setNotice(`Đã tạo ${result.snapshot.name}; sao lưu ${result.copiedCount ?? 0} tệp Theo ngày.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
+    } finally {
+      setLoadingDocuments(false);
+    }
+  };
+
+  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work" | "nature">>) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const before = documentFiles;
+    const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
+    setDocumentFiles(nextFiles);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "update-document-metadata",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        fileId,
+        work: patch.work,
+        nature: patch.nature,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật tệp.");
+      writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
+    } catch (error) {
+      setDocumentFiles(before);
+      setNotice(error instanceof Error ? error.message : "Không thể cập nhật tệp.");
+    }
+  };
+
   useEffect(() => {
-    if (selectedCustomerLocation) void loadWorkflowFiles(activeFolder, true);
+    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments();
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
   const searchCustomersOnDrive = (value: string) => {
@@ -1972,6 +2080,21 @@ export default function Home() {
       </div>
     </section>
   );
+  const renderDocumentLibrary = () => {
+    const selectedSnapshot = documentSnapshots.find((snapshot) => snapshot.id === selectedDocumentSnapshotId);
+    return <section className="document-library" aria-label="Tài liệu dự án">
+      <header className="document-library__heading">
+        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Mỗi bản ngày nằm trong thư mục <b>ngày-tháng-năm-ID dự án</b>. Tệp Xuyên suốt chỉ hiển thị lại, không bị sao chép.</p></div>
+        <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button>
+      </header>
+      <div className="document-library__toolbar"><label>Bản tài liệu<select value={selectedDocumentSnapshotId} onChange={(event) => { const nextId = event.target.value; setSelectedDocumentSnapshotId(nextId); void loadDocuments(nextId); }} disabled={!documentSnapshots.length}>{documentSnapshots.map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.name}</option>)}</select></label>{selectedSnapshot && <span>{selectedSnapshot.date}</span>}</div>
+      <div className="document-library__table-wrap">
+        {loadingDocuments && !documentFiles.length ? <p className="document-library__empty">Đang nạp Tài liệu…</p>
+          : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
+            : documentFiles.length ? <table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên file</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{documentFiles.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table> : <p className="document-library__empty">Chưa có tệp trong bản Tài liệu này.</p>}
+      </div>
+    </section>;
+  };
   const renderWorkflowCustomerSearch = () => (
     <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
@@ -2170,7 +2293,7 @@ export default function Home() {
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
-            <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
+            <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${folder.isDocument ? "nav-row--document" : ""} ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
               <span>{folder.label}</span>
             </button>
@@ -2194,8 +2317,6 @@ export default function Home() {
               <input value={consultingSearch} onChange={(event) => setConsultingSearch(event.target.value)} placeholder="Search trong Phiếu thông tin khách hàng…" aria-label="Search Phiếu thông tin khách hàng" />
               {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa nội dung Search">×</button>}
             </label>
-
-            {renderWorkflowFiles()}
 
             {selectedRecord && <section className="record-detail record-detail--inline">
               <header className="record-detail__heading">
@@ -2268,7 +2389,6 @@ export default function Home() {
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-workspace">
             {renderWorkflowCustomerSearch()}
-            {renderWorkflowFiles()}
             <section className="design-progress-view design-progress-view--bare">
               <div className="design-schedules">
                 {renderDesignSchedule("architecture")}
@@ -2279,15 +2399,17 @@ export default function Home() {
         ) : activeFolder === "Bảo hành" ? (
           <section className="design-workspace warranty-workspace">
             {renderWorkflowCustomerSearch()}
-            {renderWorkflowFiles()}
             <section className="design-progress-view design-progress-view--bare">
               {renderWarrantySchedule()}
             </section>
           </section>
+        ) : activeFolder === "Tài liệu" ? (
+          <section className="document-workspace">
+            {renderDocumentLibrary()}
+          </section>
         ) : (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
-            {renderWorkflowFiles()}
             <section className="coming-soon">
               <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
               <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>

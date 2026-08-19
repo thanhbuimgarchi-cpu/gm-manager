@@ -36,6 +36,7 @@ function doPost(event) {
     }
     if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
+    if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
@@ -43,6 +44,8 @@ function doPost(event) {
     lock.waitLock(30000);
     try {
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
+      if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
+      if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -706,6 +709,7 @@ function exportCustomerWorkbook_(record, year, month) {
     if (legacyWorkbook) legacyWorkbook.moveTo(consultingFolder);
     trashFilesByName_(consultingFolder, fileName);
     const xlsxFile = consultingFolder.createFile(xlsxBlob);
+    archiveDocumentFile_(customerFolder, xlsxFile, "Tư vấn");
     return {
       fileId: xlsxFile.getId(),
       fileUrl: xlsxFile.getUrl(),
@@ -743,6 +747,7 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(designFolder, fileName);
     const xlsxFile = designFolder.createFile(xlsxBlob);
+    archiveDocumentFile_(customerFolder, xlsxFile, "Thiết kế");
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: designFolder.getUrl(), fileName: fileName };
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
@@ -774,6 +779,7 @@ function exportWarrantyWorkbook_(record, year, month) {
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(warrantyFolder, fileName);
     const xlsxFile = warrantyFolder.createFile(xlsxBlob);
+    archiveDocumentFile_(customerFolder, xlsxFile, "Bảo hành");
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: warrantyFolder.getUrl(), fileName: fileName };
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
@@ -970,6 +976,222 @@ function createWorkflowDateFolder_(payload) {
   return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
 }
 
+const DOCUMENTS_FOLDER_NAME = "Tài liệu";
+const DOCUMENT_MANIFEST_NAME = "_gmcrm_tai_lieu.json";
+const DOCUMENT_WORK_OPTIONS = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+const DOCUMENT_NATURE_OPTIONS = ["Xuyên suốt", "Theo ngày"];
+
+function documentSnapshotName_(projectId, date) {
+  const value = date || Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
+  return value + "-" + projectId;
+}
+
+function documentSnapshotDate_(name) {
+  const match = String(name || "").match(/^(\d{2})-(\d{2})-(\d{4})-/);
+  return match ? match[1] + "/" + match[2] + "/" + match[3] : "";
+}
+
+function listDocumentSnapshots_(documentsFolder, projectId) {
+  const snapshots = [];
+  const prefix = "-" + projectId;
+  const folders = documentsFolder.getFolders();
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    const name = folder.getName();
+    if (name.length <= prefix.length || name.slice(-prefix.length) !== prefix || !documentSnapshotDate_(name)) continue;
+    snapshots.push({ folder: folder, id: folder.getId(), name: name, date: documentSnapshotDate_(name) });
+  }
+  snapshots.sort(function(a, b) {
+    const parse = function(item) { const parts = item.date.split("/"); return new Date(Number(parts[2]), Number(parts[1]) - 1, Number(parts[0])).getTime(); };
+    return parse(b) - parse(a) || b.name.localeCompare(a.name);
+  });
+  return snapshots;
+}
+
+function readDocumentManifest_(documentsFolder) {
+  const file = findFileByName_(documentsFolder, DOCUMENT_MANIFEST_NAME);
+  if (!file) return { files: {} };
+  try {
+    const manifest = JSON.parse(file.getBlob().getDataAsString("UTF-8") || "{}");
+    return manifest && manifest.files ? manifest : { files: {} };
+  } catch (error) {
+    return { files: {} };
+  }
+}
+
+function writeDocumentManifest_(documentsFolder, manifest) {
+  trashFilesByName_(documentsFolder, DOCUMENT_MANIFEST_NAME);
+  documentsFolder.createFile(DOCUMENT_MANIFEST_NAME, JSON.stringify({ files: manifest.files || {} }), MimeType.PLAIN_TEXT);
+}
+
+function normalizeDocumentMeta_(meta, file, defaultWork) {
+  const raw = meta || {};
+  return {
+    work: DOCUMENT_WORK_OPTIONS.indexOf(raw.work) >= 0 ? raw.work : (defaultWork || "Tư vấn"),
+    nature: DOCUMENT_NATURE_OPTIONS.indexOf(raw.nature) >= 0 ? raw.nature : "Theo ngày",
+    documentKey: String(raw.documentKey || file.getId()),
+  };
+}
+
+function findDocumentMetaByKey_(manifest, documentKey) {
+  const entries = Object.keys(manifest.files || {});
+  for (let index = 0; index < entries.length; index += 1) {
+    const value = manifest.files[entries[index]];
+    if (value && String(value.documentKey || "") === String(documentKey)) return value;
+  }
+  return null;
+}
+
+function documentsFolderForProject_(year, month, projectId, createMissing) {
+  const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  if (!customerFolder) return null;
+  const warrantyFolder = createMissing ? getOrCreateFolder_(customerFolder, "Bảo hành") : findFolder_(customerFolder, "Bảo hành");
+  if (!warrantyFolder) return null;
+  const documentsFolder = createMissing ? getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME) : findFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
+  if (!documentsFolder) return null;
+  if (createMissing && !listDocumentSnapshots_(documentsFolder, projectId).length) documentsFolder.createFolder(documentSnapshotName_(projectId));
+  return documentsFolder;
+}
+
+function documentCachePrefix_(year, month, projectId) {
+  return "gmcrm-documents-" + year + "-" + month + "-" + projectId;
+}
+
+function clearDocumentCache_(year, month, projectId) {
+  CacheService.getScriptCache().remove(documentCachePrefix_(year, month, projectId) + "-latest");
+}
+
+function archiveDocumentFile_(customerFolder, sourceFile, work) {
+  const projectId = customerFolder.getName();
+  const warrantyFolder = getOrCreateFolder_(customerFolder, "Bảo hành");
+  const documentsFolder = getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
+  let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  if (!snapshots.length) {
+    documentsFolder.createFolder(documentSnapshotName_(projectId));
+    snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  }
+  const target = snapshots[0].folder;
+  const manifest = readDocumentManifest_(documentsFolder);
+  const documentKey = "system:" + work + ":" + sourceFile.getName();
+  const existingMeta = findDocumentMetaByKey_(manifest, documentKey);
+  const normalized = normalizeDocumentMeta_(existingMeta, sourceFile, work);
+  normalized.documentKey = documentKey;
+
+  const currentFiles = target.getFiles();
+  while (currentFiles.hasNext()) {
+    const candidate = currentFiles.next();
+    const candidateMeta = normalizeDocumentMeta_(manifest.files[candidate.getId()], candidate, work);
+    if (candidateMeta.documentKey === documentKey || candidate.getName() === sourceFile.getName()) {
+      delete manifest.files[candidate.getId()];
+      candidate.setTrashed(true);
+    }
+  }
+  const archived = sourceFile.makeCopy(sourceFile.getName(), target);
+  manifest.files[archived.getId()] = normalized;
+  writeDocumentManifest_(documentsFolder, manifest);
+  return archived;
+}
+
+function documentFileOutput_(file, meta) {
+  const updated = file.getLastUpdated();
+  return {
+    id: file.getId(),
+    name: file.getName(),
+    downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()),
+    updatedAt: Utilities.formatDate(updated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+    mimeType: file.getMimeType(),
+    work: meta.work,
+    nature: meta.nature,
+  };
+}
+
+function listDocuments_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const requestedId = String(payload.snapshotId || "");
+  const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
+  const target = snapshots[snapshotIndex];
+  const manifest = readDocumentManifest_(documentsFolder);
+  const visible = {};
+
+  // Read the history up to the chosen day. A day-specific file is only shown
+  // when it exists in that day's folder; continuous files remain visible from
+  // their most recent stored copy.
+  for (let index = snapshots.length - 1; index >= snapshotIndex; index -= 1) {
+    const files = snapshots[index].folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Tư vấn");
+      if (index !== snapshotIndex && meta.nature !== "Xuyên suốt") continue;
+      visible[meta.documentKey] = { file: file, meta: meta };
+    }
+  }
+  const files = Object.keys(visible).map(function(key) { return documentFileOutput_(visible[key].file, visible[key].meta); }).sort(function(a, b) { return b.updatedAt.localeCompare(a.updatedAt) || a.name.localeCompare(b.name); });
+  return {
+    ok: true,
+    snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date }; }),
+    activeSnapshotId: target ? target.id : "",
+    files: files,
+  };
+}
+
+function createDocumentSnapshot_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const todayName = documentSnapshotName_(projectId);
+  let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
+  if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date }, copiedCount: 0 };
+  const previous = snapshots[0] || null;
+  const targetFolder = documentsFolder.createFolder(todayName);
+  const manifest = readDocumentManifest_(documentsFolder);
+  let copiedCount = 0;
+  if (previous) {
+    const files = previous.folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Tư vấn");
+      if (meta.nature !== "Theo ngày") continue;
+      const copy = file.makeCopy(file.getName(), targetFolder);
+      manifest.files[copy.getId()] = meta;
+      copiedCount += 1;
+    }
+    writeDocumentManifest_(documentsFolder, manifest);
+  }
+  clearDocumentCache_(year, month, projectId);
+  return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName) }, copiedCount: copiedCount };
+}
+
+function updateDocumentMetadata_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const fileId = String(payload.fileId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId || !fileId) throw new Error("Thiếu thông tin tệp Tài liệu.");
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const manifest = readDocumentManifest_(documentsFolder);
+  const file = DriveApp.getFileById(fileId);
+  const current = normalizeDocumentMeta_(manifest.files[fileId], file, String(payload.work || "Tư vấn"));
+  if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
+  if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);
+  const keys = Object.keys(manifest.files || {});
+  keys.forEach(function(id) {
+    const value = manifest.files[id] || {};
+    if (String(value.documentKey || id) === current.documentKey) manifest.files[id] = { work: current.work, nature: current.nature, documentKey: current.documentKey };
+  });
+  manifest.files[fileId] = current;
+  writeDocumentManifest_(documentsFolder, manifest);
+  clearDocumentCache_(year, month, projectId);
+  return { ok: true };
+}
+
 function personnelFolder_() {
   return getOrCreateFolder_(DriveApp.getFolderById(ROOT_FOLDER_ID), "Nhân lực");
 }
@@ -1112,6 +1334,9 @@ function ensureProjectFolders_(customerFolder) {
   });
   const dataFolder = getOrCreateFolder_(consulting, "DataID");
   getOrCreateFolder_(dataFolder, "Ghi \u00e2m");
+  const warrantyFolder = getOrCreateFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
+  const documentsFolder = getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
+  if (!listDocumentSnapshots_(documentsFolder, customerFolder.getName()).length) documentsFolder.createFolder(documentSnapshotName_(customerFolder.getName()));
 }
 
 function getAudioFolder_(year, month, projectId, createMissing) {
