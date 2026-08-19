@@ -1033,6 +1033,23 @@ function normalizeDocumentMeta_(meta, file, defaultWork) {
   };
 }
 
+// The CRM workbooks are part of the core project record, so they do not need
+// manual classification before appearing in the document register.  A manual
+// choice stored in the manifest still takes precedence over this default.
+function preferredDocumentMeta_(workflow, file) {
+  const name = String(file.getName() || "").toLowerCase();
+  if (name.indexOf("phiếu thông tin khách hàng") === 0) {
+    return { work: "Tư vấn", nature: "Xuyên suốt", assigned: true };
+  }
+  if (name.indexOf("tiến độ thiết kế kiến trúc") === 0 || name.indexOf("tiến độ thiết kế nội thất") === 0) {
+    return { work: "Thiết kế", nature: "Xuyên suốt", assigned: true };
+  }
+  if (name.indexOf("phiếu thông tin bảo hành") === 0) {
+    return { work: "Bảo hành", nature: "Xuyên suốt", assigned: true };
+  }
+  return null;
+}
+
 function findDocumentMetaByKey_(manifest, documentKey) {
   const entries = Object.keys(manifest.files || {});
   for (let index = 0; index < entries.length; index += 1) {
@@ -1159,12 +1176,15 @@ function listDocuments_(payload) {
   const visible = {};
   const sources = projectSourceFiles_(customerFolder);
 
-  // A new file is discovered here but is never copied automatically. It stays
-  // "Chưa gắn" until the user chooses both its work and its nature.
+  // New files are never copied automatically.  Core CRM workbooks are
+  // classified as continuous by default; all other files stay "Chưa gắn"
+  // until the user chooses both their work and their nature.
   Object.keys(sources).forEach(function(documentKey) {
     const source = sources[documentKey];
     const stored = findDocumentMetaByKey_(manifest, documentKey) || {};
-    const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: stored.work, nature: stored.nature, assigned: stored.assigned === true }, source.file, "Chưa gắn");
+    const preferred = preferredDocumentMeta_(source.workflow, source.file);
+    const effective = stored.assigned === true ? stored : (preferred || {});
+    const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: effective.work, nature: effective.nature, assigned: effective.assigned === true }, source.file, "Chưa gắn");
     visible[documentKey] = { file: source.file, meta: meta };
   });
 
@@ -1226,7 +1246,9 @@ function updateDocumentMetadata_(payload) {
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const sources = projectSourceFiles_(customerFolder);
   const sourceKey = Object.keys(sources).filter(function(key) { return sources[key].file.getId() === fileId; })[0] || String((manifest.files[fileId] || {}).documentKey || fileId);
-  const current = normalizeDocumentMeta_({ ...(manifest.files[fileId] || {}), documentKey: sourceKey, sourceId: fileId, assigned: true }, file, "Chưa gắn");
+  const source = sources[sourceKey];
+  const existing = manifest.files[fileId] || findDocumentMetaByKey_(manifest, sourceKey) || (source ? preferredDocumentMeta_(source.workflow, source.file) : null) || {};
+  const current = normalizeDocumentMeta_({ ...existing, documentKey: sourceKey, sourceId: fileId, assigned: true }, file, "Chưa gắn");
   current.assigned = true;
   if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
   if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);

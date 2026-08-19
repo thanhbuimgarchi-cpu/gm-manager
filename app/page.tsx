@@ -1332,7 +1332,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v3:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v4:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = documentCacheKey(snapshotId);
@@ -2084,7 +2084,7 @@ export default function Home() {
     const selectedSnapshot = documentSnapshots.find((snapshot) => snapshot.id === selectedDocumentSnapshotId);
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Tệp mới luôn ở trạng thái <b>Chưa gắn</b> và không được sao chép. Sau khi gắn Công việc và Tính chất, tệp Theo ngày sẽ được sao lưu khi tạo bản ngày mới.</p></div>
+        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Phiếu và tiến độ hệ thống được tự gắn đúng Công việc, tính chất <b>Xuyên suốt</b>. Tệp khác bắt đầu ở <b>Chưa gắn</b>; chỉ tệp Theo ngày mới được sao lưu khi tạo bản ngày mới.</p></div>
         <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button>
       </header>
       <div className="document-library__toolbar"><label>Bản tài liệu<select value={selectedDocumentSnapshotId} onChange={(event) => { const nextId = event.target.value; setSelectedDocumentSnapshotId(nextId); void loadDocuments(nextId); }} disabled={!documentSnapshots.length}>{documentSnapshots.map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.name}</option>)}</select></label>{selectedSnapshot && <span>{selectedSnapshot.date}</span>}</div>
