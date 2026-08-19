@@ -144,7 +144,7 @@ type WorkflowFile = {
   isFolder?: boolean;
 };
 
-type DocumentNature = "Xuyên suốt" | "Theo ngày";
+type DocumentNature = "Chưa gắn" | "Xuyên suốt" | "Theo ngày";
 
 type DocumentFile = {
   id: string;
@@ -272,8 +272,8 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
 
-const documentWorkOptions = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
-const documentNatureOptions: DocumentNature[] = ["Xuyên suốt", "Theo ngày"];
+const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
+const documentNatureOptions: DocumentNature[] = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 
 const personnelCategories: PersonnelCategory[] = [
   { id: "management", label: "Ban quản lý", icon: "♛", description: "Ban giám đốc và đội ngũ quản lý GM" },
@@ -1332,7 +1332,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v2:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v3:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = documentCacheKey(snapshotId);
@@ -2084,7 +2084,7 @@ export default function Home() {
     const selectedSnapshot = documentSnapshots.find((snapshot) => snapshot.id === selectedDocumentSnapshotId);
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Mỗi bản ngày nằm trong thư mục <b>ngày-tháng-năm-ID dự án</b>. Tệp Xuyên suốt chỉ hiển thị lại, không bị sao chép.</p></div>
+        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Tệp mới luôn ở trạng thái <b>Chưa gắn</b> và không được sao chép. Sau khi gắn Công việc và Tính chất, tệp Theo ngày sẽ được sao lưu khi tạo bản ngày mới.</p></div>
         <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button>
       </header>
       <div className="document-library__toolbar"><label>Bản tài liệu<select value={selectedDocumentSnapshotId} onChange={(event) => { const nextId = event.target.value; setSelectedDocumentSnapshotId(nextId); void loadDocuments(nextId); }} disabled={!documentSnapshots.length}>{documentSnapshots.map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.name}</option>)}</select></label>{selectedSnapshot && <span>{selectedSnapshot.date}</span>}</div>

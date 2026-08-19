@@ -709,7 +709,6 @@ function exportCustomerWorkbook_(record, year, month) {
     if (legacyWorkbook) legacyWorkbook.moveTo(consultingFolder);
     trashFilesByName_(consultingFolder, fileName);
     const xlsxFile = consultingFolder.createFile(xlsxBlob);
-    archiveDocumentFile_(customerFolder, xlsxFile, "Tư vấn");
     return {
       fileId: xlsxFile.getId(),
       fileUrl: xlsxFile.getUrl(),
@@ -747,7 +746,6 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(designFolder, fileName);
     const xlsxFile = designFolder.createFile(xlsxBlob);
-    archiveDocumentFile_(customerFolder, xlsxFile, "Thiết kế");
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: designFolder.getUrl(), fileName: fileName };
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
@@ -779,7 +777,6 @@ function exportWarrantyWorkbook_(record, year, month) {
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(warrantyFolder, fileName);
     const xlsxFile = warrantyFolder.createFile(xlsxBlob);
-    archiveDocumentFile_(customerFolder, xlsxFile, "Bảo hành");
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: warrantyFolder.getUrl(), fileName: fileName };
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
@@ -978,8 +975,8 @@ function createWorkflowDateFolder_(payload) {
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";
 const DOCUMENT_MANIFEST_NAME = "_gmcrm_tai_lieu.json";
-const DOCUMENT_WORK_OPTIONS = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
-const DOCUMENT_NATURE_OPTIONS = ["Xuyên suốt", "Theo ngày"];
+const DOCUMENT_WORK_OPTIONS = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+const DOCUMENT_NATURE_OPTIONS = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 
 function documentSnapshotName_(projectId, date) {
   const value = date || Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
@@ -1026,10 +1023,13 @@ function writeDocumentManifest_(documentsFolder, manifest) {
 
 function normalizeDocumentMeta_(meta, file, defaultWork) {
   const raw = meta || {};
+  const assigned = raw.assigned === true;
   return {
-    work: DOCUMENT_WORK_OPTIONS.indexOf(raw.work) >= 0 ? raw.work : (defaultWork || "Tư vấn"),
-    nature: DOCUMENT_NATURE_OPTIONS.indexOf(raw.nature) >= 0 ? raw.nature : "Theo ngày",
+    work: assigned && DOCUMENT_WORK_OPTIONS.indexOf(raw.work) >= 0 ? raw.work : (defaultWork || "Chưa gắn"),
+    nature: assigned && DOCUMENT_NATURE_OPTIONS.indexOf(raw.nature) >= 0 ? raw.nature : "Chưa gắn",
     documentKey: String(raw.documentKey || file.getId()),
+    sourceId: String(raw.sourceId || file.getId()),
+    assigned: assigned,
   };
 }
 
@@ -1129,39 +1129,57 @@ function documentFileOutput_(file, meta) {
   };
 }
 
+function projectSourceFiles_(customerFolder) {
+  const sources = {};
+  DOCUMENT_WORK_OPTIONS.filter(function(work) { return work !== "Chưa gắn"; }).forEach(function(work) {
+    const folder = findFolder_(customerFolder, work);
+    if (!folder) return;
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const documentKey = "system:" + work + ":" + file.getName();
+      sources[documentKey] = { file: file, workflow: work };
+    }
+  });
+  return sources;
+}
+
 function listDocuments_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
-  seedExistingDocuments_(year, month, projectId);
   const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const requestedId = String(payload.snapshotId || "");
   const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
   const target = snapshots[snapshotIndex];
   const manifest = readDocumentManifest_(documentsFolder);
   const visible = {};
+  const sources = projectSourceFiles_(customerFolder);
 
-  // Read the history up to the chosen day. A day-specific file is only shown
-  // when it exists in that day's folder; continuous files remain visible from
-  // their most recent stored copy.
-  for (let index = snapshots.length - 1; index >= snapshotIndex; index -= 1) {
-    const files = snapshots[index].folder.getFiles();
+  // A new file is discovered here but is never copied automatically. It stays
+  // "Chưa gắn" until the user chooses both its work and its nature.
+  Object.keys(sources).forEach(function(documentKey) {
+    const source = sources[documentKey];
+    const stored = findDocumentMetaByKey_(manifest, documentKey) || {};
+    const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: stored.work, nature: stored.nature, assigned: stored.assigned === true }, source.file, "Chưa gắn");
+    visible[documentKey] = { file: source.file, meta: meta };
+  });
+
+  // Old daily copies are kept as history. They are only shown when their
+  // source file no longer exists in the live project folders.
+  if (target) {
+    const files = target.folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
-      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Tư vấn");
-      if (index !== snapshotIndex && meta.nature !== "Xuyên suốt") continue;
-      visible[meta.documentKey] = { file: file, meta: meta };
+      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
+      if (!visible[meta.documentKey]) visible[meta.documentKey] = { file: file, meta: meta };
     }
   }
   const files = Object.keys(visible).map(function(key) { return documentFileOutput_(visible[key].file, visible[key].meta); }).sort(function(a, b) { return b.updatedAt.localeCompare(a.updatedAt) || a.name.localeCompare(b.name); });
-  return {
-    ok: true,
-    snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date }; }),
-    activeSnapshotId: target ? target.id : "",
-    files: files,
-  };
+  return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date }; }), activeSnapshotId: target ? target.id : "", files: files };
 }
 
 function createDocumentSnapshot_(payload) {
@@ -1174,22 +1192,24 @@ function createDocumentSnapshot_(payload) {
   let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
   if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date }, copiedCount: 0 };
-  const previous = snapshots[0] || null;
   const targetFolder = documentsFolder.createFolder(todayName);
   const manifest = readDocumentManifest_(documentsFolder);
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const sources = projectSourceFiles_(customerFolder);
   let copiedCount = 0;
-  if (previous) {
-    const files = previous.folder.getFiles();
-    while (files.hasNext()) {
-      const file = files.next();
-      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Tư vấn");
-      if (meta.nature !== "Theo ngày") continue;
-      const copy = file.makeCopy(file.getName(), targetFolder);
-      manifest.files[copy.getId()] = meta;
-      copiedCount += 1;
-    }
-    writeDocumentManifest_(documentsFolder, manifest);
-  }
+  const copiedKeys = {};
+  Object.keys(manifest.files || {}).forEach(function(id) {
+    const stored = manifest.files[id] || {};
+    if (copiedKeys[stored.documentKey]) return;
+    if (stored.assigned !== true || stored.work === "Chưa gắn" || stored.nature !== "Theo ngày") return;
+    const source = sources[stored.documentKey];
+    if (!source) return;
+    const copy = source.file.makeCopy(source.file.getName(), targetFolder);
+    manifest.files[copy.getId()] = { work: stored.work, nature: stored.nature, documentKey: stored.documentKey, sourceId: source.file.getId(), assigned: true };
+    copiedKeys[stored.documentKey] = true;
+    copiedCount += 1;
+  });
+  if (copiedCount) writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
   return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName) }, copiedCount: copiedCount };
 }
@@ -1203,13 +1223,17 @@ function updateDocumentMetadata_(payload) {
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
   const manifest = readDocumentManifest_(documentsFolder);
   const file = DriveApp.getFileById(fileId);
-  const current = normalizeDocumentMeta_(manifest.files[fileId], file, String(payload.work || "Tư vấn"));
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const sources = projectSourceFiles_(customerFolder);
+  const sourceKey = Object.keys(sources).filter(function(key) { return sources[key].file.getId() === fileId; })[0] || String((manifest.files[fileId] || {}).documentKey || fileId);
+  const current = normalizeDocumentMeta_({ ...(manifest.files[fileId] || {}), documentKey: sourceKey, sourceId: fileId, assigned: true }, file, "Chưa gắn");
+  current.assigned = true;
   if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
   if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);
   const keys = Object.keys(manifest.files || {});
   keys.forEach(function(id) {
     const value = manifest.files[id] || {};
-    if (String(value.documentKey || id) === current.documentKey) manifest.files[id] = { work: current.work, nature: current.nature, documentKey: current.documentKey };
+    if (String(value.documentKey || id) === current.documentKey) manifest.files[id] = { work: current.work, nature: current.nature, documentKey: current.documentKey, sourceId: current.sourceId, assigned: true };
   });
   manifest.files[fileId] = current;
   writeDocumentManifest_(documentsFolder, manifest);
