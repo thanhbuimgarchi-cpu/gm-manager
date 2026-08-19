@@ -152,12 +152,15 @@ type PersonnelCategory = {
 
 type PersonnelMember = {
   id: string;
+  status: PersonnelStatus;
   name: string;
   birthDate: string;
   phone: string;
   role: string;
   address: string;
 };
+
+type PersonnelStatus = "Có" | "Không" | "Ngưng";
 
 type DriveSyncConfig = {
   scriptUrl: string;
@@ -189,6 +192,7 @@ const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
 const personnelStorageKey = "gm-manager-personnel-v1";
+const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // The currently deployed Apps Script still verifies its historical token. It is
 // supplied automatically for compatibility, so users only ever enter the URL.
 const deployedAppsScriptCompatibilityToken = "010101";
@@ -825,6 +829,37 @@ function nameInitials(name: string) {
   return (words?.map((word) => word.charAt(0)).join("").toUpperCase() || "KH").slice(0, 6);
 }
 
+function normalizePersonnelPhone(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const scientific = raw.replace(/\s/g, "");
+  if (/^\d+(?:\.\d+)?e\+?\d+$/i.test(scientific)) {
+    const numeric = Number(scientific);
+    if (Number.isFinite(numeric)) {
+      let digits = Math.trunc(numeric).toFixed(0);
+      if (digits.length === 9 && /^[2-9]/.test(digits)) digits = `0${digits}`;
+      return digits;
+    }
+  }
+  const normalizedRaw = /^\d+\.0+$/.test(scientific) ? scientific.replace(/\.0+$/, "") : raw;
+  const compact = normalizedRaw.replace(/[\s.-]/g, "");
+  if (/^\+?\d+$/.test(compact)) {
+    const prefix = compact.startsWith("+") ? "+" : "";
+    let digits = compact.replace(/^\+/, "");
+    if (!prefix && digits.length === 9 && /^[2-9]/.test(digits)) digits = `0${digits}`;
+    return `${prefix}${digits}`;
+  }
+  return raw;
+}
+
+function normalizePersonnelMap(value: Record<string, PersonnelMember[]>) {
+  return Object.fromEntries(Object.entries(value ?? {}).map(([category, members]) => [category, (Array.isArray(members) ? members : []).map((member) => ({
+    ...member,
+    status: personnelStatuses.includes(member.status) ? member.status : "Có",
+    phone: normalizePersonnelPhone(member.phone),
+  }))]));
+}
+
 function saveWorkspace(years: YearFolder[]) {
   window.localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
 }
@@ -910,8 +945,10 @@ export default function Home() {
   const [selectedPersonnelCategoryId, setSelectedPersonnelCategoryId] = useState<string | null>(null);
   const [personnelByCategory, setPersonnelByCategory] = useState<Record<string, PersonnelMember[]>>({});
   const [personnelAddOpen, setPersonnelAddOpen] = useState(false);
+  const [editingPersonnelId, setEditingPersonnelId] = useState<string | null>(null);
+  const [personnelMenuId, setPersonnelMenuId] = useState<string | null>(null);
   const [loadingPersonnel, setLoadingPersonnel] = useState(false);
-  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ name: "", birthDate: "", phone: "", role: "", address: "" });
+  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -981,7 +1018,7 @@ export default function Home() {
   useEffect(() => {
     try {
       const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
-      if (savedPersonnel) setPersonnelByCategory(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>);
+      if (savedPersonnel) setPersonnelByCategory(normalizePersonnelMap(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>));
     } catch {
       window.localStorage.removeItem(personnelStorageKey);
     }
@@ -1879,18 +1916,31 @@ export default function Home() {
     try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Personnel remains available for this session. */ }
     void syncPersonnelToDrive(next);
   };
-  const addPersonnel = (event: FormEvent<HTMLFormElement>) => {
+  const savePersonnel = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedPersonnelCategory || !personnelDraft.name.trim()) return;
-    const member: PersonnelMember = { id: `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate) };
-    persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: [...selectedPersonnel, member] });
-    setPersonnelDraft({ name: "", birthDate: "", phone: "", role: "", address: "" });
+    const member: PersonnelMember = { id: editingPersonnelId ?? `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate), phone: normalizePersonnelPhone(personnelDraft.phone) };
+    const nextMembers = editingPersonnelId ? selectedPersonnel.map((item) => item.id === editingPersonnelId ? member : item) : [...selectedPersonnel, member];
+    persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: nextMembers });
+    setPersonnelDraft({ status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
+    setEditingPersonnelId(null);
     setPersonnelAddOpen(false);
-    setNotice(`Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
+    setNotice(editingPersonnelId ? `Đã cập nhật ${member.name}.` : `Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
+  };
+  const openPersonnelEditor = (member?: PersonnelMember) => {
+    setEditingPersonnelId(member?.id ?? null);
+    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, address: member.address } : { status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
+    setPersonnelMenuId(null);
+    setPersonnelAddOpen(true);
+  };
+  const updatePersonnelStatus = (memberId: string, status: PersonnelStatus) => {
+    if (!selectedPersonnelCategory) return;
+    persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.map((member) => member.id === memberId ? { ...member, status } : member) });
   };
   const removePersonnel = (memberId: string) => {
     if (!selectedPersonnelCategory) return;
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.filter((member) => member.id !== memberId) });
+    setPersonnelMenuId(null);
   };
   useEffect(() => {
     if (!personnelView || !driveScriptUrl.trim()) return;
@@ -1898,7 +1948,7 @@ export default function Home() {
     setLoadingPersonnel(true);
     void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
       if (!response.ok || !result.ok || cancelled) return;
-      const next = result.personnel ?? {};
+      const next = normalizePersonnelMap(result.personnel ?? {});
       setPersonnelByCategory(next);
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
@@ -1908,7 +1958,7 @@ export default function Home() {
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
       <header className="workflow-files__heading">
-        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Tên tệp và ngày chỉnh sửa được tự nạp. Khi bấm vào tệp, thiết bị sẽ tải tệp về.</span></div><button type="button" onClick={() => void createWorkflowDateFolder()} disabled={loadingWorkflowFiles}><b>＋</b> Thư mục ngày</button>
+        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2></div><button type="button" onClick={() => void createWorkflowDateFolder()} disabled={loadingWorkflowFiles}><b>＋</b> Thư mục ngày</button>
       </header>
       <div className="workflow-files__list">
         {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
@@ -1918,7 +1968,7 @@ export default function Home() {
               <span className="workflow-file__icon">{file.isFolder ? "▰" : file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
               <span><b>{file.name}</b><small>{file.isFolder ? "Thư mục" : "Chỉnh sửa"}: {file.updatedAt}</small></span><em>{file.isFolder ? "↗" : "↓"}</em>
             </a>
-          )) : <p className="workflow-files__empty">Chưa có tệp ngoài các phiếu Excel hệ thống trong thư mục này.</p>}
+          )) : null}
       </div>
     </section>
   );
@@ -2045,31 +2095,31 @@ export default function Home() {
                 <p className="sidebar-label sidebar-label--top">Nhân lực</p>
                 <nav className="main-nav" aria-label="Nhóm nhân lực">
                   {personnelCategories.map((category) => (
-                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
+                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); setEditingPersonnelId(null); setPersonnelMenuId(null); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
                       <span className="nav-row__icon">{category.icon}</span><span>{category.label}</span>
                     </button>
                   ))}
                 </nav>
               </aside>
               <section className="personnel-workspace">
-                <header className="personnel-workspace__heading">
-                  <div><p className="eyebrow">Nhân lực</p><h1>{selectedPersonnelCategory?.label}</h1><p>{selectedPersonnelCategory?.description}</p></div>
-                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => { setPersonnelDraft({ name: "", birthDate: "", phone: "", role: "", address: "" }); setPersonnelAddOpen(true); }}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button></div>
+                <header className="personnel-workspace__heading personnel-workspace__heading--compact">
+                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
                   <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Search trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi")}…`} aria-label={`Search ${selectedPersonnelCategory?.label}`} autoFocus />
                 </label>
                 <div className="personnel-category-detail">
-                  {personnelAddOpen && <form className="personnel-add-form" onSubmit={addPersonnel}>
+                  {personnelAddOpen && <form className="personnel-add-form" onSubmit={savePersonnel}>
+                    <label>Hoạt động<select value={personnelDraft.status} onChange={(event) => setPersonnelDraft({ ...personnelDraft, status: event.target.value as PersonnelStatus })}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
                     <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
                     <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="11/11/1999" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
                     <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
                     <label>Chức vụ<input value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} /></label>
                     <label>Địa chỉ<input value={personnelDraft.address} onChange={(event) => setPersonnelDraft({ ...personnelDraft, address: event.target.value })} /></label>
-                    <div><button type="button" className="personnel-back" onClick={() => setPersonnelAddOpen(false)}>Hủy</button><button className="add-button" type="submit">Lưu nhân lực</button></div>
+                    <div><button type="button" className="personnel-back" onClick={() => { setPersonnelAddOpen(false); setEditingPersonnelId(null); }}>Hủy</button><button className="add-button" type="submit">{editingPersonnelId ? "Lưu thay đổi" : "Lưu nhân lực"}</button></div>
                   </form>}
-                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Họ và tên</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><b>{member.name}</b></td><td>{member.birthDate || "—"}</td><td>{member.phone || "—"}</td><td>{member.role || "—"}</td><td>{member.address || "—"}</td><td><button type="button" onClick={() => removePersonnel(member.id)} aria-label={`Xóa ${member.name}`}>×</button></td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
+                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Hoạt động</th><th>Họ và tên</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><div className={`personnel-status personnel-status--${member.status === "Có" ? "active" : member.status === "Không" ? "inactive" : "paused"}`}><span className="personnel-status__figure" aria-hidden="true" /><select value={member.status ?? "Có"} onChange={(event) => updatePersonnelStatus(member.id, event.target.value as PersonnelStatus)} aria-label={`Hoạt động của ${member.name}`}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div></td><td><b>{member.name}</b></td><td>{member.birthDate || "—"}</td><td>{normalizePersonnelPhone(member.phone) || "—"}</td><td>{member.role || "—"}</td><td>{member.address || "—"}</td><td className="personnel-row-actions"><button type="button" className="personnel-more" onClick={() => setPersonnelMenuId(personnelMenuId === member.id ? null : member.id)} aria-label={`Tùy chọn ${member.name}`}>…</button>{personnelMenuId === member.id && <div className="personnel-row-menu"><button type="button" onClick={() => openPersonnelEditor(member)}>Thay đổi</button><button type="button" className="personnel-row-menu__delete" onClick={() => removePersonnel(member.id)}>Xóa</button></div>}</td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
                 </div>
               </section>
             </div>

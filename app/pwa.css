@@ -52,6 +52,12 @@
   gap: 8px;
 }
 
+.personnel-workspace__heading--compact {
+  justify-content: flex-end;
+  padding: 0 0 14px;
+  border-bottom: 0;
+}
+
 .personnel-add-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -69,6 +75,7 @@
 }
 
 .personnel-add-form input,
+.personnel-add-form select,
 .personnel-assignee {
   min-height: 34px;
   width: 100%;
@@ -83,6 +90,7 @@
 }
 
 .personnel-add-form input:focus,
+.personnel-add-form select:focus,
 .personnel-assignee:focus {
   border-color: #927359;
 }
@@ -97,7 +105,7 @@
 
 .personnel-table {
   width: 100%;
-  min-width: 720px;
+  min-width: 840px;
   border-collapse: collapse;
 }
 
@@ -131,6 +139,96 @@
   font-size: 17px;
   line-height: 1;
 }
+
+.personnel-status {
+  --status-color: #4c9a63;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.personnel-status--inactive { --status-color: #b74747; }
+.personnel-status--paused { --status-color: #d3a322; }
+
+.personnel-status__figure {
+  position: relative;
+  width: 15px;
+  height: 18px;
+  flex: 0 0 15px;
+  color: var(--status-color);
+}
+
+.personnel-status__figure::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 5px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.personnel-status__figure::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 1px;
+  width: 13px;
+  height: 10px;
+  border-radius: 8px 8px 3px 3px;
+  background: currentColor;
+}
+
+.personnel-status select {
+  min-height: 28px;
+  border: 1px solid #dedbd5;
+  border-radius: 5px;
+  background: #fff;
+  color: #514d47;
+  padding: 0 22px 0 7px;
+  font: inherit;
+  font-size: 10px;
+}
+
+.personnel-row-actions { position: relative; }
+
+.personnel-table .personnel-more {
+  min-width: 26px;
+  min-height: 24px;
+  border-radius: 5px;
+  color: #4e4a45;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.personnel-table .personnel-more:hover { background: #eeece7; }
+
+.personnel-row-menu {
+  position: absolute;
+  z-index: 12;
+  top: 37px;
+  right: 8px;
+  display: grid;
+  min-width: 105px;
+  padding: 5px;
+  border: 1px solid #dedbd5;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(35, 31, 27, .14);
+}
+
+.personnel-table .personnel-row-menu button {
+  padding: 8px 10px;
+  border-radius: 4px;
+  color: #4d4943;
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.personnel-table .personnel-row-menu button:hover { background: #f2f0eb; }
+.personnel-table .personnel-row-menu .personnel-row-menu__delete { color: #aa493f; }
 
 .personnel-assignee { min-width: 145px; }
 

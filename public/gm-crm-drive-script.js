@@ -981,18 +981,29 @@ function loadPersonnel_() {
   const sheets = readXlsxSheets_(file);
   const rows = sheets["Nhân lực"] || sheets[Object.keys(sheets)[0]] || [];
   const personnel = {};
+  const headers = (rows[0] || []).map(function(value) { return String(value || "").trim(); });
+  const column = function(name, fallback) { const index = headers.indexOf(name); return index >= 0 ? index : fallback; };
+  const categoryColumn = column("Nhóm ID", 0);
+  const statusColumn = headers.indexOf("Hoạt động");
+  const nameColumn = column("Họ và tên", 2);
+  const birthDateColumn = column("Ngày sinh", 3);
+  const phoneColumn = column("Số điện thoại", 4);
+  const roleColumn = column("Chức vụ", 5);
+  const addressColumn = column("Địa chỉ", 6);
+  const idColumn = column("_ID", 7);
   rows.slice(1).forEach(function(row, index) {
-    const category = String(row[0] || "").trim();
-    const name = String(row[2] || "").trim();
+    const category = String(row[categoryColumn] || "").trim();
+    const name = String(row[nameColumn] || "").trim();
     if (!category || !name) return;
     if (!personnel[category]) personnel[category] = [];
     personnel[category].push({
-      id: String(row[7] || ("drive-person-" + category + "-" + index)),
+      id: String(row[idColumn] || ("drive-person-" + category + "-" + index)),
+      status: statusColumn >= 0 && ["Có", "Không", "Ngưng"].indexOf(String(row[statusColumn] || "")) >= 0 ? String(row[statusColumn]) : "Có",
       name: name,
-      birthDate: normalizeExcelDate_(row[3]),
-      phone: String(row[4] || ""),
-      role: String(row[5] || ""),
-      address: String(row[6] || ""),
+      birthDate: normalizeExcelDate_(row[birthDateColumn]),
+      phone: normalizePersonnelPhone_(row[phoneColumn]),
+      role: String(row[roleColumn] || ""),
+      address: String(row[addressColumn] || ""),
     });
   });
   return { ok: true, personnel: personnel };
@@ -1004,24 +1015,26 @@ function syncPersonnelWorkbook_(personnel) {
     management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
     construction: "Nhân công xây dựng", workshop: "Nhân công xưởng", partner: "Đối tác",
   };
-  const rows = [["Nhóm ID", "Nhóm", "Họ và tên", "Ngày sinh", "Số điện thoại", "Chức vụ", "Địa chỉ", "_ID"]];
+  const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Ngày sinh", "Số điện thoại", "Chức vụ", "Địa chỉ", "_ID"]];
   Object.keys(personnel || {}).forEach(function(category) {
     const members = Array.isArray(personnel[category]) ? personnel[category] : [];
     members.forEach(function(member) {
       if (!member || !String(member.name || "").trim()) return;
-      rows.push([category, categoryLabels[category] || category, String(member.name || ""), String(member.birthDate || ""), String(member.phone || ""), String(member.role || ""), String(member.address || ""), String(member.id || "")]);
+      const status = ["Có", "Không", "Ngưng"].indexOf(String(member.status || "")) >= 0 ? String(member.status) : "Có";
+      rows.push([category, categoryLabels[category] || category, status, String(member.name || ""), String(member.birthDate || ""), normalizePersonnelPhone_(member.phone), String(member.role || ""), String(member.address || ""), String(member.id || "")]);
     });
   });
   const spreadsheet = SpreadsheetApp.create("GM-CRM nhân lực temporary");
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Nhân lực");
-    sheet.getRange(1, 1, rows.length, 8).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
-    sheet.getRange(1, 1, 1, 8).setFontWeight("bold").setBackground("#eee9e2");
+    sheet.getRange(1, 1, rows.length, 9).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
+    sheet.getRange(1, 1, 1, 9).setFontWeight("bold").setBackground("#eee9e2");
+    if (rows.length > 1) sheet.getRange(2, 6, rows.length - 1, 1).setNumberFormat("@");
     sheet.setFrozenRows(1);
-    [115, 180, 180, 110, 135, 160, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
+    [115, 180, 100, 180, 110, 135, 160, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
     sheet.hideColumns(1, 2);
-    sheet.hideColumns(8, 1);
+    sheet.hideColumns(9, 1);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const fileName = "Danh sách nhân lực.xlsx";
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
@@ -1031,6 +1044,17 @@ function syncPersonnelWorkbook_(personnel) {
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
   }
+}
+
+function normalizePersonnelPhone_(value) {
+  let raw = String(value === null || value === undefined ? "" : value).trim();
+  if (!raw) return "";
+  const scientific = raw.replace(/\s/g, "");
+  if (/^\d+(?:\.\d+)?e\+?\d+$/i.test(scientific)) raw = String(Math.round(Number(scientific)));
+  if (/^\d+\.0+$/.test(raw)) raw = raw.replace(/\.0+$/, "");
+  raw = raw.replace(/[\s.-]/g, "");
+  if (/^\d{9}$/.test(raw) && /^[2-9]/.test(raw)) raw = "0" + raw;
+  return raw;
 }
 
 function isSpecialWorkflowWorkbook_(name) {
