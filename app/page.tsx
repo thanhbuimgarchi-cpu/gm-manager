@@ -140,6 +140,7 @@ type WorkflowFile = {
   downloadUrl: string;
   updatedAt: string;
   mimeType: string;
+  isFolder?: boolean;
 };
 
 type PersonnelCategory = {
@@ -147,6 +148,15 @@ type PersonnelCategory = {
   label: string;
   icon: string;
   description: string;
+};
+
+type PersonnelMember = {
+  id: string;
+  name: string;
+  birthDate: string;
+  phone: string;
+  role: string;
+  address: string;
 };
 
 type DriveSyncConfig = {
@@ -174,6 +184,7 @@ const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
+const personnelStorageKey = "gm-manager-personnel-v1";
 // The currently deployed Apps Script still verifies its historical token. It is
 // supplied automatically for compatibility, so users only ever enter the URL.
 const deployedAppsScriptCompatibilityToken = "010101";
@@ -234,6 +245,7 @@ const syncedDriveFolders: DriveFolder[] = [
 ].filter((folder) => !folder.label.startsWith("-"));
 
 const personnelCategories: PersonnelCategory[] = [
+  { id: "management", label: "Ban quản lý", icon: "♛", description: "Ban giám đốc và đội ngũ quản lý GM" },
   { id: "office", label: "Nhân viên văn phòng", icon: "▤", description: "Hành chính, kế toán, kinh doanh và thiết kế" },
   { id: "site", label: "Nhân viên công trình", icon: "⌂", description: "Chỉ huy, giám sát và điều phối công trình" },
   { id: "construction", label: "Nhân công xây dựng", icon: "♧", description: "Đội thi công, thợ xây và thợ hoàn thiện" },
@@ -392,8 +404,8 @@ const normalizeDesignProgress = (record?: WorkRecord | null, kind: DesignProgres
       id: row.id || `${definition.idPrefix}-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
       isCustom,
       content: row.content ?? "",
-      plannedDate: row.plannedDate ?? "",
-      actualDate: row.actualDate ?? "",
+      plannedDate: normalizeImportedDate(row.plannedDate ?? ""),
+      actualDate: normalizeImportedDate(row.actualDate ?? ""),
       assignee: row.assignee ?? "",
       note: row.note ?? "",
     };
@@ -434,8 +446,8 @@ const normalizeWarrantyProgress = (record?: WorkRecord | null): WarrantyProgress
       id: row.id || `warranty-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
       isCustom,
       content: row.content ?? "",
-      reportedDate: row.reportedDate ?? "",
-      completedDate: row.completedDate ?? "",
+      reportedDate: normalizeImportedDate(row.reportedDate ?? ""),
+      completedDate: normalizeImportedDate(row.completedDate ?? ""),
       assignee: row.assignee ?? "",
       note: row.note ?? "",
     };
@@ -449,6 +461,14 @@ const formatDesignDateInput = (value: string) => {
   if (digits.length <= 2) return digits;
   if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
   return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+};
+
+const normalizeImportedDate = (value: string) => {
+  const trimmed = String(value ?? "").trim();
+  const serial = /^([2-7]\d{4})(?:\.0+)?$/.exec(trimmed);
+  if (!serial) return trimmed;
+  const date = new Date(Date.UTC(1899, 11, 30) + Number(serial[1]) * 86_400_000);
+  return `${String(date.getUTCDate()).padStart(2, "0")}/${String(date.getUTCMonth() + 1).padStart(2, "0")}/${date.getUTCFullYear()}`;
 };
 
 const parseDesignDate = (value: string) => {
@@ -873,6 +893,9 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [personnelSearch, setPersonnelSearch] = useState("");
   const [selectedPersonnelCategoryId, setSelectedPersonnelCategoryId] = useState<string | null>(null);
+  const [personnelByCategory, setPersonnelByCategory] = useState<Record<string, PersonnelMember[]>>({});
+  const [personnelAddOpen, setPersonnelAddOpen] = useState(false);
+  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ name: "", birthDate: "", phone: "", role: "", address: "" });
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -937,6 +960,15 @@ export default function Home() {
       }
     }
     setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
+      if (savedPersonnel) setPersonnelByCategory(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>);
+    } catch {
+      window.localStorage.removeItem(personnelStorageKey);
+    }
   }, []);
 
   useEffect(() => {
@@ -1158,12 +1190,12 @@ export default function Home() {
   };
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
-  const loadWorkflowFiles = async (folder = activeFolder, quietly = true) => {
+  const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = workflowFilesCacheKey(folder);
     const clientCacheKey = `files:${cacheKey}`;
     const cachedFiles = readDriveCache<WorkflowFile[]>(clientCacheKey, DRIVE_FILE_LIST_CACHE_MS);
-    if (cachedFiles) {
+    if (cachedFiles && !refresh) {
       setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: cachedFiles }));
       return;
     }
@@ -1178,6 +1210,7 @@ export default function Home() {
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
         workflow: folder,
+        refresh,
       });
       if (!response.ok || !result.ok || !result.files) throw new Error(result.error || "Không thể nạp danh sách tệp.");
       writeDriveCache(clientCacheKey, result.files ?? []);
@@ -1189,6 +1222,27 @@ export default function Home() {
       if (!quietly) setNotice(message);
     } finally {
       driveRequestsInFlight.current.delete(clientCacheKey);
+      setLoadingWorkflowFiles(false);
+    }
+  };
+
+  const createWorkflowDateFolder = async () => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    setLoadingWorkflowFiles(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; folderName?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "create-workflow-date-folder",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        workflow: activeFolder,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục mới.");
+      await loadWorkflowFiles(activeFolder, true, true);
+      setNotice(`Đã tạo thư mục ${result.folderName ?? "theo ngày hôm nay"}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể tạo thư mục mới.");
+    } finally {
       setLoadingWorkflowFiles(false);
     }
   };
@@ -1788,19 +1842,39 @@ export default function Home() {
   ].join(" ")).includes(consultingSearchTerm);
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
   const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? personnelCategories[0] ?? null;
+  const selectedPersonnel = selectedPersonnelCategory ? personnelByCategory[selectedPersonnelCategory.id] ?? [] : [];
+  const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.phone} ${member.role} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
+  const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
+  const persistPersonnel = (next: Record<string, PersonnelMember[]>) => {
+    setPersonnelByCategory(next);
+    try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Personnel remains available for this session. */ }
+  };
+  const addPersonnel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedPersonnelCategory || !personnelDraft.name.trim()) return;
+    const member: PersonnelMember = { id: `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate) };
+    persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: [...selectedPersonnel, member] });
+    setPersonnelDraft({ name: "", birthDate: "", phone: "", role: "", address: "" });
+    setPersonnelAddOpen(false);
+    setNotice(`Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
+  };
+  const removePersonnel = (memberId: string) => {
+    if (!selectedPersonnelCategory) return;
+    persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.filter((member) => member.id !== memberId) });
+  };
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
       <header className="workflow-files__heading">
-        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Tên tệp và ngày chỉnh sửa được tự nạp. Khi bấm vào tệp, thiết bị sẽ tải tệp về.</span></div>
+        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2><span>Tên tệp và ngày chỉnh sửa được tự nạp. Khi bấm vào tệp, thiết bị sẽ tải tệp về.</span></div><button type="button" onClick={() => void createWorkflowDateFolder()} disabled={loadingWorkflowFiles}><b>＋</b> Thư mục ngày</button>
       </header>
       <div className="workflow-files__list">
         {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
           : workflowFilesError ? <p className="workflow-files__empty">Chưa thể nạp tệp: {workflowFilesError}</p>
           : currentWorkflowFiles.length ? currentWorkflowFiles.map((file) => (
-            <a key={file.id} className="workflow-file" href={file.downloadUrl} download={file.name} aria-label={`Tải tệp ${file.name}`}>
-              <span className="workflow-file__icon">{file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
-              <span><b>{file.name}</b><small>Chỉnh sửa: {file.updatedAt}</small></span><em>↓</em>
+            <a key={file.id} className="workflow-file" href={file.downloadUrl} {...(file.isFolder ? { target: "_blank", rel: "noreferrer" } : { download: file.name })} aria-label={`${file.isFolder ? "Mở thư mục" : "Tải tệp"} ${file.name}`}>
+              <span className="workflow-file__icon">{file.isFolder ? "▰" : file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
+              <span><b>{file.name}</b><small>{file.isFolder ? "Thư mục" : "Chỉnh sửa"}: {file.updatedAt}</small></span><em>{file.isFolder ? "↗" : "↓"}</em>
             </a>
           )) : <p className="workflow-files__empty">Chưa có tệp ngoài các phiếu Excel hệ thống trong thư mục này.</p>}
       </div>
@@ -1855,7 +1929,7 @@ export default function Home() {
               </div></td>
               <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
               <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
-              <td><GrowingTextarea value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
+              <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
@@ -1899,7 +1973,7 @@ export default function Home() {
             </div></td>
             <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
             <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
-            <td><GrowingTextarea value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} placeholder="Nhập người phụ trách" aria-label={`Người phụ trách ${row.content}`} /></td>
+            <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
             <td><GrowingTextarea value={row.note} onChange={(event) => updateWarrantyProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
           </tr>
         ))}</tbody>
@@ -1929,7 +2003,7 @@ export default function Home() {
                 <p className="sidebar-label sidebar-label--top">Nhân lực</p>
                 <nav className="main-nav" aria-label="Nhóm nhân lực">
                   {personnelCategories.map((category) => (
-                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
+                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
                       <span className="nav-row__icon">{category.icon}</span><span>{category.label}</span>
                     </button>
                   ))}
@@ -1938,14 +2012,22 @@ export default function Home() {
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading">
                   <div><p className="eyebrow">Nhân lực</p><h1>{selectedPersonnelCategory?.label}</h1><p>{selectedPersonnelCategory?.description}</p></div>
-                  <button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button>
+                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => { setPersonnelDraft({ name: "", birthDate: "", phone: "", role: "", address: "" }); setPersonnelAddOpen(true); }}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
                   <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Search trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi")}…`} aria-label={`Search ${selectedPersonnelCategory?.label}`} autoFocus />
                 </label>
                 <div className="personnel-category-detail">
-                  <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</p></div>
+                  {personnelAddOpen && <form className="personnel-add-form" onSubmit={addPersonnel}>
+                    <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
+                    <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="11/11/1999" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
+                    <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
+                    <label>Chức vụ<input value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} /></label>
+                    <label>Địa chỉ<input value={personnelDraft.address} onChange={(event) => setPersonnelDraft({ ...personnelDraft, address: event.target.value })} /></label>
+                    <div><button type="button" className="personnel-back" onClick={() => setPersonnelAddOpen(false)}>Hủy</button><button className="add-button" type="submit">Lưu nhân lực</button></div>
+                  </form>}
+                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Họ và tên</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><b>{member.name}</b></td><td>{member.birthDate || "—"}</td><td>{member.phone || "—"}</td><td>{member.role || "—"}</td><td>{member.address || "—"}</td><td><button type="button" onClick={() => removePersonnel(member.id)} aria-label={`Xóa ${member.name}`}>×</button></td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</p></div>}
                 </div>
               </section>
             </div>

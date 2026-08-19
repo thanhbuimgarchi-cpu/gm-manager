@@ -34,6 +34,7 @@ function doPost(event) {
         audioLock.releaseLock();
       }
     }
+    if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
@@ -275,10 +276,23 @@ function loadMonthCustomerIndex_(customers, year, month) {
     const customerFolder = customerFolders.next();
     const projectId = customerFolder.getName();
     if (projectId.indexOf("-") === 0) continue;
-    const record = customerIndexFromFolder_(customerFolder, projectId);
+    const record = fastCustomerIndexFromFolder_(projectId);
     if (record) records.push(record);
   }
   return monthResult_(year, month, records);
+}
+
+function fastCustomerIndexFromFolder_(projectId) {
+  const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
+  return {
+    id: "drive-" + projectId,
+    name: "",
+    houseId: "",
+    projectId: projectId,
+    createdAt: dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "",
+    details: {},
+    isHydrated: false,
+  };
 }
 
 function loadCustomerDetail_(customers, payload) {
@@ -313,7 +327,7 @@ function customerIndexFromWorkbook_(file, projectId) {
     name: metadata.name || projectId,
     houseId: metadata.houseId || "",
     projectId: metadata.projectId || projectId,
-    createdAt: metadata.createdAt || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : ""),
+    createdAt: normalizeExcelDate_(metadata.createdAt) || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : ""),
     details: {},
     isHydrated: false,
   };
@@ -437,7 +451,7 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   ["1. Ch\u1ee7 \u0111\u1ea7u t\u01b0", "2. Nhu c\u1ea7u", "3. Th\u1eeda \u0111\u1ea5t", "5. H\u1ec7 th\u1ed1ng"].forEach(function(name) {
     (sheets[name] || []).slice(1).forEach(function(row) {
       const code = String(row[0] || "").trim();
-      if (code) details[code] = String(row[2] || "");
+      if (code) details[code] = code === "NS" ? normalizeExcelDate_(row[2]) : String(row[2] || "");
     });
   });
 
@@ -498,7 +512,7 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
   const completedChunks = metadata.audioCompletedChunks === undefined || metadata.audioCompletedChunks === "" ? inferredCompletedChunks : Number(metadata.audioCompletedChunks);
 
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
-  const createdAt = metadata.createdAt || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
+  const createdAt = normalizeExcelDate_(metadata.createdAt) || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
   const record = {
     id: "drive-" + projectId,
     name: metadata.name || details.HVT || projectId,
@@ -549,8 +563,8 @@ function readDesignProgress_(customerFolder, projectId, progressKind) {
       id: String(row[idColumn] || (prefix + "-drive-" + projectId + "-" + index)),
       isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedContents.indexOf(content) === -1,
       content: content,
-      plannedDate: String(row[1] || ""),
-      actualDate: String(row[2] || ""),
+      plannedDate: normalizeExcelDate_(row[1]),
+      actualDate: normalizeExcelDate_(row[2]),
       assignee: hasAssignee ? String(row[3] || "") : "",
       note: String(row[noteColumn] || ""),
     };
@@ -585,8 +599,8 @@ function readWarrantyProgress_(customerFolder, projectId) {
       id: String(row[5] || ("warranty-drive-" + projectId + "-" + index)),
       isCustom: customCell ? customCell === "true" || customCell === "1" || customCell === "t\u00f9y ch\u1ec9nh" : fixedContents.indexOf(content) === -1,
       content: content,
-      reportedDate: String(row[1] || ""),
-      completedDate: String(row[2] || ""),
+      reportedDate: normalizeExcelDate_(row[1]),
+      completedDate: normalizeExcelDate_(row[2]),
       assignee: String(row[3] || ""),
       note: String(row[4] || ""),
     };
@@ -652,6 +666,14 @@ function readWorksheetRows_(xml, sharedStrings) {
     });
     return values;
   });
+}
+
+function normalizeExcelDate_(value) {
+  const text = String(value === undefined || value === null ? "" : value).trim();
+  const serial = /^([2-7]\d{4})(?:\.0+)?$/.exec(text);
+  if (!serial) return text;
+  const date = new Date(Date.UTC(1899, 11, 30) + Number(serial[1]) * 86400000);
+  return Utilities.formatDate(date, "Asia/Ho_Chi_Minh", "dd/MM/yyyy");
 }
 
 function columnIndex_(reference) {
@@ -862,6 +884,20 @@ function listWorkflowFiles_(payload) {
   if (!workflowFolder) return { ok: true, files: [] };
 
   const files = [];
+  const folders = workflowFolder.getFolders();
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    if (folder.getName().indexOf("-") === 0) continue;
+    files.push({
+      id: folder.getId(),
+      name: folder.getName(),
+      downloadUrl: folder.getUrl(),
+      updatedAt: Utilities.formatDate(folder.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+      mimeType: "application/vnd.google-apps.folder",
+      isFolder: true,
+      updatedAtMillis: folder.getLastUpdated().getTime(),
+    });
+  }
   const iterator = workflowFolder.getFiles();
   while (iterator.hasNext()) {
     const file = iterator.next();
@@ -877,10 +913,25 @@ function listWorkflowFiles_(payload) {
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
   const result = { ok: true, files: files.map(function(file) {
-    return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType };
+    return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType, isFolder: Boolean(file.isFolder) };
   }) };
   cacheJson_(cacheKey, result, 180);
   return result;
+}
+
+function createWorkflowDateFolder_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const workflow = String(payload.workflow || "").trim();
+  const allowedWorkflows = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+  if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thiếu thông tin thư mục cần tạo.");
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
+  const folderName = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
+  const folder = getOrCreateFolder_(workflowFolder, folderName);
+  CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
+  return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
 }
 
 function isSpecialWorkflowWorkbook_(name) {
