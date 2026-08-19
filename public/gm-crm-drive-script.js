@@ -36,11 +36,13 @@ function doPost(event) {
     }
     if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
+    if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
+      if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -932,6 +934,69 @@ function createWorkflowDateFolder_(payload) {
   const folder = getOrCreateFolder_(workflowFolder, folderName);
   CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
   return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
+}
+
+function personnelFolder_() {
+  return getOrCreateFolder_(DriveApp.getFolderById(ROOT_FOLDER_ID), "Nhân lực");
+}
+
+function loadPersonnel_() {
+  const folder = personnelFolder_();
+  const file = findFileByName_(folder, "Danh sách nhân lực.xlsx");
+  if (!file) return { ok: true, personnel: {} };
+  const sheets = readXlsxSheets_(file);
+  const rows = sheets["Nhân lực"] || sheets[Object.keys(sheets)[0]] || [];
+  const personnel = {};
+  rows.slice(1).forEach(function(row, index) {
+    const category = String(row[0] || "").trim();
+    const name = String(row[2] || "").trim();
+    if (!category || !name) return;
+    if (!personnel[category]) personnel[category] = [];
+    personnel[category].push({
+      id: String(row[7] || ("drive-person-" + category + "-" + index)),
+      name: name,
+      birthDate: normalizeExcelDate_(row[3]),
+      phone: String(row[4] || ""),
+      role: String(row[5] || ""),
+      address: String(row[6] || ""),
+    });
+  });
+  return { ok: true, personnel: personnel };
+}
+
+function syncPersonnelWorkbook_(personnel) {
+  const folder = personnelFolder_();
+  const categoryLabels = {
+    management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
+    construction: "Nhân công xây dựng", workshop: "Nhân công xưởng", partner: "Đối tác",
+  };
+  const rows = [["Nhóm ID", "Nhóm", "Họ và tên", "Ngày sinh", "Số điện thoại", "Chức vụ", "Địa chỉ", "_ID"]];
+  Object.keys(personnel || {}).forEach(function(category) {
+    const members = Array.isArray(personnel[category]) ? personnel[category] : [];
+    members.forEach(function(member) {
+      if (!member || !String(member.name || "").trim()) return;
+      rows.push([category, categoryLabels[category] || category, String(member.name || ""), String(member.birthDate || ""), String(member.phone || ""), String(member.role || ""), String(member.address || ""), String(member.id || "")]);
+    });
+  });
+  const spreadsheet = SpreadsheetApp.create("GM-CRM nhân lực temporary");
+  try {
+    const sheet = spreadsheet.getSheets()[0];
+    sheet.setName("Nhân lực");
+    sheet.getRange(1, 1, rows.length, 8).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
+    sheet.getRange(1, 1, 1, 8).setFontWeight("bold").setBackground("#eee9e2");
+    sheet.setFrozenRows(1);
+    [115, 180, 180, 110, 135, 160, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
+    sheet.hideColumns(1, 2);
+    sheet.hideColumns(8, 1);
+    sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
+    const fileName = "Danh sách nhân lực.xlsx";
+    const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
+    trashFilesByName_(folder, fileName);
+    const file = folder.createFile(xlsxBlob);
+    return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName };
+  } finally {
+    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+  }
 }
 
 function isSpecialWorkflowWorkbook_(name) {
