@@ -882,43 +882,77 @@ function listWorkflowFiles_(payload) {
 
   const customerFolder = getCustomerFolder_(year, month, projectId, false);
   if (!customerFolder) return { ok: true, files: [] };
-  const workflowFolder = findFolder_(customerFolder, workflow);
+  const workflowFolderCacheKey = "gmcrm-workflow-folder-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
+  const workflowFolder = getCachedFolder_(workflowFolderCacheKey) || findFolder_(customerFolder, workflow);
   if (!workflowFolder) return { ok: true, files: [] };
+  cacheFolder_(workflowFolderCacheKey, workflowFolder);
 
   const files = [];
-  const folders = workflowFolder.getFolders();
-  while (folders.hasNext()) {
-    const folder = folders.next();
-    if (folder.getName().indexOf("-") === 0) continue;
-    files.push({
-      id: folder.getId(),
-      name: folder.getName(),
-      downloadUrl: folder.getUrl(),
-      updatedAt: Utilities.formatDate(folder.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
-      mimeType: "application/vnd.google-apps.folder",
-      isFolder: true,
-      updatedAtMillis: folder.getLastUpdated().getTime(),
+  try {
+    // One Drive API request returns only the lightweight metadata needed by
+    // the UI. It avoids one Apps Script call per file/folder.
+    listDriveChildrenMetadata_(workflowFolder.getId()).forEach(function(item) {
+      const isFolder = item.mimeType === "application/vnd.google-apps.folder";
+      if (isFolder && item.name.indexOf("-") === 0) return;
+      if (!isFolder && isSpecialWorkflowWorkbook_(item.name)) return;
+      const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
+      files.push({
+        id: item.id,
+        name: item.name,
+        downloadUrl: isFolder ? (item.webViewLink || "https://drive.google.com/drive/folders/" + item.id) : (item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id)),
+        updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+        mimeType: item.mimeType,
+        isFolder: isFolder,
+        updatedAtMillis: modified.getTime(),
+      });
     });
-  }
-  const iterator = workflowFolder.getFiles();
-  while (iterator.hasNext()) {
-    const file = iterator.next();
-    if (isSpecialWorkflowWorkbook_(file.getName())) continue;
-    files.push({
-      id: file.getId(),
-      name: file.getName(),
-      downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()),
-      updatedAt: Utilities.formatDate(file.getLastUpdated(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
-      mimeType: file.getMimeType(),
-      updatedAtMillis: file.getLastUpdated().getTime(),
-    });
+  } catch (error) {
+    // Older deployments without permission for the REST endpoint retain a
+    // compatible DriveApp fallback.
+    const folders = workflowFolder.getFolders();
+    while (folders.hasNext()) {
+      const folder = folders.next();
+      if (folder.getName().indexOf("-") === 0) continue;
+      const folderUpdated = folder.getLastUpdated();
+      files.push({ id: folder.getId(), name: folder.getName(), downloadUrl: folder.getUrl(), updatedAt: Utilities.formatDate(folderUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: "application/vnd.google-apps.folder", isFolder: true, updatedAtMillis: folderUpdated.getTime() });
+    }
+    const iterator = workflowFolder.getFiles();
+    while (iterator.hasNext()) {
+      const file = iterator.next();
+      if (isSpecialWorkflowWorkbook_(file.getName())) continue;
+      const fileUpdated = file.getLastUpdated();
+      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(fileUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: fileUpdated.getTime() });
+    }
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
   const result = { ok: true, files: files.map(function(file) {
     return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType, isFolder: Boolean(file.isFolder) };
   }) };
-  cacheJson_(cacheKey, result, 180);
+  cacheJson_(cacheKey, result, 300);
   return result;
+}
+
+function listDriveChildrenMetadata_(folderId) {
+  const items = [];
+  let pageToken = "";
+  do {
+    const query = "'" + folderId.replace(/'/g, "\\'") + "' in parents and trashed = false";
+    let url = "https://www.googleapis.com/drive/v3/files?q=" + encodeURIComponent(query)
+      + "&pageSize=1000&orderBy=modifiedTime%20desc"
+      + "&fields=" + encodeURIComponent("nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,webContentLink)")
+      + "&supportsAllDrives=true&includeItemsFromAllDrives=true";
+    if (pageToken) url += "&pageToken=" + encodeURIComponent(pageToken);
+    const response = UrlFetchApp.fetch(url, {
+      method: "get",
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    });
+    if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) throw new Error("Drive metadata request failed.");
+    const data = JSON.parse(response.getContentText() || "{}");
+    (data.files || []).forEach(function(item) { items.push(item); });
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return items;
 }
 
 function createWorkflowDateFolder_(payload) {
@@ -1010,6 +1044,12 @@ function isSpecialWorkflowWorkbook_(name) {
 }
 
 function getCustomerFolder_(year, month, projectId, createMissing) {
+  const folderCacheKey = "gmcrm-customer-folder-" + year + "-" + month + "-" + projectId;
+  const cachedFolder = getCachedFolder_(folderCacheKey);
+  if (cachedFolder) {
+    if (createMissing) ensureProjectFolders_(cachedFolder);
+    return cachedFolder;
+  }
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const customers = createMissing ? getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME) : findFolder_(root, CUSTOMERS_FOLDER_NAME);
   if (!customers) return null;
@@ -1018,8 +1058,27 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
   let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return null;
   const customerFolder = createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+  if (customerFolder) cacheFolder_(folderCacheKey, customerFolder);
   if (customerFolder && createMissing) ensureProjectFolders_(customerFolder);
   return customerFolder;
+}
+
+function getCachedFolder_(key) {
+  try {
+    const folderId = CacheService.getScriptCache().get(key);
+    return folderId ? DriveApp.getFolderById(folderId) : null;
+  } catch (error) {
+    CacheService.getScriptCache().remove(key);
+    return null;
+  }
+}
+
+function cacheFolder_(key, folder) {
+  try {
+    CacheService.getScriptCache().put(key, folder.getId(), 21600);
+  } catch (error) {
+    // Folder caching is an optimization only.
+  }
 }
 
 function ensureProjectFolders_(customerFolder) {

@@ -178,7 +178,11 @@ const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
 const DRIVE_INDEX_CACHE_MS = 10 * 60 * 1000;
 const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
 const DRIVE_DETAIL_CACHE_MS = 4 * 60 * 1000;
-const DRIVE_FILE_LIST_CACHE_MS = 3 * 60 * 1000;
+// File metadata changes much less often than customer forms. Keep the latest
+// successful list for instant rendering, then refresh it quietly in the
+// background when it is older than five minutes.
+const DRIVE_FILE_LIST_FRESH_MS = 5 * 60 * 1000;
+const DRIVE_FILE_LIST_CACHE_MS = 24 * 60 * 60 * 1000;
 const driveCachePrefix = "gm-manager-drive-cache-v1:";
 const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
@@ -848,6 +852,17 @@ function writeDriveCache<T>(key: string, value: T) {
   }
 }
 
+function isDriveCacheFresh(key: string, maxAgeMs: number) {
+  try {
+    const raw = window.localStorage.getItem(`${driveCachePrefix}${key}`);
+    if (!raw) return false;
+    const cached = JSON.parse(raw) as { savedAt?: number };
+    return Boolean(cached.savedAt && Date.now() - cached.savedAt <= maxAgeMs);
+  } catch {
+    return false;
+  }
+}
+
 function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
   const localByProjectId = new Map(localYears.flatMap((year) => year.months.flatMap((month) => month.records)).map((record) => [record.projectId, record]));
   const driveByYear = new Map(driveYears.map((year) => [year.year, year]));
@@ -1196,13 +1211,17 @@ export default function Home() {
     const cacheKey = workflowFilesCacheKey(folder);
     const clientCacheKey = `files:${cacheKey}`;
     const cachedFiles = readDriveCache<WorkflowFile[]>(clientCacheKey, DRIVE_FILE_LIST_CACHE_MS);
+    const cacheIsFresh = isDriveCacheFresh(clientCacheKey, DRIVE_FILE_LIST_FRESH_MS);
+    const hasCachedFiles = cachedFiles !== null;
     if (cachedFiles && !refresh) {
       setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: cachedFiles }));
-      return;
     }
+    if (cacheIsFresh && !refresh) return;
     if (driveRequestsInFlight.current.has(clientCacheKey)) return;
     driveRequestsInFlight.current.add(clientCacheKey);
-    setLoadingWorkflowFiles(true);
+    // A stale cached list remains usable while the new metadata is fetched.
+    // Only show a blocking loading state when this device has no cache yet.
+    setLoadingWorkflowFiles(!hasCachedFiles);
     setWorkflowFilesError("");
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; files?: WorkflowFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
@@ -1219,7 +1238,7 @@ export default function Home() {
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
       const message = rawMessage.includes("Thiếu dữ liệu hồ sơ") ? "Apps Script chưa được cập nhật chức năng nạp danh sách tệp." : rawMessage;
-      setWorkflowFilesError(message);
+      if (!hasCachedFiles) setWorkflowFilesError(message);
       if (!quietly) setNotice(message);
     } finally {
       driveRequestsInFlight.current.delete(clientCacheKey);
