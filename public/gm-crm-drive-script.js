@@ -1216,6 +1216,18 @@ function createDocumentSnapshot_(payload) {
   const manifest = readDocumentManifest_(documentsFolder);
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const sources = projectSourceFiles_(customerFolder);
+  const hasClassifiedDocument = Object.keys(sources).some(function(documentKey) {
+    const source = sources[documentKey];
+    const stored = findDocumentMetaByKey_(manifest, documentKey) || {};
+    const preferred = preferredDocumentMeta_(source.workflow, source.file);
+    const effective = stored.assigned === true ? stored : (preferred || {});
+    const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: effective.work, nature: effective.nature, assigned: effective.assigned === true }, source.file, "Chưa gắn");
+    return meta.work !== "Chưa gắn" && meta.nature !== "Chưa gắn";
+  });
+  if (!hasClassifiedDocument) {
+    targetFolder.setTrashed(true);
+    throw new Error("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới.");
+  }
   let copiedCount = 0;
   const copiedKeys = {};
   Object.keys(manifest.files || {}).forEach(function(id) {

@@ -132,7 +132,6 @@ type CustomerLocation = {
 type DriveFolder = {
   label: string;
   icon: string;
-  isDocument?: boolean;
 };
 
 type WorkflowFile = {
@@ -268,7 +267,7 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Thi công", icon: "♧" },
   { label: "Nghiệm thu", icon: "✓" },
   { label: "Bảo hành", icon: "⚙" },
-  { label: "Tài liệu", icon: "▱", isDocument: true },
+  { label: "Tài liệu", icon: "▱" },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
 
@@ -1002,6 +1001,7 @@ export default function Home() {
   const [workflowFilesError, setWorkflowFilesError] = useState("");
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
+  const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
   const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [documentsError, setDocumentsError] = useState("");
@@ -1332,7 +1332,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v4:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v5:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = documentCacheKey(snapshotId);
@@ -1341,7 +1341,7 @@ export default function Home() {
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
       setDocumentFiles(cached.files);
-      setSelectedDocumentSnapshotId((current) => current || cached.activeSnapshotId);
+      setSelectedDocumentSnapshotId((current) => snapshotId || current || cached.activeSnapshotId);
     }
     if (fresh && !refresh) return;
     setLoadingDocuments(!cached);
@@ -1370,6 +1370,11 @@ export default function Home() {
 
   const createDocumentSnapshot = async () => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const hasClassifiedFile = documentFiles.some((file) => file.work !== "Chưa gắn" && file.nature !== "Chưa gắn");
+    if (!hasClassifiedFile) {
+      setNotice("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới.");
+      return;
+    }
     setLoadingDocuments(true);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; copiedCount?: number }>({ scriptUrl: driveScriptUrl.trim() }, {
@@ -1380,6 +1385,7 @@ export default function Home() {
       });
       if (!response.ok || !result.ok || !result.snapshot) throw new Error(result.error || "Không thể tạo bản Tài liệu hôm nay.");
       setSelectedDocumentSnapshotId(result.snapshot.id);
+      setExpandedDocumentSnapshotId(result.snapshot.id);
       await loadDocuments(result.snapshot.id, true);
       setNotice(`Đã tạo ${result.snapshot.name}; sao lưu ${result.copiedCount ?? 0} tệp Theo ngày.`);
     } catch (error) {
@@ -2081,17 +2087,40 @@ export default function Home() {
     </section>
   );
   const renderDocumentLibrary = () => {
-    const selectedSnapshot = documentSnapshots.find((snapshot) => snapshot.id === selectedDocumentSnapshotId);
+    const canCreateDocumentSnapshot = documentFiles.some((file) => file.work !== "Chưa gắn" && file.nature !== "Chưa gắn");
+    const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
+      title,
+      files: documentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
+    })).filter((group) => group.files.length);
+    const toggleDocumentSnapshot = (snapshotId: string) => {
+      if (expandedDocumentSnapshotId === snapshotId) {
+        setExpandedDocumentSnapshotId("");
+        return;
+      }
+      setExpandedDocumentSnapshotId(snapshotId);
+      setSelectedDocumentSnapshotId(snapshotId);
+      void loadDocuments(snapshotId);
+    };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Bảo hành / Tài liệu</p><h1>Tài liệu dự án</h1><p>Phiếu và tiến độ hệ thống được tự gắn đúng Công việc, tính chất <b>Xuyên suốt</b>. Tệp khác bắt đầu ở <b>Chưa gắn</b>; chỉ tệp Theo ngày mới được sao lưu khi tạo bản ngày mới.</p></div>
-        <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button>
+        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Chọn một ngày để xem tệp. Phiếu và tiến độ hệ thống luôn là <b>Xuyên suốt</b>; chỉ tệp Theo ngày mới được sao lưu vào bản ngày mới.</p></div>
+        <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments || !canCreateDocumentSnapshot} title={canCreateDocumentSnapshot ? "Tạo bản ngày mới" : "Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước"}><span>＋</span> Bản ngày mới</button>
       </header>
-      <div className="document-library__toolbar"><label>Bản tài liệu<select value={selectedDocumentSnapshotId} onChange={(event) => { const nextId = event.target.value; setSelectedDocumentSnapshotId(nextId); void loadDocuments(nextId); }} disabled={!documentSnapshots.length}>{documentSnapshots.map((snapshot) => <option key={snapshot.id} value={snapshot.id}>{snapshot.name}</option>)}</select></label>{selectedSnapshot && <span>{selectedSnapshot.date}</span>}</div>
-      <div className="document-library__table-wrap">
-        {loadingDocuments && !documentFiles.length ? <p className="document-library__empty">Đang nạp Tài liệu…</p>
-          : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-            : documentFiles.length ? <table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên file</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{documentFiles.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table> : <p className="document-library__empty">Chưa có tệp trong bản Tài liệu này.</p>}
+      <div className="document-library__days">
+        {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
+          const expanded = expandedDocumentSnapshotId === snapshot.id;
+          const contentReady = selectedDocumentSnapshotId === snapshot.id;
+          return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
+            <button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
+              <span><b>{snapshot.date}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
+            </button>
+            {expanded && <div className="document-day__content">
+              {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
+                : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên file</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản Tài liệu này.</p>}
+            </div>}
+          </article>;
+        }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
       </div>
     </section>;
   };
@@ -2293,7 +2322,7 @@ export default function Home() {
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
-            <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${folder.isDocument ? "nav-row--document" : ""} ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
+            <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
               <span>{folder.label}</span>
             </button>
