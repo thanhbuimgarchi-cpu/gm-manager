@@ -282,12 +282,19 @@
 
 .document-day { border-bottom: 1px solid #e9e7e2; }
 .document-day:last-child { border-bottom: 0; }
-.document-day__trigger { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 59px; padding: 11px 25px; border: 0; background: #fff; color: #35322e; text-align: left; }
+.document-day__header { display: flex; align-items: stretch; background: #fff; }
+.document-day__trigger { display: flex; flex: 1; align-items: center; justify-content: space-between; min-width: 0; min-height: 59px; padding: 11px 14px 11px 25px; border: 0; background: transparent; color: #35322e; text-align: left; }
 .document-day__trigger:hover, .document-day--expanded .document-day__trigger { background: #f6f3ef; }
 .document-day__trigger span { display: grid; gap: 3px; }
 .document-day__trigger b { font-size: 12px; font-weight: 600; }
 .document-day__trigger small { color: #918b83; font-size: 9px; }
 .document-day__trigger em { display: grid; width: 23px; height: 23px; place-items: center; border-radius: 50%; background: #ebe7e0; color: #6f5c4b; font-size: 18px; font-style: normal; line-height: 1; }
+.document-day__actions { display: flex; align-items: center; gap: 6px; padding: 0 19px 0 4px; background: transparent; }
+.document-day__actions button { min-height: 28px; padding: 0 8px; border: 1px solid #dedad3; border-radius: 5px; background: #fff; color: #655e56; font-size: 9px; }
+.document-day__actions button:hover:not(:disabled) { border-color: #9b8068; color: #4c392b; }
+.document-day__actions button:disabled { cursor: not-allowed; opacity: .48; }
+.document-day__actions .document-day__lock--locked { border-color: #a98d71; background: #f4eee7; color: #684d36; }
+.document-day__actions .document-day__delete:hover:not(:disabled) { border-color: #b76558; color: #a43f34; }
 .document-day__content { border-top: 1px solid #e9e6e0; background: #fff; }
 .document-work-group { padding: 17px 25px 0; }
 .document-work-group + .document-work-group { margin-top: 17px; border-top: 1px solid #efede8; }
@@ -352,6 +359,8 @@
   .personnel-add-form { grid-template-columns: 1fr; }
   .document-workspace { padding: 18px 14px 28px; }
   .document-library__heading { flex-direction: column; padding: 19px 17px 16px; }
-  .document-day__trigger { padding: 11px 17px; }
+  .document-day__trigger { padding: 11px 10px 11px 17px; }
+  .document-day__actions { gap: 4px; padding-right: 12px; }
+  .document-day__actions button { padding: 0 6px; font-size: 8px; }
   .document-work-group { padding-right: 17px; padding-left: 17px; }
 }

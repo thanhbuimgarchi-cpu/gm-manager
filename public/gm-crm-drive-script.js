@@ -46,6 +46,8 @@ function doPost(event) {
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
       if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
+      if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
+      if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -977,6 +979,7 @@ const DOCUMENTS_FOLDER_NAME = "Tài liệu";
 const DOCUMENT_MANIFEST_NAME = "_gmcrm_tai_lieu.json";
 const DOCUMENT_WORK_OPTIONS = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
 const DOCUMENT_NATURE_OPTIONS = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
+const DOCUMENT_SNAPSHOT_UNLOCK_CODE = "mgarchi";
 
 function documentSnapshotName_(projectId, date) {
   const value = date || Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
@@ -1007,18 +1010,18 @@ function listDocumentSnapshots_(documentsFolder, projectId) {
 
 function readDocumentManifest_(documentsFolder) {
   const file = findFileByName_(documentsFolder, DOCUMENT_MANIFEST_NAME);
-  if (!file) return { files: {} };
+  if (!file) return { files: {}, snapshots: {} };
   try {
     const manifest = JSON.parse(file.getBlob().getDataAsString("UTF-8") || "{}");
-    return manifest && manifest.files ? manifest : { files: {} };
+    return manifest && manifest.files ? { files: manifest.files, snapshots: manifest.snapshots || {} } : { files: {}, snapshots: {} };
   } catch (error) {
-    return { files: {} };
+    return { files: {}, snapshots: {} };
   }
 }
 
 function writeDocumentManifest_(documentsFolder, manifest) {
   trashFilesByName_(documentsFolder, DOCUMENT_MANIFEST_NAME);
-  documentsFolder.createFile(DOCUMENT_MANIFEST_NAME, JSON.stringify({ files: manifest.files || {} }), MimeType.PLAIN_TEXT);
+  documentsFolder.createFile(DOCUMENT_MANIFEST_NAME, JSON.stringify({ files: manifest.files || {}, snapshots: manifest.snapshots || {} }), MimeType.PLAIN_TEXT);
 }
 
 function normalizeDocumentMeta_(meta, file, defaultWork) {
@@ -1199,7 +1202,7 @@ function listDocuments_(payload) {
     }
   }
   const files = Object.keys(visible).map(function(key) { return documentFileOutput_(visible[key].file, visible[key].meta); }).sort(function(a, b) { return b.updatedAt.localeCompare(a.updatedAt) || a.name.localeCompare(b.name); });
-  return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date }; }), activeSnapshotId: target ? target.id : "", files: files };
+  return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date, locked: !!((manifest.snapshots || {})[snapshot.id] || {}).locked }; }), activeSnapshotId: target ? target.id : "", files: files };
 }
 
 function createDocumentSnapshot_(payload) {
@@ -1211,7 +1214,7 @@ function createDocumentSnapshot_(payload) {
   const todayName = documentSnapshotName_(projectId);
   let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
-  if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date }, copiedCount: 0 };
+  if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date, locked: !!((readDocumentManifest_(documentsFolder).snapshots || {})[sameDay.id] || {}).locked }, copiedCount: 0 };
   const targetFolder = documentsFolder.createFolder(todayName);
   const manifest = readDocumentManifest_(documentsFolder);
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
@@ -1243,7 +1246,53 @@ function createDocumentSnapshot_(payload) {
   });
   if (copiedCount) writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
-  return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName) }, copiedCount: copiedCount };
+  return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: false }, copiedCount: copiedCount };
+}
+
+function documentSnapshotForProject_(documentsFolder, projectId, snapshotId) {
+  const snapshot = listDocumentSnapshots_(documentsFolder, projectId).filter(function(item) { return item.id === snapshotId; })[0];
+  if (!snapshot) throw new Error("Không tìm thấy bản Tài liệu này.");
+  return snapshot;
+}
+
+function setDocumentSnapshotLock_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const snapshotId = String(payload.snapshotId || "").trim();
+  const locked = payload.locked === true;
+  if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
+  if (!locked && String(payload.passcode || "") !== DOCUMENT_SNAPSHOT_UNLOCK_CODE) throw new Error("Mã mở khóa không đúng.");
+  const manifest = readDocumentManifest_(documentsFolder);
+  manifest.snapshots = manifest.snapshots || {};
+  manifest.snapshots[snapshotId] = { locked: locked };
+  writeDocumentManifest_(documentsFolder, manifest);
+  clearDocumentCache_(year, month, projectId);
+  return { ok: true, locked: locked };
+}
+
+function deleteDocumentSnapshot_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const snapshotId = String(payload.snapshotId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const snapshot = documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
+  if (snapshots.length <= 1) throw new Error("Cần giữ lại ít nhất một bản Tài liệu.");
+  const manifest = readDocumentManifest_(documentsFolder);
+  if (!!((manifest.snapshots || {})[snapshotId] || {}).locked) throw new Error("Bản ngày đang khóa. Hãy mở khóa trước khi xóa.");
+  const copiedFiles = snapshot.folder.getFiles();
+  while (copiedFiles.hasNext()) delete manifest.files[copiedFiles.next().getId()];
+  manifest.snapshots = manifest.snapshots || {};
+  delete manifest.snapshots[snapshotId];
+  snapshot.folder.setTrashed(true);
+  writeDocumentManifest_(documentsFolder, manifest);
+  clearDocumentCache_(year, month, projectId);
+  return { ok: true };
 }
 
 function updateDocumentMetadata_(payload) {

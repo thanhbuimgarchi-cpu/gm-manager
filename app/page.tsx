@@ -159,6 +159,7 @@ type DocumentSnapshot = {
   id: string;
   name: string;
   date: string;
+  locked?: boolean;
 };
 
 type PersonnelCategory = {
@@ -1004,6 +1005,7 @@ export default function Home() {
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
   const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
+  const [documentSnapshotActionId, setDocumentSnapshotActionId] = useState<string | null>(null);
   const [documentsError, setDocumentsError] = useState("");
   const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
@@ -1415,6 +1417,68 @@ export default function Home() {
     } catch (error) {
       setDocumentFiles(before);
       setNotice(error instanceof Error ? error.message : "Không thể cập nhật tệp.");
+    }
+  };
+
+  const updateDocumentSnapshotLock = async (snapshot: DocumentSnapshot, locked: boolean, passcode = "") => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    setDocumentSnapshotActionId(snapshot.id);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "set-document-snapshot-lock",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        snapshotId: snapshot.id,
+        locked,
+        passcode,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật khóa bản ngày.");
+      const nextSnapshots = documentSnapshots.map((item) => item.id === snapshot.id ? { ...item, locked } : item);
+      setDocumentSnapshots(nextSnapshots);
+      writeDriveCache(documentCacheKey(), { snapshots: nextSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: documentFiles });
+      setNotice(locked ? `Đã khóa bản ngày ${snapshot.date}.` : `Đã mở khóa bản ngày ${snapshot.date}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể cập nhật khóa bản ngày.");
+    } finally {
+      setDocumentSnapshotActionId(null);
+    }
+  };
+
+  const toggleDocumentSnapshotLock = (snapshot: DocumentSnapshot) => {
+    if (!snapshot.locked) {
+      void updateDocumentSnapshotLock(snapshot, true);
+      return;
+    }
+    const passcode = window.prompt(`Nhập mã để mở khóa bản ngày ${snapshot.date}:`);
+    if (passcode === null) return;
+    void updateDocumentSnapshotLock(snapshot, false, passcode);
+  };
+
+  const deleteDocumentSnapshot = async (snapshot: DocumentSnapshot) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim() || snapshot.locked) return;
+    if (!window.confirm(`Xóa bản Tài liệu ngày ${snapshot.date}? Các tệp Theo ngày nằm trong bản này cũng sẽ bị xóa.`)) return;
+    setDocumentSnapshotActionId(snapshot.id);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "delete-document-snapshot",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        snapshotId: snapshot.id,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa bản ngày.");
+      const nextSnapshots = documentSnapshots.filter((item) => item.id !== snapshot.id);
+      const nextSelectedId = selectedDocumentSnapshotId === snapshot.id ? (nextSnapshots[0]?.id ?? "") : selectedDocumentSnapshotId;
+      setDocumentSnapshots(nextSnapshots);
+      setSelectedDocumentSnapshotId(nextSelectedId);
+      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
+      writeDriveCache(documentCacheKey(), { snapshots: nextSnapshots, activeSnapshotId: nextSelectedId, files: documentFiles });
+      setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");
+    } finally {
+      setDocumentSnapshotActionId(null);
     }
   };
 
@@ -2110,10 +2174,11 @@ export default function Home() {
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
           const expanded = expandedDocumentSnapshotId === snapshot.id;
           const contentReady = selectedDocumentSnapshotId === snapshot.id;
+          const isActing = documentSnapshotActionId === snapshot.id;
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
-            <button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
+            <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
               <span><b>{snapshot.date}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
-            </button>
+            </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"}>{snapshot.locked ? "🔒 Đã khóa" : "🔓 Khóa"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"}>Xóa</button></div></header>
             {expanded && <div className="document-day__content">
               {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
