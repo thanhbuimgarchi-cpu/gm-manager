@@ -1065,12 +1065,15 @@ function findDocumentMetaByKey_(manifest, documentKey) {
 function documentsFolderForProject_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
   if (!customerFolder) return null;
-  const warrantyFolder = createMissing ? getOrCreateFolder_(customerFolder, "Bảo hành") : findFolder_(customerFolder, "Bảo hành");
-  if (!warrantyFolder) return null;
-  const documentsFolder = createMissing ? getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME) : findFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
-  if (!documentsFolder) return null;
-  if (createMissing && !listDocumentSnapshots_(documentsFolder, projectId).length) documentsFolder.createFolder(documentSnapshotName_(projectId));
-  return documentsFolder;
+  let documentsFolder = findFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
+  if (documentsFolder) return documentsFolder;
+  const warrantyFolder = findFolder_(customerFolder, "Bảo hành");
+  const legacyFolder = warrantyFolder ? findFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME) : null;
+  if (legacyFolder && createMissing) {
+    legacyFolder.moveTo(customerFolder);
+    return legacyFolder;
+  }
+  return createMissing ? getOrCreateFolder_(customerFolder, DOCUMENTS_FOLDER_NAME) : null;
 }
 
 function documentCachePrefix_(year, month, projectId) {
@@ -1212,14 +1215,14 @@ function createDocumentSnapshot_(payload) {
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
   const todayName = documentSnapshotName_(projectId);
-  let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
   if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date, locked: !!((readDocumentManifest_(documentsFolder).snapshots || {})[sameDay.id] || {}).locked }, copiedCount: 0 };
   const targetFolder = documentsFolder.createFolder(todayName);
   const manifest = readDocumentManifest_(documentsFolder);
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const sources = projectSourceFiles_(customerFolder);
-  const hasClassifiedDocument = Object.keys(sources).some(function(documentKey) {
+  const hasClassifiedSource = Object.keys(sources).some(function(documentKey) {
     const source = sources[documentKey];
     const stored = findDocumentMetaByKey_(manifest, documentKey) || {};
     const preferred = preferredDocumentMeta_(source.workflow, source.file);
@@ -1227,23 +1230,33 @@ function createDocumentSnapshot_(payload) {
     const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: effective.work, nature: effective.nature, assigned: effective.assigned === true }, source.file, "Chưa gắn");
     return meta.work !== "Chưa gắn" && meta.nature !== "Chưa gắn";
   });
+  const previousSnapshot = snapshots[0];
+  const hasClassifiedDailyFile = previousSnapshot ? (function() {
+    const files = previousSnapshot.folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
+      if (meta.work !== "Chưa gắn" && meta.nature !== "Chưa gắn") return true;
+    }
+    return false;
+  })() : false;
+  const hasClassifiedDocument = hasClassifiedSource || hasClassifiedDailyFile;
   if (!hasClassifiedDocument) {
     targetFolder.setTrashed(true);
     throw new Error("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới.");
   }
   let copiedCount = 0;
-  const copiedKeys = {};
-  Object.keys(manifest.files || {}).forEach(function(id) {
-    const stored = manifest.files[id] || {};
-    if (copiedKeys[stored.documentKey]) return;
-    if (stored.assigned !== true || stored.work === "Chưa gắn" || stored.nature !== "Theo ngày") return;
-    const source = sources[stored.documentKey];
-    if (!source) return;
-    const copy = source.file.makeCopy(source.file.getName(), targetFolder);
-    manifest.files[copy.getId()] = { work: stored.work, nature: stored.nature, documentKey: stored.documentKey, sourceId: source.file.getId(), assigned: true };
-    copiedKeys[stored.documentKey] = true;
-    copiedCount += 1;
-  });
+  if (previousSnapshot) {
+    const files = previousSnapshot.folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
+      if (meta.assigned !== true || meta.work === "Chưa gắn" || meta.nature !== "Theo ngày") continue;
+      const copy = file.makeCopy(file.getName(), targetFolder);
+      manifest.files[copy.getId()] = { work: meta.work, nature: meta.nature, documentKey: meta.documentKey, sourceId: meta.sourceId, assigned: true };
+      copiedCount += 1;
+    }
+  }
   if (copiedCount) writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
   return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: false }, copiedCount: copiedCount };
@@ -1280,9 +1293,7 @@ function deleteDocumentSnapshot_(payload) {
   const snapshotId = String(payload.snapshotId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
-  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const snapshot = documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
-  if (snapshots.length <= 1) throw new Error("Cần giữ lại ít nhất một bản Tài liệu.");
   const manifest = readDocumentManifest_(documentsFolder);
   if (!!((manifest.snapshots || {})[snapshotId] || {}).locked) throw new Error("Bản ngày đang khóa. Hãy mở khóa trước khi xóa.");
   const copiedFiles = snapshot.folder.getFiles();
@@ -1300,6 +1311,7 @@ function updateDocumentMetadata_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   const fileId = String(payload.fileId || "").trim();
+  const requestedSnapshotId = String(payload.snapshotId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId || !fileId) throw new Error("Thiếu thông tin tệp Tài liệu.");
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
   const manifest = readDocumentManifest_(documentsFolder);
@@ -1313,6 +1325,17 @@ function updateDocumentMetadata_(payload) {
   current.assigned = true;
   if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
   if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);
+  const isClassified = current.work !== "Chưa gắn" && current.nature !== "Chưa gắn";
+  if (isClassified && current.nature === "Theo ngày" && source) {
+    const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+    const targetSnapshot = snapshots.filter(function(snapshot) { return snapshot.id === requestedSnapshotId; })[0] || snapshots[0] || { folder: documentsFolder.createFolder(documentSnapshotName_(projectId)) };
+    file.moveTo(targetSnapshot.folder);
+  }
+  if (isClassified && current.nature === "Xuyên suốt") {
+    const workflowFolder = getOrCreateFolder_(customerFolder, current.work);
+    if (!source || source.workflow !== current.work) file.moveTo(workflowFolder);
+    current.documentKey = "system:" + current.work + ":" + file.getName();
+  }
   const keys = Object.keys(manifest.files || {});
   keys.forEach(function(id) {
     const value = manifest.files[id] || {};
@@ -1435,9 +1458,10 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
   if (!yearFolder) return null;
   let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return null;
-  const customerFolder = createMissing ? getOrCreateFolder_(monthFolder, projectId) : findFolder_(monthFolder, projectId);
+  const existingCustomerFolder = findFolder_(monthFolder, projectId);
+  const customerFolder = existingCustomerFolder || (createMissing ? getOrCreateFolder_(monthFolder, projectId) : null);
   if (customerFolder) cacheFolder_(folderCacheKey, customerFolder);
-  if (customerFolder && createMissing) ensureProjectFolders_(customerFolder);
+  if (customerFolder && createMissing) ensureProjectFolders_(customerFolder, !existingCustomerFolder);
   return customerFolder;
 }
 
@@ -1459,16 +1483,25 @@ function cacheFolder_(key, folder) {
   }
 }
 
-function ensureProjectFolders_(customerFolder) {
+function ensureProjectFolders_(customerFolder, createInitialDocumentSnapshot) {
   const consulting = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
   ["Thi c\u00f4ng", "Thi\u1ebft k\u1ebf", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh", "D\u1ef1 to\u00e1n"].forEach(function(name) {
     getOrCreateFolder_(customerFolder, name);
   });
   const dataFolder = getOrCreateFolder_(consulting, "DataID");
   getOrCreateFolder_(dataFolder, "Ghi \u00e2m");
-  const warrantyFolder = getOrCreateFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
-  const documentsFolder = getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
-  if (!listDocumentSnapshots_(documentsFolder, customerFolder.getName()).length) documentsFolder.createFolder(documentSnapshotName_(customerFolder.getName()));
+  let documentsFolder = findFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
+  if (!documentsFolder) {
+    const warrantyFolder = findFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
+    const legacyFolder = warrantyFolder ? findFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME) : null;
+    if (legacyFolder) {
+      legacyFolder.moveTo(customerFolder);
+      documentsFolder = legacyFolder;
+    } else {
+      documentsFolder = getOrCreateFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
+    }
+  }
+  if (createInitialDocumentSnapshot && !listDocumentSnapshots_(documentsFolder, customerFolder.getName()).length) documentsFolder.createFolder(documentSnapshotName_(customerFolder.getName()));
 }
 
 function getAudioFolder_(year, month, projectId, createMissing) {

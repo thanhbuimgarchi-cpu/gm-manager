@@ -1334,7 +1334,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v5:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v6:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = documentCacheKey(snapshotId);
@@ -1409,6 +1409,7 @@ export default function Home() {
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
         fileId,
+        snapshotId: selectedDocumentSnapshotId,
         work: patch.work,
         nature: patch.nature,
       });
@@ -1472,8 +1473,10 @@ export default function Home() {
       const nextSelectedId = selectedDocumentSnapshotId === snapshot.id ? (nextSnapshots[0]?.id ?? "") : selectedDocumentSnapshotId;
       setDocumentSnapshots(nextSnapshots);
       setSelectedDocumentSnapshotId(nextSelectedId);
+      setDocumentFiles([]);
       if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
       writeDriveCache(documentCacheKey(), { snapshots: nextSnapshots, activeSnapshotId: nextSelectedId, files: documentFiles });
+      await loadDocuments(nextSelectedId, true);
       setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");
