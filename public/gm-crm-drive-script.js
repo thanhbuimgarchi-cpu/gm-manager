@@ -1217,22 +1217,26 @@ function createDocumentSnapshot_(payload) {
   const todayName = documentSnapshotName_(projectId);
   const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
-  if (sameDay) return { ok: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date, locked: !!((readDocumentManifest_(documentsFolder).snapshots || {})[sameDay.id] || {}).locked }, copiedCount: 0 };
-  const targetFolder = documentsFolder.createFolder(todayName);
+  const createdNewSnapshot = !sameDay;
+  const targetFolder = sameDay ? sameDay.folder : documentsFolder.createFolder(todayName);
   const manifest = readDocumentManifest_(documentsFolder);
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const sources = projectSourceFiles_(customerFolder);
-  const hasClassifiedSource = Object.keys(sources).some(function(documentKey) {
+  const sourceMetadata = {};
+  let hasClassifiedSource = false;
+  Object.keys(sources).forEach(function(documentKey) {
     const source = sources[documentKey];
     const stored = findDocumentMetaByKey_(manifest, documentKey) || {};
     const preferred = preferredDocumentMeta_(source.workflow, source.file);
     const effective = stored.assigned === true ? stored : (preferred || {});
     const meta = normalizeDocumentMeta_({ documentKey: documentKey, sourceId: source.file.getId(), work: effective.work, nature: effective.nature, assigned: effective.assigned === true }, source.file, "Chưa gắn");
-    return meta.work !== "Chưa gắn" && meta.nature !== "Chưa gắn";
+    sourceMetadata[documentKey] = meta;
+    if (meta.work !== "Chưa gắn" && meta.nature !== "Chưa gắn") hasClassifiedSource = true;
   });
-  const previousSnapshot = snapshots[0];
-  const hasClassifiedDailyFile = previousSnapshot ? (function() {
-    const files = previousSnapshot.folder.getFiles();
+  const previousSnapshot = createdNewSnapshot ? snapshots[0] : null;
+  const referenceSnapshot = sameDay || previousSnapshot;
+  const hasClassifiedDailyFile = referenceSnapshot ? (function() {
+    const files = referenceSnapshot.folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
       const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
@@ -1242,24 +1246,42 @@ function createDocumentSnapshot_(payload) {
   })() : false;
   const hasClassifiedDocument = hasClassifiedSource || hasClassifiedDailyFile;
   if (!hasClassifiedDocument) {
-    targetFolder.setTrashed(true);
+    if (createdNewSnapshot) targetFolder.setTrashed(true);
     throw new Error("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới.");
   }
   let copiedCount = 0;
+  const copiedKeys = {};
+
+  // Repair records created by an older Script: a file already marked "Theo
+  // ngày" may still be sitting in its workflow folder. Move that live file
+  // into today's document folder before copying the remaining previous-day
+  // files, so the newest version is the one preserved for today.
+  Object.keys(sources).forEach(function(documentKey) {
+    const source = sources[documentKey];
+    const meta = sourceMetadata[documentKey] || {};
+    if (meta.assigned !== true || meta.work === "Chưa gắn" || meta.nature !== "Theo ngày") return;
+    source.file.moveTo(targetFolder);
+    manifest.files[source.file.getId()] = { work: meta.work, nature: meta.nature, documentKey: meta.documentKey, sourceId: meta.sourceId, assigned: true };
+    copiedKeys[meta.documentKey] = true;
+    copiedCount += 1;
+  });
+
   if (previousSnapshot) {
     const files = previousSnapshot.folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
       const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
       if (meta.assigned !== true || meta.work === "Chưa gắn" || meta.nature !== "Theo ngày") continue;
+      if (copiedKeys[meta.documentKey]) continue;
       const copy = file.makeCopy(file.getName(), targetFolder);
       manifest.files[copy.getId()] = { work: meta.work, nature: meta.nature, documentKey: meta.documentKey, sourceId: meta.sourceId, assigned: true };
+      copiedKeys[meta.documentKey] = true;
       copiedCount += 1;
     }
   }
   if (copiedCount) writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
-  return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: false }, copiedCount: copiedCount };
+  return { ok: true, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: sameDay ? !!((manifest.snapshots || {})[sameDay.id] || {}).locked : false }, copiedCount: copiedCount };
 }
 
 function documentSnapshotForProject_(documentsFolder, projectId, snapshotId) {
