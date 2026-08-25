@@ -6,8 +6,12 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "sync:apps-script-source": "node scripts/sync-apps-script-source.mjs",
+    "predev": "node scripts/sync-apps-script-source.mjs",
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
+    "prebuild": "node scripts/sync-apps-script-source.mjs",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "prebuild:github-pages": "node scripts/sync-apps-script-source.mjs",
     "build:github-pages": "vite build --config vite.github.config.ts",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",

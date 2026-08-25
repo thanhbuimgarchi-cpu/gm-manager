@@ -95,4 +95,12 @@
 .consulting-search-empty p { margin: 0; font-size: 11px; }
 @media (max-width: 800px) { .consulting-profile-actions { align-items: flex-end; flex-direction: column-reverse; gap: 8px; }.record-detail--inline .record-detail__heading { align-items: flex-start; }.record-detail--inline .record-detail__footer { align-items: flex-start; flex-direction: column; }.record-detail--inline .record-detail__footer > span:last-child { max-width: none; text-align: left; } }
 @media (max-width: 620px) { .record-detail--inline { max-height: none; }.record-detail--inline .detail-scroll { padding-right: 12px; padding-left: 12px; }.consulting-search { margin-bottom: 12px; } }
+.line-list-editor { display: grid; gap: 7px; }
+.line-list-editor__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: start; }
+.line-list-editor__row .growing-textarea { min-height: 34px; }
+.line-list-editor__actions { display: flex; gap: 3px; padding-top: 3px; }
+.line-list-editor__actions button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 1px solid #d9d8d3; border-radius: 4px; background: #fff; color: #696660; font: inherit; font-size: 15px; line-height: 1; cursor: pointer; }
+.line-list-editor__actions button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.line-list-editor__actions button:disabled { cursor: not-allowed; opacity: .35; }
+@media (max-width: 620px) { .line-list-editor__actions { flex-direction: column; padding-top: 0; }.line-list-editor__actions button { width: 30px; height: 30px; } }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }.dialog-actions > button:first-child { border: 1px solid #d9d8d3; border-radius: 5px; background: #fff; color: #5c5953; }

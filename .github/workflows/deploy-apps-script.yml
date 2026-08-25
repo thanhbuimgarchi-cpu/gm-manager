@@ -1,0 +1,62 @@
+name: Deploy Google Apps Script
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps-script/**"
+      - ".github/workflows/deploy-apps-script.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gm-manager-apps-script-production
+  cancel-in-progress: false
+
+env:
+  CLASP_VERSION: "3.3.0"
+  # This is the deployment ID in the existing /macros/s/.../exec URL.
+  # Updating this deployment keeps the current Web App URL unchanged.
+  APPS_SCRIPT_DEPLOYMENT_ID: "AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr"
+
+jobs:
+  deploy:
+    name: Push source and update Web App
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Configure Apps Script credentials
+        env:
+          APPS_SCRIPT_ID: ${{ secrets.APPS_SCRIPT_ID }}
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const scriptId = process.env.APPS_SCRIPT_ID?.trim();
+          const credentials = process.env.CLASPRC_JSON?.trim();
+          if (!scriptId) throw new Error("Missing GitHub Actions secret: APPS_SCRIPT_ID");
+          if (!credentials) throw new Error("Missing GitHub Actions secret: CLASPRC_JSON");
+
+          JSON.parse(credentials);
+          fs.writeFileSync(path.join(process.env.HOME, ".clasprc.json"), credentials, { mode: 0o600 });
+          fs.writeFileSync(".clasp.json", JSON.stringify({ scriptId, rootDir: "apps-script" }, null, 2));
+          NODE
+
+      - name: Push the latest source
+        run: npx --yes @google/clasp@${CLASP_VERSION} push --force
+
+      - name: Update the existing Web App deployment
+        run: npx --yes @google/clasp@${CLASP_VERSION} update-deployment "${APPS_SCRIPT_DEPLOYMENT_ID}" --description "GM-Manager ${GITHUB_SHA::7}"

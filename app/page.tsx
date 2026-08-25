@@ -62,6 +62,62 @@ function GrowingTextarea({ value, onChange, className, ...props }: GrowingTextar
   }} />;
 }
 
+type LineListEditorProps = {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+  placeholder?: string;
+};
+
+function LineListEditor({ value, onChange, ariaLabel, placeholder }: LineListEditorProps) {
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const focusLine = (index: number) => {
+    window.requestAnimationFrame(() => {
+      const editors = editorRef.current?.querySelectorAll("textarea");
+      editors?.[Math.max(0, Math.min(index, (editors?.length ?? 1) - 1))]?.focus();
+    });
+  };
+  const commitLines = (nextLines: string[]) => onChange(nextLines.join("\n"));
+  const replaceLine = (index: number, nextValue: string) => {
+    const replacementLines = nextValue.replace(/\r\n?/g, "\n").split("\n");
+    commitLines([...lines.slice(0, index), ...replacementLines, ...lines.slice(index + 1)]);
+  };
+  const addLine = (index: number) => {
+    commitLines([...lines.slice(0, index + 1), "", ...lines.slice(index + 1)]);
+    focusLine(index + 1);
+  };
+  const removeLine = (index: number) => {
+    if (lines.length === 1) {
+      commitLines([""]);
+      focusLine(0);
+      return;
+    }
+    commitLines(lines.filter((_, lineIndex) => lineIndex !== index));
+    focusLine(Math.min(index, lines.length - 2));
+  };
+
+  return <div ref={editorRef} className="line-list-editor">
+    {lines.map((line, index) => <div className="line-list-editor__row" key={index}>
+      <GrowingTextarea
+        aria-label={`${ariaLabel}, dòng ${index + 1}`}
+        value={line}
+        onChange={(event) => replaceLine(index, event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          addLine(index);
+        }}
+        placeholder={placeholder}
+      />
+      <div className="line-list-editor__actions">
+        <button type="button" onClick={() => addLine(index)} aria-label={`Thêm dòng sau dòng ${index + 1} của ${ariaLabel}`}>＋</button>
+        <button type="button" onClick={() => removeLine(index)} disabled={lines.length === 1 && !line} aria-label={`Bớt dòng ${index + 1} của ${ariaLabel}`}>−</button>
+      </div>
+    </div>)}
+  </div>;
+}
+
 type WorkRecord = {
   id: string;
   name: string;
@@ -2467,7 +2523,7 @@ export default function Home() {
 
                 {visibleSystemFields.length > 0 && <section className="dynamic-information system-information">
                   <h3>5. Thông tin hệ thống</h3>
-                  <table className="information-table"><thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead><tbody>{visibleSystemFields.map((field) => <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>)}</tbody></table>
+                  <table className="information-table"><thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead><tbody>{visibleSystemFields.map((field) => <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><LineListEditor ariaLabel={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(value) => updateRecordDetail(field.code, value)} placeholder="Nhập kết quả thu thập" /></td></tr>)}</tbody></table>
                 </section>}
 
                 {consultingSearchMatchesAudio && <section className="dynamic-information system-information audio-information">
@@ -2537,7 +2593,7 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
             <p className="drive-config-dialog__hint">Chỉ cần dán Web app URL. GM-CRM sẽ nhớ kết nối trên thiết bị này.</p>
-            <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Mở mã Google Apps Script ↗</a>
+            <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
@@ -2661,7 +2717,7 @@ export default function Home() {
                 <table className="information-table">
                   <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
                   <tbody>{systemFields.map((field) => (
-                    <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" /></td></tr>
+                    <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><LineListEditor ariaLabel={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(value) => updateRecordDetail(field.code, value)} placeholder="Nhập kết quả thu thập" /></td></tr>
                   ))}</tbody>
                 </table>
               </section>

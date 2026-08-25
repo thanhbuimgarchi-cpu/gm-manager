@@ -94,6 +94,13 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
+## Google Apps Script deployment
+
+The production Apps Script source is versioned in `apps-script/` and deployed
+to the existing Web App URL by GitHub Actions. See
+[`docs/APPS_SCRIPT_AUTO_DEPLOY.md`](docs/APPS_SCRIPT_AUTO_DEPLOY.md) for the
+one-time Google/GitHub authorization steps.
+
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)
