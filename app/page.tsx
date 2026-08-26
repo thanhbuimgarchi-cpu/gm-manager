@@ -291,21 +291,33 @@ function isAppsScriptUrl(value: string) {
 
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
-  const response = await fetch(config.scriptUrl, {
-    method: "POST",
-    cache: "no-store",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ ...payload, token: deployedAppsScriptCompatibilityToken }),
-    redirect: "follow",
-  });
-  const responseText = await response.text();
-  let result: T;
-  try {
-    result = JSON.parse(responseText) as T;
-  } catch {
-    throw new Error("Google Apps Script trả về dữ liệu không hợp lệ. Hãy triển khai lại Script.");
+  const body = JSON.stringify({ ...payload, token: deployedAppsScriptCompatibilityToken });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const requestUrl = new URL(config.scriptUrl);
+      requestUrl.searchParams.set("_gmcrm", `${Date.now()}-${attempt}`);
+      const response = await fetch(requestUrl, {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body,
+        redirect: "follow",
+      });
+      const responseText = await response.text();
+      try {
+        return { response, result: JSON.parse(responseText) as T };
+      } catch {
+        const isTemporaryGooglePage = /<!doctype html|<html|window\[['"]ppConfig['"]\]/i.test(responseText);
+        if (!isTemporaryGooglePage || attempt > 0) throw new Error("Google Apps Script đang khởi động lại. Hãy thử Nạp lại Drive sau vài giây.");
+      }
+    } catch (error) {
+      lastError = error;
+      if (attempt > 0) throw error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
   }
-  return { response, result };
+  throw lastError instanceof Error ? lastError : new Error("Không thể kết nối Google Apps Script.");
 }
 
 function bytesToBase64(bytes: Uint8Array) {
