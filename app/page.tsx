@@ -1548,7 +1548,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v7:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v8:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = documentCacheKey(snapshotId);
@@ -2403,7 +2403,7 @@ export default function Home() {
           const isActing = documentSnapshotActionId === snapshot.id;
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
             <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
-              <span><b>{snapshot.date}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
+              <span><b>Ngày: {snapshot.date || "Chưa xác định"}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
             </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"}>{snapshot.locked ? "🔒 Đã khóa" : "🔓 Khóa"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"}>Xóa</button></div></header>
             {expanded && <div className="document-day__content">
               {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
