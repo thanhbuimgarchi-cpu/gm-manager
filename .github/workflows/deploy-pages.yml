@@ -24,7 +24,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: node scripts/write-app-version.mjs
+        env:
+          VITE_APP_VERSION: ${{ github.sha }}
       - run: npm run build:github-pages
+        env:
+          VITE_APP_VERSION: ${{ github.sha }}
       - run: cp public/.nojekyll github-pages/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:

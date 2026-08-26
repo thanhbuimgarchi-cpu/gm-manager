@@ -17,6 +17,43 @@
   color: #6d513c;
 }
 
+.pwa-action--update {
+  border-color: #7a1f2b;
+  background: #7a1f2b;
+  color: #fff;
+}
+
+.pwa-action--update:hover {
+  border-color: #621722;
+  background: #621722;
+  color: #fff;
+}
+
+.workflow-files__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.workflow-upload-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #927359;
+  border-radius: 5px;
+  background: #fff;
+  color: #6d513c;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.workflow-upload-button:hover { background: #f8f5f0; }
+.workflow-upload-button--busy { cursor: wait; opacity: .62; }
+.workflow-upload-button input { display: none; }
+
 .brand--with-logo {
   display: inline-flex;
   align-items: center;

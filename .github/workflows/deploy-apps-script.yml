@@ -19,7 +19,7 @@ env:
   CLASP_VERSION: "3.3.0"
   # This is the deployment ID in the existing /macros/s/.../exec URL.
   # Updating this deployment keeps the current Web App URL unchanged.
-  APPS_SCRIPT_DEPLOYMENT_ID: "AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr"
+  APPS_SCRIPT_DEPLOYMENT_ID: "AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt"
 
 jobs:
   deploy:

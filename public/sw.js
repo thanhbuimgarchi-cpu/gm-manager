@@ -1,8 +1,8 @@
-const CACHE_NAME = "gm-crm-shell-v4";
+const CACHE_NAME = "gm-crm-shell-v5";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png", "./gm-logo-192.png", "./gm-logo-512.png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
 });
 
 self.addEventListener("activate", (event) => {
@@ -31,6 +31,10 @@ function notificationOptions(payload = {}) {
 }
 
 self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+    return;
+  }
   if (event.data?.type === "GM_CRM_NOTIFY") {
     self.registration.showNotification(event.data.title || "GM-CRM", notificationOptions(event.data));
   }

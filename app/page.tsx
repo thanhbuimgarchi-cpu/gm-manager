@@ -253,6 +253,7 @@ const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
 // Keep every browser upload below 1 MB. The hosting edge can reject larger
 // multipart bodies before the request reaches the application worker.
 const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
+const MAX_WORKFLOW_UPLOAD_BYTES = 12 * 1024 * 1024;
 const DRIVE_INDEX_CACHE_MS = 10 * 60 * 1000;
 const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
 const DRIVE_DETAIL_CACHE_MS = 4 * 60 * 1000;
@@ -272,8 +273,12 @@ const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // supplied automatically for compatibility, so users only ever enter the URL.
 const deployedAppsScriptCompatibilityToken = "010101";
 const defaultDriveSyncConfig: DriveSyncConfig = {
-  scriptUrl: "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
+  scriptUrl: "https://script.google.com/macros/s/AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt/exec",
 };
+const retiredDriveScriptUrls = new Set([
+  "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
+]);
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
   try {
@@ -1040,8 +1045,9 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
-  const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | null>(null);
+  const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
@@ -1056,6 +1062,7 @@ export default function Home() {
   const [workflowFilesByFolder, setWorkflowFilesByFolder] = useState<Record<string, WorkflowFile[]>>({});
   const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
   const [workflowFilesError, setWorkflowFilesError] = useState("");
+  const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
@@ -1071,6 +1078,7 @@ export default function Home() {
   const warrantySyncTimer = useRef<number | null>(null);
   const customerSearchTimer = useRef<number | null>(null);
   const driveRequestsInFlight = useRef(new Set<string>());
+  const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   useEffect(() => {
     const currentDate = getVietnamDate();
@@ -1092,7 +1100,9 @@ export default function Home() {
     if (savedConfig) {
       try {
         const config = JSON.parse(savedConfig) as Partial<DriveSyncConfig>;
-        setDriveScriptUrl(config.scriptUrl || defaultDriveSyncConfig.scriptUrl);
+        const nextUrl = !config.scriptUrl || retiredDriveScriptUrls.has(config.scriptUrl) ? defaultDriveSyncConfig.scriptUrl : config.scriptUrl;
+        setDriveScriptUrl(nextUrl);
+        if (nextUrl !== config.scriptUrl) window.localStorage.setItem(driveSyncConfigKey, JSON.stringify({ scriptUrl: nextUrl }));
         return;
       } catch {
         window.localStorage.removeItem(driveSyncConfigKey);
@@ -1123,7 +1133,45 @@ export default function Home() {
     };
     updateInstallState();
     if ("Notification" in window) setNotificationPermission(Notification.permission);
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => undefined);
+    let reloadingForWorker = false;
+    const markWorkerUpdate = () => {
+      setUpdateAvailable(true);
+      setNotice("GM-CRM có bản mới. Nhấn Cập nhật ngay để sử dụng.");
+    };
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then((registration) => {
+        serviceWorkerRegistration.current = registration;
+        if (registration.waiting && navigator.serviceWorker.controller) markWorkerUpdate();
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          worker?.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) markWorkerUpdate();
+          });
+        });
+        void registration.update();
+      }).catch(() => undefined);
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloadingForWorker) return;
+        reloadingForWorker = true;
+        window.location.reload();
+      });
+    }
+    const checkPublishedVersion = async () => {
+      try {
+        const response = await fetch(`${import.meta.env.BASE_URL}app-version.json?time=${Date.now()}`, { cache: "no-store" });
+        const published = await response.json() as { version?: string };
+        if (APP_VERSION !== "development" && published.version && published.version !== APP_VERSION) markWorkerUpdate();
+      } catch { /* Version checks are best effort while offline. */ }
+    };
+    const checkWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        void checkPublishedVersion();
+        void serviceWorkerRegistration.current?.update();
+      }
+    };
+    void checkPublishedVersion();
+    const versionTimer = window.setInterval(checkPublishedVersion, 10 * 60 * 1000);
+    document.addEventListener("visibilitychange", checkWhenVisible);
     window.addEventListener("beforeinstallprompt", captureInstallPrompt);
     window.addEventListener("appinstalled", markInstalled);
     standaloneQuery.addEventListener("change", updateInstallState);
@@ -1131,6 +1179,8 @@ export default function Home() {
       window.removeEventListener("beforeinstallprompt", captureInstallPrompt);
       window.removeEventListener("appinstalled", markInstalled);
       standaloneQuery.removeEventListener("change", updateInstallState);
+      document.removeEventListener("visibilitychange", checkWhenVisible);
+      window.clearInterval(versionTimer);
     };
   }, []);
 
@@ -1213,7 +1263,17 @@ export default function Home() {
       setMobileInstallHelp("ios");
       return;
     }
-    setMobileInstallHelp("android");
+    const isMobile = /android|mobile/i.test(navigator.userAgent);
+    setMobileInstallHelp(isMobile ? "android" : "desktop");
+  };
+
+  const updateGMCRM = () => {
+    const waitingWorker = serviceWorkerRegistration.current?.waiting;
+    if (waitingWorker) {
+      waitingWorker.postMessage({ type: "SKIP_WAITING" });
+      return;
+    }
+    window.location.reload();
   };
 
   const sendTestNotification = async () => {
@@ -1241,6 +1301,7 @@ export default function Home() {
   };
 
   const renderMobileAppActions = () => <>
+    {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật ngay</button>}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
   </>;
@@ -1387,6 +1448,45 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : "Không thể tạo thư mục mới.");
     } finally {
       setLoadingWorkflowFiles(false);
+    }
+  };
+
+  const uploadWorkflowFiles = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    if (!files.length || !selectedCustomerLocation || !driveScriptUrl.trim()) {
+      input.value = "";
+      return;
+    }
+    const oversized = files.find((file) => file.size > MAX_WORKFLOW_UPLOAD_BYTES);
+    if (oversized) {
+      setNotice(`${oversized.name} lớn hơn 12 MB. Hãy tải tệp lớn trực tiếp bằng Google Drive.`);
+      input.value = "";
+      return;
+    }
+    setUploadingWorkflowFiles(true);
+    setWorkflowFilesError("");
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setNotice(`Đang tải ${index + 1}/${files.length}: ${file.name}`);
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+          action: "upload-workflow-file",
+          year: selectedCustomerLocation.year,
+          month: selectedCustomerLocation.month,
+          projectId: selectedCustomerLocation.record.projectId,
+          workflow: activeFolder,
+          file: { fileName: file.name, mimeType: file.type || "application/octet-stream", data: bytesToBase64(new Uint8Array(await file.arrayBuffer())) },
+        });
+        if (!response.ok || !result.ok) throw new Error(result.error || `Không thể tải ${file.name} lên Drive.`);
+      }
+      await loadWorkflowFiles(activeFolder, true, true);
+      setNotice(`Đã tải ${files.length} tệp lên Drive.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể tải tệp lên Drive.");
+    } finally {
+      setUploadingWorkflowFiles(false);
+      input.value = "";
     }
   };
 
@@ -2191,11 +2291,15 @@ export default function Home() {
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
     return () => { cancelled = true; };
   }, [personnelView, driveScriptUrl]);
+  useEffect(() => {
+    if (!selectedCustomerProjectId || activeFolder === "Tài liệu" || !driveScriptUrl.trim()) return;
+    void loadWorkflowFiles(activeFolder, true);
+  }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
       <header className="workflow-files__heading">
-        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2></div><button type="button" onClick={() => void createWorkflowDateFolder()} disabled={loadingWorkflowFiles}><b>＋</b> Thư mục ngày</button>
+        <div><p className="eyebrow">{activeFolder}</p><h2>Tệp trong thư mục</h2></div><div className="workflow-files__actions"><label className={`workflow-upload-button ${uploadingWorkflowFiles ? "workflow-upload-button--busy" : ""}`}>{uploadingWorkflowFiles ? "Đang tải…" : "⇧ Tải tệp lên Drive"}<input type="file" multiple disabled={uploadingWorkflowFiles} onChange={(event) => void uploadWorkflowFiles(event)} /></label><button type="button" onClick={() => void createWorkflowDateFolder()} disabled={loadingWorkflowFiles || uploadingWorkflowFiles}><b>＋</b> Thư mục ngày</button></div>
       </header>
       <div className="workflow-files__list">
         {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
@@ -2569,6 +2673,7 @@ export default function Home() {
             </section>
           </section>
         )}
+        {activeFolder !== "Tài liệu" && selectedCustomerLocation && renderWorkflowFiles()}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       </section>
 
@@ -2602,11 +2707,11 @@ export default function Home() {
 
       {mobileInstallHelp && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileInstallHelp(null)}>
-          <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM lên điện thoại" onMouseDown={(event) => event.stopPropagation()}>
+          <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
-            <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : "Android"}</p><h2>Cài GM-CRM</h2>
-            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol>}
-            <p>Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng.</p>
+            <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
+            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
+            <p>{mobileInstallHelp === "desktop" ? "GM-CRM sẽ mở trong cửa sổ riêng và có biểu tượng ở Start/Desktop." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
           </section>
         </div>
       )}

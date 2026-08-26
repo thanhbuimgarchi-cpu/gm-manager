@@ -7,6 +7,9 @@
   "start_url": "/gm-manager/",
   "scope": "/gm-manager/",
   "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "prefer_related_applications": false,
+  "categories": ["business", "productivity"],
   "background_color": "#f7f7f1",
   "theme_color": "#1d1d1c",
   "icons": [

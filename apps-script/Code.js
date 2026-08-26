@@ -36,7 +36,6 @@ function doPost(event) {
         audioLock.releaseLock();
       }
     }
-    if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
@@ -45,6 +44,8 @@ function doPost(event) {
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
     try {
+      if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
+      if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
       if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
@@ -871,8 +872,18 @@ function exportXlsx_(spreadsheetId) {
 }
 
 function getOrCreateFolder_(parent, name) {
-  const matches = parent.getFoldersByName(name);
-  return matches.hasNext() ? matches.next() : parent.createFolder(name);
+  const matches = findFolders_(parent, name);
+  if (!matches.length) return parent.createFolder(name);
+  const primary = matches[0];
+  // Drive permits multiple children with the same name. Concurrent web
+  // requests used to create those duplicates; Drive for desktop renders them
+  // as "(1)", "(2)", ... . All mutating requests are now serialized, and an
+  // old duplicate is folded into the primary folder without losing its data.
+  matches.slice(1).forEach(function(duplicate) {
+    mergeFolderInto_(primary, duplicate);
+    duplicate.setTrashed(true);
+  });
+  return primary;
 }
 
 function listWorkflowFiles_(payload) {
@@ -975,6 +986,31 @@ function createWorkflowDateFolder_(payload) {
   const folder = getOrCreateFolder_(workflowFolder, folderName);
   CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
   return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
+}
+
+function uploadWorkflowFile_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const workflow = String(payload.workflow || "").trim();
+  const upload = payload.file || {};
+  const allowedWorkflows = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+  if (!year || month < 1 || month > 12 || !projectId || allowedWorkflows.indexOf(workflow) === -1) {
+    throw new Error("Thiếu thông tin thư mục tải tệp.");
+  }
+  if (typeof upload.data !== "string" || !upload.data) throw new Error("Tệp tải lên không có dữ liệu.");
+  const fileName = String(upload.fileName || "").replace(/[\\/]/g, "-").trim();
+  if (!fileName) throw new Error("Tên tệp không hợp lệ.");
+
+  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
+  const bytes = Utilities.base64Decode(upload.data);
+  if (bytes.length > 12 * 1024 * 1024) throw new Error("Mỗi tệp tải trực tiếp tối đa 12 MB.");
+  trashFilesByName_(workflowFolder, fileName);
+  const blob = Utilities.newBlob(bytes, String(upload.mimeType || "application/octet-stream"), fileName);
+  const file = workflowFolder.createFile(blob);
+  CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
+  return { ok: true, fileId: file.getId(), fileName: fileName, fileUrl: file.getUrl(), folderUrl: workflowFolder.getUrl() };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";
@@ -1548,9 +1584,57 @@ function findFileByPrefix_(folder, prefix) {
   return null;
 }
 
+function normalizeDriveName_(value) {
+  const raw = String(value || "").trim().replace(/\s+/g, " ");
+  try {
+    return raw.normalize("NFC").toLocaleLowerCase("vi");
+  } catch (error) {
+    return raw.toLowerCase();
+  }
+}
+
+function findFolders_(parent, name) {
+  const wanted = normalizeDriveName_(name);
+  const matches = [];
+  const folders = parent.getFolders();
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    if (normalizeDriveName_(folder.getName()) === wanted) matches.push(folder);
+  }
+  matches.sort(function(a, b) { return a.getDateCreated().getTime() - b.getDateCreated().getTime(); });
+  return matches;
+}
+
+function mergeFolderInto_(target, duplicate) {
+  const childFolders = duplicate.getFolders();
+  while (childFolders.hasNext()) {
+    const child = childFolders.next();
+    const existing = findFolder_(target, child.getName());
+    if (existing) {
+      mergeFolderInto_(existing, child);
+      child.setTrashed(true);
+    } else {
+      child.moveTo(target);
+    }
+  }
+  const files = duplicate.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    const existing = findFileByName_(target, file.getName());
+    if (!existing) {
+      file.moveTo(target);
+    } else if (file.getLastUpdated().getTime() > existing.getLastUpdated().getTime()) {
+      existing.setTrashed(true);
+      file.moveTo(target);
+    } else {
+      file.setTrashed(true);
+    }
+  }
+}
+
 function findFolder_(parent, name) {
-  const matches = parent.getFoldersByName(name);
-  return matches.hasNext() ? matches.next() : null;
+  const matches = findFolders_(parent, name);
+  return matches.length ? matches[0] : null;
 }
 
 function findFileByName_(folder, name) {
