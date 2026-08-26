@@ -37,6 +37,7 @@ function doPost(event) {
       }
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
+    if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
@@ -45,7 +46,6 @@ function doPost(event) {
     try {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
-      if (payload.action === "list-documents") return json_(listDocuments_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
       if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
