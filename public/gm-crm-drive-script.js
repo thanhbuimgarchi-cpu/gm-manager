@@ -923,17 +923,19 @@ function listWorkflowFiles_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   const workflow = String(payload.workflow || "").trim();
-  const allowedWorkflows = ["T\u01b0 v\u1ea5n", "Thi\u1ebft k\u1ebf", "D\u1ef1 to\u00e1n", "Thi c\u00f4ng", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh"];
+  const allowedWorkflows = ["Ghi chú", "T\u01b0 v\u1ea5n", "Thi\u1ebft k\u1ebf", "D\u1ef1 to\u00e1n", "Thi c\u00f4ng", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh"];
   if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c c\u1ea7n n\u1ea1p.");
 
   const cacheKey = "gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
   if (cached) return cached;
 
-  const customerFolder = getCustomerFolder_(year, month, projectId, false);
+  // Ghi chú was added after some existing projects were created. Opening it
+  // creates the standard folder once, so every project gains the same layout.
+  const customerFolder = getCustomerFolder_(year, month, projectId, workflow === "Ghi chú");
   if (!customerFolder) return { ok: true, files: [] };
   const workflowFolderCacheKey = "gmcrm-workflow-folder-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
-  const workflowFolder = getCachedFolder_(workflowFolderCacheKey) || findFolder_(customerFolder, workflow);
+  const workflowFolder = getCachedFolder_(workflowFolderCacheKey) || findFolder_(customerFolder, workflow) || (workflow === "Ghi chú" ? getOrCreateFolder_(customerFolder, workflow) : null);
   if (!workflowFolder) return { ok: true, files: [] };
   cacheFolder_(workflowFolderCacheKey, workflowFolder);
 
@@ -1010,7 +1012,7 @@ function createWorkflowDateFolder_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   const workflow = String(payload.workflow || "").trim();
-  const allowedWorkflows = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+  const allowedWorkflows = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
   if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thiếu thông tin thư mục cần tạo.");
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
@@ -1026,7 +1028,7 @@ function uploadWorkflowFile_(payload) {
   const projectId = String(payload.projectId || "").trim();
   const workflow = String(payload.workflow || "").trim();
   const upload = payload.file || {};
-  const allowedWorkflows = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
+  const allowedWorkflows = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
   if (!year || month < 1 || month > 12 || !projectId || allowedWorkflows.indexOf(workflow) === -1) {
     throw new Error("Thiếu thông tin thư mục tải tệp.");
   }
@@ -1256,12 +1258,15 @@ function listDocuments_(payload) {
       listDriveChildrenMetadata_(target.folder.getId()).forEach(function(item) {
         if (item.mimeType === "application/vnd.google-apps.folder") return;
         const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
+        const meta = normalizeDocumentMeta_(manifest.files[item.id], { getId: function() { return item.id; } }, "Chưa gắn");
         files.push({
           id: item.id,
           name: item.name,
           downloadUrl: item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id),
           updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
           mimeType: item.mimeType,
+          work: meta.work,
+          nature: meta.nature,
           updatedAtMillis: modified.getTime(),
         });
       });
@@ -1270,7 +1275,8 @@ function listDocuments_(payload) {
       while (iterator.hasNext()) {
         const file = iterator.next();
         const modified = file.getLastUpdated();
-        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: modified.getTime() });
+        const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
+        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, nature: meta.nature, updatedAtMillis: modified.getTime() });
       }
     }
   }
@@ -1347,31 +1353,16 @@ function updateDocumentMetadata_(payload) {
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
   const manifest = readDocumentManifest_(documentsFolder);
   const file = DriveApp.getFileById(fileId);
-  const customerFolder = getCustomerFolder_(year, month, projectId, true);
-  const sources = projectSourceFiles_(customerFolder);
-  const sourceKey = Object.keys(sources).filter(function(key) { return sources[key].file.getId() === fileId; })[0] || String((manifest.files[fileId] || {}).documentKey || fileId);
-  const source = sources[sourceKey];
-  const existing = manifest.files[fileId] || findDocumentMetaByKey_(manifest, sourceKey) || (source ? preferredDocumentMeta_(source.workflow, source.file) : null) || {};
-  const current = normalizeDocumentMeta_({ ...existing, documentKey: sourceKey, sourceId: fileId, assigned: true }, file, "Chưa gắn");
+  const snapshot = documentSnapshotForProject_(documentsFolder, projectId, requestedSnapshotId);
+  const existing = manifest.files[fileId] || {};
+  const current = normalizeDocumentMeta_({ ...existing, documentKey: fileId, sourceId: fileId, assigned: true }, file, "Chưa gắn");
   current.assigned = true;
   if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
   if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);
-  const isClassified = current.work !== "Chưa gắn" && current.nature !== "Chưa gắn";
-  if (isClassified && current.nature === "Theo ngày" && source) {
-    const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
-    const targetSnapshot = snapshots.filter(function(snapshot) { return snapshot.id === requestedSnapshotId; })[0] || snapshots[0] || { folder: documentsFolder.createFolder(documentSnapshotName_(projectId)) };
-    file.moveTo(targetSnapshot.folder);
-  }
-  if (isClassified && current.nature === "Xuyên suốt") {
-    const workflowFolder = getOrCreateFolder_(customerFolder, current.work);
-    if (!source || source.workflow !== current.work) file.moveTo(workflowFolder);
-    current.documentKey = "system:" + current.work + ":" + file.getName();
-  }
-  const keys = Object.keys(manifest.files || {});
-  keys.forEach(function(id) {
-    const value = manifest.files[id] || {};
-    if (String(value.documentKey || id) === current.documentKey) manifest.files[id] = { work: current.work, nature: current.nature, documentKey: current.documentKey, sourceId: current.sourceId, assigned: true };
-  });
+  const parents = file.getParents();
+  let belongsToSnapshot = false;
+  while (parents.hasNext()) if (parents.next().getId() === snapshot.id) belongsToSnapshot = true;
+  if (!belongsToSnapshot) throw new Error("Tệp không thuộc bản ngày đang chọn.");
   manifest.files[fileId] = current;
   writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
@@ -1516,7 +1507,7 @@ function cacheFolder_(key, folder) {
 
 function ensureProjectFolders_(customerFolder, createInitialDocumentSnapshot) {
   const consulting = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
-  ["Thi c\u00f4ng", "Thi\u1ebft k\u1ebf", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh", "D\u1ef1 to\u00e1n"].forEach(function(name) {
+  ["Ghi chú", "Thi c\u00f4ng", "Thi\u1ebft k\u1ebf", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh", "D\u1ef1 to\u00e1n"].forEach(function(name) {
     getOrCreateFolder_(customerFolder, name);
   });
   const dataFolder = getOrCreateFolder_(consulting, "DataID");

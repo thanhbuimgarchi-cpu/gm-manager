@@ -206,7 +206,11 @@ type DocumentFile = {
   downloadUrl: string;
   updatedAt: string;
   mimeType: string;
+  work: string;
+  nature: DocumentNature;
 };
+
+type DocumentNature = "Chưa gắn" | "Xuyên suốt" | "Theo ngày";
 
 type DocumentSnapshot = {
   id: string;
@@ -347,6 +351,7 @@ function browserAudioMimeType(file: File) {
 
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫" },
+  { label: "Ghi chú", icon: "✎" },
   { label: "Tư vấn", icon: "⌂" },
   { label: "Thiết kế", icon: "▣" },
   { label: "Dự toán", icon: "⌁" },
@@ -356,6 +361,9 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Tài liệu", icon: "▱" },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
+
+const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
+const documentNatureOptions: DocumentNature[] = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 
 
 const personnelCategories: PersonnelCategory[] = [
@@ -1584,7 +1592,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v10:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v11:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId?: string, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedSnapshotId = snapshotId || "";
@@ -1644,6 +1652,30 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
     } finally {
       setLoadingDocuments(false);
+    }
+  };
+
+  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work" | "nature">>) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim() || !selectedDocumentSnapshotId) return;
+    const before = documentFiles;
+    const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
+    setDocumentFiles(nextFiles);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "update-document-metadata",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+        snapshotId: selectedDocumentSnapshotId,
+        fileId,
+        work: patch.work,
+        nature: patch.nature,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật phân loại tệp.");
+      writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
+    } catch (error) {
+      setDocumentFiles(before);
+      setNotice(error instanceof Error ? error.message : "Không thể cập nhật phân loại tệp.");
     }
   };
 
@@ -2388,6 +2420,10 @@ export default function Home() {
     </section>
   );
   const renderDocumentLibrary = () => {
+    const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
+      title,
+      files: documentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
+    })).filter((group) => group.files.length);
     const toggleDocumentSnapshot = (snapshotId: string) => {
       if (expandedDocumentSnapshotId === snapshotId) {
         setExpandedDocumentSnapshotId("");
@@ -2414,7 +2450,7 @@ export default function Home() {
             {expanded && <div className="document-day__content">
               {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentFiles.length ? <div className="document-day__files">{documentFiles.map((file) => <a key={file.id} href={file.downloadUrl} download={file.name}><span><b>{file.name}</b><small>{file.updatedAt}</small></span><em>↓</em></a>)}</div> : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
