@@ -48,7 +48,7 @@ function bridgeDispatch(payload) {
   return JSON.parse(output.getContent());
 }
 
-function redeployLatest_(payload) {
+function redeployLatest(payload) {
   const deploymentLock = LockService.getScriptLock();
   deploymentLock.waitLock(30000);
   try {
@@ -85,7 +85,7 @@ function redeployLatest_(payload) {
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
-    if (payload.action === "redeploy-latest") return json_(redeployLatest_(payload));
+    if (payload.action === "redeploy-latest") return json_(redeployLatest(payload));
     if (payload.action === "audio-insight") return json_(transcribeAudio_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {
