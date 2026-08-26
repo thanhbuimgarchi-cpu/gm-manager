@@ -25,6 +25,27 @@
 
 .project-folder .house-id { color: #8c8982; font-size: 9px; }
 
+/* Customer gateway: keep the operational controls in one pinned row. */
+.customer-gateway { z-index: 30; }
+.customer-gateway__header { position: sticky; z-index: 20; top: 0; gap: 14px; }
+.customer-gateway__brand { flex: 0 0 auto; }
+.customer-gateway__actions { flex: 1 1 auto; min-width: 0; justify-content: flex-end; gap: 8px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; white-space: nowrap; }
+.customer-gateway__actions::-webkit-scrollbar { display: none; }
+.customer-gateway__actions > * { flex: 0 0 auto; }
+.customer-gateway__add { margin: -7px 0 12px auto; }
+.customer-context--back { display: inline-flex; align-items: center; max-width: none; padding: 8px 10px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.topbar { justify-content: space-between; }
+
+@media (max-width: 620px) {
+  .customer-gateway__header { gap: 8px; padding: 0 12px; }
+  .customer-gateway__brand img { width: 28px; height: 28px; }
+  .customer-gateway__actions { justify-content: flex-start; gap: 5px; }
+  .customer-gateway__actions .pwa-action, .customer-gateway__actions .reload-drive { min-height: 30px; padding: 0 7px; font-size: 9px; }
+  .customer-gateway__actions .drive-status { gap: 4px; font-size: 9px; }
+  .customer-gateway__actions .drive-status i { width: 6px; height: 6px; }
+  .customer-gateway__actions .reload-drive { display: inline-flex; }
+}
+
 .workflow-files { margin: 16px 38px 0; overflow: hidden; border: 1px solid #e1e0da; border-radius: 10px; background: #fff; }.consulting-view .workflow-files { margin: 0 0 18px; }.workflow-files__heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #ecebe6; }.workflow-files__heading h2 { margin: 0; font-size: 14px; letter-spacing: -.2px; }.workflow-files__heading span { display: block; max-width: 520px; margin-top: 4px; color: #8e8a83; font-size: 9px; line-height: 1.45; }.workflow-files__heading button { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 1px solid #d8d6d0; border-radius: 5px; background: #fbfbfa; color: #5d5952; font-size: 10px; }.workflow-files__heading button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }.workflow-files__heading button:disabled { cursor: wait; opacity: .62; }.workflow-files__list { display: grid; }.workflow-file { display: grid; grid-template-columns: 31px minmax(0, 1fr) 18px; gap: 10px; align-items: center; min-height: 56px; padding: 9px 15px; border-bottom: 1px solid #efeee9; color: #34312d; text-decoration: none; }.workflow-file:last-child { border-bottom: 0; }.workflow-file:hover { background: #f8f5f0; }.workflow-file__icon { display: grid; width: 29px; height: 29px; place-items: center; border-radius: 5px; background: #eee4d9; color: #805f43; font-size: 14px; }.workflow-file b, .workflow-file small { display: block; overflow-wrap: anywhere; }.workflow-file b { font-size: 11px; }.workflow-file small { margin-top: 4px; color: #89857e; font-size: 9px; }.workflow-file em { color: #9a8774; font-size: 14px; font-style: normal; }.workflow-files__empty { margin: 0; padding: 24px 16px; color: #8e8a83; font-size: 10px; text-align: center; }
 
 @media (max-width: 620px) { .workflow-files { margin-right: 14px; margin-left: 14px; }.consulting-view .workflow-files { margin-right: 0; margin-left: 0; }.workflow-files__heading { align-items: flex-start; flex-direction: column; }.workflow-files__heading button { align-self: flex-end; } }
