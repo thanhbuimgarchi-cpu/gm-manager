@@ -269,6 +269,9 @@ const DRIVE_PROGRESS_CACHE_MS = 30 * 60 * 1000;
 // background when it is older than fifteen minutes.
 const DRIVE_FILE_LIST_FRESH_MS = 15 * 60 * 1000;
 const DRIVE_FILE_LIST_CACHE_MS = 24 * 60 * 60 * 1000;
+// Tài liệu ngày cũ chỉ là metadata (tên, ngày và phân loại tệp), nên giữ lâu
+// trên thiết bị. Người dùng chủ động bấm biểu tượng cập nhật khi Drive đổi.
+const DRIVE_DOCUMENT_CACHE_MS = 365 * 24 * 60 * 60 * 1000;
 const DRIVE_DOCUMENT_METADATA_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const driveCachePrefix = "gm-manager-drive-cache-v1:";
 const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
@@ -1700,8 +1703,7 @@ export default function Home() {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedSnapshotId = snapshotId || "";
     const cacheKey = documentCacheKey(requestedSnapshotId);
-    const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
-    const fresh = isDriveCacheFresh(cacheKey, DRIVE_FILE_LIST_FRESH_MS);
+    const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
       setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, requestedSnapshotId || cached.activeSnapshotId));
@@ -1709,8 +1711,8 @@ export default function Home() {
       setSelectedDocumentSnapshotId(activeId);
       setLoadedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
+      return;
     }
-    if (fresh && !refresh) return;
     setLoadingDocuments(true);
     setDocumentsError("");
     try {
@@ -1733,7 +1735,9 @@ export default function Home() {
       setLoadedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
     } catch (error) {
-      if (!cached) setDocumentsError(error instanceof Error ? error.message : "Không thể nạp Tài liệu.");
+      const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
+      if (!cached) setDocumentsError(message);
+      if (refresh) setNotice(message);
     } finally {
       setLoadingDocuments(false);
     }
@@ -1755,7 +1759,7 @@ export default function Home() {
       setExpandedDocumentSnapshotId(result.snapshot.id);
       setDocumentSnapshots(nextSnapshots);
       if (result.alreadyExists) {
-        const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(result.snapshot.id), DRIVE_FILE_LIST_CACHE_MS);
+        const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(result.snapshot.id), DRIVE_DOCUMENT_CACHE_MS);
         if (cached) {
           setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, result.snapshot.id));
           setLoadedDocumentSnapshotId(result.snapshot.id);
@@ -1858,7 +1862,7 @@ export default function Home() {
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa bản ngày.");
       const nextSnapshots = documentSnapshots.filter((item) => item.id !== snapshot.id);
       const nextSelectedId = selectedDocumentSnapshotId === snapshot.id ? (nextSnapshots[0]?.id ?? "") : selectedDocumentSnapshotId;
-      const nextCached = nextSelectedId ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(nextSelectedId), DRIVE_FILE_LIST_CACHE_MS) : null;
+      const nextCached = nextSelectedId ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(nextSelectedId), DRIVE_DOCUMENT_CACHE_MS) : null;
       const nextFiles = nextCached ? mergeDocumentMetadataOverrides(nextCached.files, nextSelectedId) : [];
       removeDriveCache(documentCacheKey(snapshot.id));
       removeDriveCache(documentMetadataOverrideKey(snapshot.id));
@@ -2568,7 +2572,7 @@ export default function Home() {
       setExpandedDocumentSnapshotId(snapshotId);
       setSelectedDocumentSnapshotId(snapshotId);
       setDocumentsError("");
-      const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_FILE_LIST_CACHE_MS);
+      const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_DOCUMENT_CACHE_MS);
       if (cached) {
         setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, snapshotId));
         setLoadedDocumentSnapshotId(snapshotId);
@@ -2576,6 +2580,12 @@ export default function Home() {
         setDocumentFiles([]);
         setLoadedDocumentSnapshotId("");
       }
+    };
+    const refreshDocumentSnapshot = (snapshotId: string) => {
+      setExpandedDocumentSnapshotId(snapshotId);
+      setSelectedDocumentSnapshotId(snapshotId);
+      setDocumentsError("");
+      void loadDocuments(snapshotId, true);
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
@@ -2590,7 +2600,7 @@ export default function Home() {
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
             <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
               <span><b>Ngày: {snapshot.date || "Chưa xác định"}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
-            </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"} aria-label={snapshot.locked ? `Mở khóa ngày ${snapshot.date}` : `Khóa ngày ${snapshot.date}`}>{snapshot.locked ? "🔒" : "🔓"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"} aria-label={`Xóa ngày ${snapshot.date}`}>🗑</button></div></header>
+            </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing || loadingDocuments} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"} aria-label={snapshot.locked ? `Mở khóa ngày ${snapshot.date}` : `Khóa ngày ${snapshot.date}`}>{snapshot.locked ? "🔒" : "🔓"}</button><button type="button" className="document-day__refresh" onClick={() => refreshDocumentSnapshot(snapshot.id)} disabled={isActing || loadingDocuments} title="Cập nhật tệp từ Drive" aria-label={`Cập nhật ngày ${snapshot.date}`}>{loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? "…" : "↻"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing || loadingDocuments} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"} aria-label={`Xóa ngày ${snapshot.date}`}>🗑</button></div></header>
             {expanded && <div className="document-day__content">
               {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
@@ -2712,7 +2722,7 @@ export default function Home() {
           <header className="customer-gateway__header">
             <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM-manager" /><span className="brand__wordmark">GM-manager</span></div>
             <div className="customer-gateway__actions">
-              {renderMobileAppActions()}
+              {!personnelView && renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
               <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
               {!personnelView && <button className="add-button" onClick={openAddDialog}><span>＋</span> Add customer</button>}
@@ -2814,7 +2824,7 @@ export default function Home() {
             <span className="customer-context__back">←</span>
             <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
           </button>
-          <div className="topbar__actions">{renderMobileAppActions()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (
