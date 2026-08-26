@@ -1097,6 +1097,7 @@ export default function Home() {
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
+  const [loadedDocumentSnapshotId, setLoadedDocumentSnapshotId] = useState("");
   const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [documentSnapshotActionId, setDocumentSnapshotActionId] = useState<string | null>(null);
@@ -1251,6 +1252,7 @@ export default function Home() {
     setDocumentSnapshots([]);
     setSelectedDocumentSnapshotId("");
     setExpandedDocumentSnapshotId("");
+    setLoadedDocumentSnapshotId("");
     setDocumentFiles([]);
     setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
@@ -1269,6 +1271,7 @@ export default function Home() {
     setDocumentSnapshots([]);
     setSelectedDocumentSnapshotId("");
     setExpandedDocumentSnapshotId("");
+    setLoadedDocumentSnapshotId("");
     setDocumentFiles([]);
     setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
@@ -1619,10 +1622,11 @@ export default function Home() {
       setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, requestedSnapshotId || cached.activeSnapshotId));
       const activeId = requestedSnapshotId || cached.activeSnapshotId;
       setSelectedDocumentSnapshotId(activeId);
+      setLoadedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
     }
     if (fresh && !refresh) return;
-    setLoadingDocuments(!cached);
+    setLoadingDocuments(true);
     setDocumentsError("");
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
@@ -1637,9 +1641,11 @@ export default function Home() {
       const activeId = requestedSnapshotId || result.activeSnapshotId || "";
       const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
       writeDriveCache(cacheKey, next);
+      if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
       setDocumentSnapshots(next.snapshots);
       setDocumentFiles(next.files);
       setSelectedDocumentSnapshotId(activeId);
+      setLoadedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
     } catch (error) {
       if (!cached) setDocumentsError(error instanceof Error ? error.message : "Không thể nạp Tài liệu.");
@@ -1664,11 +1670,19 @@ export default function Home() {
       setExpandedDocumentSnapshotId(result.snapshot.id);
       setDocumentSnapshots(nextSnapshots);
       if (result.alreadyExists) {
-        void loadDocuments(result.snapshot.id);
+        const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(result.snapshot.id), DRIVE_FILE_LIST_CACHE_MS);
+        if (cached) {
+          setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, result.snapshot.id));
+          setLoadedDocumentSnapshotId(result.snapshot.id);
+        } else {
+          setDocumentFiles([]);
+          setLoadedDocumentSnapshotId("");
+        }
         setNotice(`Bản ngày ${result.snapshot.date} đã có.`);
       } else {
         const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: [] as DocumentFile[] };
         setDocumentFiles([]);
+        setLoadedDocumentSnapshotId(result.snapshot.id);
         writeDriveCache(documentCacheKey(result.snapshot.id), next);
         writeDriveCache(documentCacheKey(""), next);
         setNotice(`Đã tạo bản ngày ${result.snapshot.date}.`);
@@ -1762,8 +1776,8 @@ export default function Home() {
       setDocumentSnapshots(nextSnapshots);
       setSelectedDocumentSnapshotId(nextSelectedId);
       setDocumentFiles([]);
+      setLoadedDocumentSnapshotId("");
       if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId(nextSelectedId);
-      await loadDocuments(nextSelectedId, true);
       setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");
@@ -2461,7 +2475,15 @@ export default function Home() {
       }
       setExpandedDocumentSnapshotId(snapshotId);
       setSelectedDocumentSnapshotId(snapshotId);
-      void loadDocuments(snapshotId);
+      setDocumentsError("");
+      const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_FILE_LIST_CACHE_MS);
+      if (cached) {
+        setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, snapshotId));
+        setLoadedDocumentSnapshotId(snapshotId);
+      } else {
+        setDocumentFiles([]);
+        setLoadedDocumentSnapshotId("");
+      }
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
@@ -2471,14 +2493,15 @@ export default function Home() {
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
           const expanded = expandedDocumentSnapshotId === snapshot.id;
-          const contentReady = selectedDocumentSnapshotId === snapshot.id;
+          const contentReady = loadedDocumentSnapshotId === snapshot.id;
           const isActing = documentSnapshotActionId === snapshot.id;
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
             <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
               <span><b>Ngày: {snapshot.date || "Chưa xác định"}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
             </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"} aria-label={snapshot.locked ? `Mở khóa ngày ${snapshot.date}` : `Khóa ngày ${snapshot.date}`}>{snapshot.locked ? "🔒" : "🔓"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"} aria-label={`Xóa ngày ${snapshot.date}`}>🗑</button></div></header>
             {expanded && <div className="document-day__content">
-              {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
+              {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
+                : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
                   : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
