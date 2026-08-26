@@ -219,6 +219,13 @@ type DocumentSnapshot = {
   locked?: boolean;
 };
 
+type ThreeDLibraryFolder = {
+  key: "architecture" | "interior";
+  name: "Kiến trúc" | "Nội thất";
+  folderUrl: string;
+  files: WorkflowFile[];
+};
+
 type PersonnelCategory = {
   id: string;
   label: string;
@@ -1197,6 +1204,8 @@ export default function Home() {
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [documentSnapshotActionId, setDocumentSnapshotActionId] = useState<string | null>(null);
   const [documentsError, setDocumentsError] = useState("");
+  const [threeDLibrary, setThreeDLibrary] = useState<{ rootUrl: string; folders: ThreeDLibraryFolder[] }>({ rootUrl: "", folders: [] });
+  const [loadingThreeDLibrary, setLoadingThreeDLibrary] = useState(false);
   const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
@@ -1747,7 +1756,7 @@ export default function Home() {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     setLoadingDocuments(true);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; alreadyExists?: boolean }>({ scriptUrl: driveScriptUrl.trim() }, {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; alreadyExists?: boolean; copiedCount?: number; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "create-document-snapshot",
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
@@ -1769,17 +1778,49 @@ export default function Home() {
         }
         setNotice(`Bản ngày ${result.snapshot.date} đã có.`);
       } else {
-        const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: [] as DocumentFile[] };
-        setDocumentFiles([]);
+        const copiedFiles = mergeDocumentMetadataOverrides(result.files ?? [], result.snapshot.id);
+        const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: copiedFiles };
+        setDocumentFiles(copiedFiles);
         setLoadedDocumentSnapshotId(result.snapshot.id);
         writeDriveCache(documentCacheKey(result.snapshot.id), next);
         writeDriveCache(documentCacheKey(""), next);
-        setNotice(`Đã tạo bản ngày ${result.snapshot.date}.`);
+        setNotice(result.copiedCount ? `Đã tạo bản ngày ${result.snapshot.date} và sao chép ${result.copiedCount} tệp từ ngày gần nhất.` : `Đã tạo bản ngày ${result.snapshot.date}.`);
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
     } finally {
       setLoadingDocuments(false);
+    }
+  };
+
+  const threeDCacheKey = (location = selectedCustomerLocation) => location ? `three-d-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
+  const loadThreeDLibrary = async (refresh = false) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const cacheKey = threeDCacheKey();
+    const cached = readDriveCache<{ rootUrl: string; folders: ThreeDLibraryFolder[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
+    if (cached && !refresh) {
+      setThreeDLibrary(cached);
+      return;
+    }
+    if (driveRequestsInFlight.current.has(cacheKey)) return;
+    driveRequestsInFlight.current.add(cacheKey);
+    setLoadingThreeDLibrary(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; rootUrl?: string; folders?: ThreeDLibraryFolder[] }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "list-3d-files",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+      });
+      if (!response.ok || !result.ok || !result.rootUrl || !result.folders) throw new Error(result.error || "Không thể nạp thư mục 3D.");
+      const next = { rootUrl: result.rootUrl, folders: result.folders };
+      writeDriveCache(cacheKey, next);
+      setThreeDLibrary(next);
+    } catch (error) {
+      if (refresh) setNotice(error instanceof Error ? error.message : "Không thể cập nhật thư mục 3D.");
+    } finally {
+      driveRequestsInFlight.current.delete(cacheKey);
+      setLoadingThreeDLibrary(false);
     }
   };
 
@@ -1882,7 +1923,10 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments();
+    if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
+      void loadDocuments();
+      void loadThreeDLibrary();
+    }
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
   useEffect(() => {
@@ -2610,6 +2654,15 @@ export default function Home() {
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
       </div>
+      <section className="three-d-library" aria-label="Thư mục 3D">
+        <header className="three-d-library__heading"><div><p className="eyebrow">3D</p><h2>Thư mục 3D</h2><p>Không lưu theo ngày. Tệp được đặt riêng trong Kiến trúc hoặc Nội thất.</p></div><div>{threeDLibrary.rootUrl && <a href={threeDLibrary.rootUrl} target="_blank" rel="noreferrer" className="three-d-library__open">Mở 3D ↗</a>}<button type="button" className="document-library__refresh" onClick={() => void loadThreeDLibrary(true)} disabled={loadingThreeDLibrary} title="Cập nhật 3D từ Drive" aria-label="Cập nhật thư mục 3D">{loadingThreeDLibrary ? "…" : "↻"}</button></div></header>
+        <div className="three-d-library__grid">
+          {(threeDLibrary.folders.length ? threeDLibrary.folders : ([{ key: "architecture", name: "Kiến trúc", folderUrl: "", files: [] }, { key: "interior", name: "Nội thất", folderUrl: "", files: [] }] as ThreeDLibraryFolder[])).map((folder) => <section className="three-d-library__folder" key={folder.key}>
+            <header><span>▧</span><h3>{folder.name}</h3>{folder.folderUrl && <a href={folder.folderUrl} target="_blank" rel="noreferrer" aria-label={`Mở thư mục 3D ${folder.name}`} title="Mở thư mục trên Drive">↗</a>}</header>
+            {loadingThreeDLibrary && !threeDLibrary.folders.length ? <p>Đang chuẩn bị thư mục…</p> : folder.files.length ? <ul>{folder.files.map((file) => <li key={file.id}><a href={file.downloadUrl} download={file.name}>{file.name}</a><small>{file.updatedAt}</small></li>)}</ul> : <p>Chưa có tệp.</p>}
+          </section>)}
+        </div>
+      </section>
     </section>;
   };
   const renderWorkflowCustomerSearch = () => (

@@ -118,10 +118,11 @@ function doPost(event) {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
-      if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
-      if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
-      if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
-      if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
+    if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
+    if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
+    if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
+    if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
+    if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -1224,6 +1225,35 @@ function documentsFolderForProject_(year, month, projectId, createMissing) {
   return createMissing ? getOrCreateFolder_(customerFolder, DOCUMENTS_FOLDER_NAME) : null;
 }
 
+const THREE_D_FOLDER_NAME = "3D";
+const THREE_D_CATEGORIES = [
+  { key: "architecture", name: "Kiến trúc" },
+  { key: "interior", name: "Nội thất" },
+];
+
+function ensureThreeDFolders_(customerFolder) {
+  const root = getOrCreateFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  return {
+    root: root,
+    folders: THREE_D_CATEGORIES.map(function(category) {
+      return { key: category.key, name: category.name, folder: getOrCreateFolder_(root, category.name) };
+    }),
+  };
+}
+
+function threeDFoldersForProject_(year, month, projectId, createMissing) {
+  const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  if (!customerFolder) return null;
+  if (createMissing) return ensureThreeDFolders_(customerFolder);
+  const root = createMissing ? getOrCreateFolder_(customerFolder, THREE_D_FOLDER_NAME) : findFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  if (!root) return null;
+  const folders = THREE_D_CATEGORIES.map(function(category) {
+    const folder = createMissing ? getOrCreateFolder_(root, category.name) : findFolder_(root, category.name);
+    return { key: category.key, name: category.name, folder: folder };
+  });
+  return { root: root, folders: folders };
+}
+
 function documentCachePrefix_(year, month, projectId) {
   return "gmcrm-documents-" + year + "-" + month + "-" + projectId;
 }
@@ -1364,6 +1394,74 @@ function listDocuments_(payload) {
   return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date, locked: !!((manifest.snapshots || {})[snapshot.id] || {}).locked }; }), activeSnapshotId: target ? target.id : "", files: files };
 }
 
+function listThreeDFolderFiles_(folder) {
+  if (!folder) return [];
+  const files = [];
+  try {
+    listDriveChildrenMetadata_(folder.getId()).forEach(function(item) {
+      if (item.mimeType === "application/vnd.google-apps.folder" || isHiddenDocumentFile_(item.name)) return;
+      const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
+      files.push({
+        id: item.id,
+        name: item.name,
+        downloadUrl: item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id),
+        updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+        mimeType: item.mimeType,
+        updatedAtMillis: modified.getTime(),
+      });
+    });
+  } catch (error) {
+    const iterator = folder.getFiles();
+    while (iterator.hasNext()) {
+      const file = iterator.next();
+      if (isHiddenDocumentFile_(file.getName())) continue;
+      const modified = file.getLastUpdated();
+      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: modified.getTime() });
+    }
+  }
+  files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis || a.name.localeCompare(b.name); });
+  return files.map(function(file) { return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType }; });
+}
+
+function list3DFiles_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin thư mục 3D.");
+  const structure = threeDFoldersForProject_(year, month, projectId, true);
+  return {
+    ok: true,
+    rootUrl: structure.root.getUrl(),
+    folders: structure.folders.map(function(item) {
+      return { key: item.key, name: item.name, folderUrl: item.folder.getUrl(), files: listThreeDFolderFiles_(item.folder) };
+    }),
+  };
+}
+
+function copyNearestDocumentSnapshotFiles_(documentsFolder, sourceSnapshot, targetFolder, manifest) {
+  if (!sourceSnapshot) return [];
+  const copies = [];
+  const sourceFiles = sourceSnapshot.folder.getFiles();
+  while (sourceFiles.hasNext()) {
+    const sourceFile = sourceFiles.next();
+    if (isHiddenDocumentFile_(sourceFile.getName())) continue;
+    const sourceMeta = normalizeDocumentMeta_(manifest.files[sourceFile.getId()], sourceFile, "Chưa gắn");
+    const copiedFile = sourceFile.makeCopy(sourceFile.getName(), targetFolder);
+    const copiedMeta = {
+      // A new day inherits the workflow assignment only. Its nature must be
+      // chosen again because "Theo ngày" and "Xuyên suốt" describe the new copy.
+      work: sourceMeta.work,
+      nature: "Chưa gắn",
+      documentKey: "snapshot-copy:" + targetFolder.getId() + ":" + sourceFile.getId(),
+      sourceId: sourceMeta.sourceId || sourceFile.getId(),
+      assigned: sourceMeta.work !== "Chưa gắn",
+    };
+    manifest.files[copiedFile.getId()] = copiedMeta;
+    copies.push(documentFileOutput_(copiedFile, copiedMeta));
+  }
+  return copies;
+}
+
 function createDocumentSnapshot_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
@@ -1375,8 +1473,11 @@ function createDocumentSnapshot_(payload) {
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
   if (sameDay) return { ok: true, alreadyExists: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date, locked: !!((readDocumentManifest_(documentsFolder).snapshots || {})[sameDay.id] || {}).locked } };
   const targetFolder = documentsFolder.createFolder(todayName);
+  const manifest = readDocumentManifest_(documentsFolder);
+  const copiedFiles = copyNearestDocumentSnapshotFiles_(documentsFolder, snapshots[0], targetFolder, manifest);
+  if (copiedFiles.length) writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
-  return { ok: true, alreadyExists: false, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: false } };
+  return { ok: true, alreadyExists: false, copiedCount: copiedFiles.length, files: copiedFiles, snapshot: { id: targetFolder.getId(), name: todayName, date: documentSnapshotDate_(todayName), locked: false } };
 }
 
 function documentSnapshotForProject_(documentsFolder, projectId, snapshotId) {
@@ -1606,6 +1707,7 @@ function ensureProjectFolders_(customerFolder, createInitialDocumentSnapshot) {
     }
   }
   if (createInitialDocumentSnapshot && !listDocumentSnapshots_(documentsFolder, customerFolder.getName()).length) documentsFolder.createFolder(documentSnapshotName_(customerFolder.getName()));
+  ensureThreeDFolders_(customerFolder);
 }
 
 function getAudioFolder_(year, month, projectId, createMissing) {
