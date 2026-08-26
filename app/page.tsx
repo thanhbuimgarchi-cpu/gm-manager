@@ -200,16 +200,12 @@ type WorkflowFile = {
   isFolder?: boolean;
 };
 
-type DocumentNature = "Chưa gắn" | "Xuyên suốt" | "Theo ngày";
-
 type DocumentFile = {
   id: string;
   name: string;
   downloadUrl: string;
   updatedAt: string;
   mimeType: string;
-  work: string;
-  nature: DocumentNature;
 };
 
 type DocumentSnapshot = {
@@ -361,8 +357,6 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
 
-const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
-const documentNatureOptions: DocumentNature[] = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 
 const personnelCategories: PersonnelCategory[] = [
   { id: "management", label: "Ban quản lý", icon: "♛", description: "Ban giám đốc và đội ngũ quản lý GM" },
@@ -1590,7 +1584,7 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v9:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v10:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const loadDocuments = async (snapshotId?: string, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedSnapshotId = snapshotId || "";
@@ -1633,14 +1627,9 @@ export default function Home() {
 
   const createDocumentSnapshot = async () => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    const hasClassifiedFile = documentFiles.some((file) => file.work !== "Chưa gắn" && file.nature !== "Chưa gắn");
-    if (!hasClassifiedFile) {
-      setNotice("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới.");
-      return;
-    }
     setLoadingDocuments(true);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; copiedCount?: number }>({ scriptUrl: driveScriptUrl.trim() }, {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; alreadyExists?: boolean }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "create-document-snapshot",
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
@@ -1650,35 +1639,11 @@ export default function Home() {
       setSelectedDocumentSnapshotId(result.snapshot.id);
       setExpandedDocumentSnapshotId(result.snapshot.id);
       await loadDocuments(result.snapshot.id, true);
-      setNotice(`Đã tạo ${result.snapshot.name}; sao lưu ${result.copiedCount ?? 0} tệp Theo ngày.`);
+      setNotice(result.alreadyExists ? `Bản ngày ${result.snapshot.date} đã có.` : `Đã tạo bản ngày ${result.snapshot.date}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
     } finally {
       setLoadingDocuments(false);
-    }
-  };
-
-  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work" | "nature">>) => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    const before = documentFiles;
-    const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
-    setDocumentFiles(nextFiles);
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "update-document-metadata",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        fileId,
-        snapshotId: selectedDocumentSnapshotId,
-        work: patch.work,
-        nature: patch.nature,
-      });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật tệp.");
-      writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
-    } catch (error) {
-      setDocumentFiles(before);
-      setNotice(error instanceof Error ? error.message : "Không thể cập nhật tệp.");
     }
   };
 
@@ -1735,8 +1700,7 @@ export default function Home() {
       setDocumentSnapshots(nextSnapshots);
       setSelectedDocumentSnapshotId(nextSelectedId);
       setDocumentFiles([]);
-      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
-      writeDriveCache(documentCacheKey(), { snapshots: nextSnapshots, activeSnapshotId: nextSelectedId, files: documentFiles });
+      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId(nextSelectedId);
       await loadDocuments(nextSelectedId, true);
       setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
     } catch (error) {
@@ -1747,7 +1711,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments(undefined, true);
+    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments();
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
   useEffect(() => {
@@ -2424,11 +2388,6 @@ export default function Home() {
     </section>
   );
   const renderDocumentLibrary = () => {
-    const canCreateDocumentSnapshot = documentFiles.some((file) => file.work !== "Chưa gắn" && file.nature !== "Chưa gắn");
-    const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
-      title,
-      files: documentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
-    })).filter((group) => group.files.length);
     const toggleDocumentSnapshot = (snapshotId: string) => {
       if (expandedDocumentSnapshotId === snapshotId) {
         setExpandedDocumentSnapshotId("");
@@ -2440,8 +2399,8 @@ export default function Home() {
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Ngày mới được nạp tự động từ Drive. Phiếu và tiến độ hệ thống luôn là <b>Xuyên suốt</b>; chỉ tệp Theo ngày mới được sao lưu vào bản ngày mới.</p></div>
-        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true)} disabled={loadingDocuments}>↻ Nạp ngày từ Drive</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments || !canCreateDocumentSnapshot} title={canCreateDocumentSnapshot ? "Tạo bản ngày mới" : "Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước"}><span>＋</span> Bản ngày mới</button></div>
+        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; mỗi ngày chỉ có một bản.</p></div>
+        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
@@ -2451,11 +2410,11 @@ export default function Home() {
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
             <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
               <span><b>Ngày: {snapshot.date || "Chưa xác định"}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
-            </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"}>{snapshot.locked ? "🔒 Đã khóa" : "🔓 Khóa"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"}>Xóa</button></div></header>
+            </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"} aria-label={snapshot.locked ? `Mở khóa ngày ${snapshot.date}` : `Khóa ngày ${snapshot.date}`}>{snapshot.locked ? "🔒" : "🔓"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"} aria-label={`Xóa ngày ${snapshot.date}`}>🗑</button></div></header>
             {expanded && <div className="document-day__content">
               {loadingDocuments || !contentReady ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên file</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản Tài liệu này.</p>}
+                  : documentFiles.length ? <div className="document-day__files">{documentFiles.map((file) => <a key={file.id} href={file.downloadUrl} download={file.name}><span><b>{file.name}</b><small>{file.updatedAt}</small></span><em>↓</em></a>)}</div> : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
