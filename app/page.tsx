@@ -1613,7 +1613,9 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v12:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  // v13 intentionally starts with a clean document index. Earlier versions
+  // could retain a deleted day in local cache after a background refresh.
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v13:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
   const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v1:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
   const mergeDocumentMetadataOverrides = (files: DocumentFile[], snapshotId: string, location = selectedCustomerLocation) => {
     const cacheKey = documentMetadataOverrideKey(snapshotId, location);
