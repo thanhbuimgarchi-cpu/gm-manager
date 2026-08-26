@@ -931,8 +931,8 @@ function listWorkflowFiles_(payload) {
   if (cached) return cached;
 
   // Ghi chú was added after some existing projects were created. Opening it
-  // creates the standard folder once, so every project gains the same layout.
-  const customerFolder = getCustomerFolder_(year, month, projectId, workflow === "Ghi chú");
+  // creates just that missing folder, without rechecking every project folder.
+  const customerFolder = getCustomerFolder_(year, month, projectId, false);
   if (!customerFolder) return { ok: true, files: [] };
   const workflowFolderCacheKey = "gmcrm-workflow-folder-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
   const workflowFolder = getCachedFolder_(workflowFolderCacheKey) || findFolder_(customerFolder, workflow) || (workflow === "Ghi chú" ? getOrCreateFolder_(customerFolder, workflow) : null);
