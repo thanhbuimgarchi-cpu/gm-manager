@@ -260,15 +260,16 @@ const AUDIO_OUTPUT_SAMPLE_RATE = 16_000;
 // multipart bodies before the request reaches the application worker.
 const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
 const MAX_WORKFLOW_UPLOAD_BYTES = 12 * 1024 * 1024;
-const DRIVE_INDEX_CACHE_MS = 10 * 60 * 1000;
+const DRIVE_INDEX_CACHE_MS = 15 * 60 * 1000;
 const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
 const DRIVE_DETAIL_CACHE_MS = 30 * 60 * 1000;
 const DRIVE_PROGRESS_CACHE_MS = 30 * 60 * 1000;
 // File metadata changes much less often than customer forms. Keep the latest
 // successful list for instant rendering, then refresh it quietly in the
-// background when it is older than five minutes.
-const DRIVE_FILE_LIST_FRESH_MS = 5 * 60 * 1000;
+// background when it is older than fifteen minutes.
+const DRIVE_FILE_LIST_FRESH_MS = 15 * 60 * 1000;
 const DRIVE_FILE_LIST_CACHE_MS = 24 * 60 * 60 * 1000;
+const DRIVE_DOCUMENT_METADATA_CACHE_MS = 30 * 24 * 60 * 60 * 1000;
 const driveCachePrefix = "gm-manager-drive-cache-v1:";
 const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
@@ -1422,7 +1423,15 @@ export default function Home() {
   useEffect(() => {
     const currentDate = getVietnamDate();
     const config = { scriptUrl: driveScriptUrl.trim() };
-    if (config.scriptUrl) void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
+    if (!config.scriptUrl) return;
+    const refreshWorkspace = (force = false) => {
+      if (document.visibilityState === "visible") void loadWorkspaceFromDrive(config, true, { mode: "index", year: getVietnamDate().year, month: getVietnamDate().month, force });
+    };
+    // The cached workspace is used immediately. Drive is contacted only after
+    // fifteen minutes (or from the explicit Nạp lại Drive button).
+    void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
+    const refreshTimer = window.setInterval(() => refreshWorkspace(true), DRIVE_INDEX_CACHE_MS);
+    return () => window.clearInterval(refreshTimer);
   }, [driveScriptUrl]);
 
   const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
@@ -1592,7 +1601,13 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v11:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v12:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v1:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
+  const mergeDocumentMetadataOverrides = (files: DocumentFile[], snapshotId: string, location = selectedCustomerLocation) => {
+    const cacheKey = documentMetadataOverrideKey(snapshotId, location);
+    const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work" | "nature">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
+    return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
+  };
   const loadDocuments = async (snapshotId?: string, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedSnapshotId = snapshotId || "";
@@ -1601,7 +1616,7 @@ export default function Home() {
     const fresh = isDriveCacheFresh(cacheKey, DRIVE_FILE_LIST_FRESH_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
-      setDocumentFiles(cached.files);
+      setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, requestedSnapshotId || cached.activeSnapshotId));
       const activeId = requestedSnapshotId || cached.activeSnapshotId;
       setSelectedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
@@ -1619,11 +1634,11 @@ export default function Home() {
         refresh,
       });
       if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
-      const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: result.files };
+      const activeId = requestedSnapshotId || result.activeSnapshotId || "";
+      const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
       writeDriveCache(cacheKey, next);
       setDocumentSnapshots(next.snapshots);
       setDocumentFiles(next.files);
-      const activeId = requestedSnapshotId || next.activeSnapshotId;
       setSelectedDocumentSnapshotId(activeId);
       setExpandedDocumentSnapshotId((current) => current || activeId);
     } catch (error) {
@@ -1644,10 +1659,20 @@ export default function Home() {
         projectId: selectedCustomerLocation.record.projectId,
       });
       if (!response.ok || !result.ok || !result.snapshot) throw new Error(result.error || "Không thể tạo bản Tài liệu hôm nay.");
+      const nextSnapshots = [result.snapshot, ...documentSnapshots.filter((snapshot) => snapshot.id !== result.snapshot?.id)];
       setSelectedDocumentSnapshotId(result.snapshot.id);
       setExpandedDocumentSnapshotId(result.snapshot.id);
-      await loadDocuments(result.snapshot.id, true);
-      setNotice(result.alreadyExists ? `Bản ngày ${result.snapshot.date} đã có.` : `Đã tạo bản ngày ${result.snapshot.date}.`);
+      setDocumentSnapshots(nextSnapshots);
+      if (result.alreadyExists) {
+        void loadDocuments(result.snapshot.id);
+        setNotice(`Bản ngày ${result.snapshot.date} đã có.`);
+      } else {
+        const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: [] as DocumentFile[] };
+        setDocumentFiles([]);
+        writeDriveCache(documentCacheKey(result.snapshot.id), next);
+        writeDriveCache(documentCacheKey(""), next);
+        setNotice(`Đã tạo bản ngày ${result.snapshot.date}.`);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
     } finally {
@@ -1659,6 +1684,11 @@ export default function Home() {
     if (!selectedCustomerLocation || !driveScriptUrl.trim() || !selectedDocumentSnapshotId) return;
     const before = documentFiles;
     const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
+    const changedFile = nextFiles.find((file) => file.id === fileId);
+    if (!changedFile) return;
+    const metadataCacheKey = documentMetadataOverrideKey(selectedDocumentSnapshotId);
+    const currentOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work" | "nature">>>(metadataCacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
+    writeDriveCache(metadataCacheKey, { ...currentOverrides, [fileId]: { work: changedFile.work, nature: changedFile.nature } });
     setDocumentFiles(nextFiles);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
@@ -1668,8 +1698,8 @@ export default function Home() {
         projectId: selectedCustomerLocation.record.projectId,
         snapshotId: selectedDocumentSnapshotId,
         fileId,
-        work: patch.work,
-        nature: patch.nature,
+        work: changedFile.work,
+        nature: changedFile.nature,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật phân loại tệp.");
       writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
@@ -2621,8 +2651,8 @@ export default function Home() {
               </label>
 
               <div className="customer-period" aria-label="Chọn thời gian khách hàng">
-                <label>Tháng<select value={selectedMonth} onChange={(event) => { const month = Number(event.target.value); setSelectedMonth(month); void loadWorkspaceFromDrive(undefined, true, { mode: "index", year: selectedYear, month }); }}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
-                <label>Năm<select value={selectedYear} onChange={(event) => { const year = Number(event.target.value); setSelectedYear(year); void loadWorkspaceFromDrive(undefined, true, { mode: "index", year, month: selectedMonth }); }}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
+                <label>Tháng<select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
+                <label>Năm<select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
                 <span>Đang hiện hồ sơ trong <b>T{selectedMonth} / {selectedYear}</b></span>
               </div>
 
