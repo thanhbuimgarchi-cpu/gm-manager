@@ -1,8 +1,8 @@
-const CACHE_NAME = "gm-crm-shell-v5";
+const CACHE_NAME = "gm-crm-shell-v6";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png", "./gm-logo-192.png", "./gm-logo-512.png"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (event) => {

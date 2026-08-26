@@ -309,8 +309,12 @@ function isWindowsDesktop() {
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const body = JSON.stringify({ ...payload, token: deployedAppsScriptCompatibilityToken });
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel"].includes(String(payload.action || ""));
+  const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // Apps Script may briefly restart after a deployment. Retry read calls long
+  // enough for that restart instead of surfacing a transient fetch error.
+  for (let attempt = 0; attempt < retryLimit; attempt += 1) {
     try {
       const requestUrl = new URL(config.scriptUrl);
       requestUrl.searchParams.set("_gmcrm", `${Date.now()}-${attempt}`);
@@ -326,13 +330,13 @@ async function postToAppsScript<T extends { ok?: boolean; error?: string }>(conf
         return { response, result: JSON.parse(responseText) as T };
       } catch {
         const isTemporaryGooglePage = /<!doctype html|<html|window\[['"]ppConfig['"]\]/i.test(responseText);
-        if (!isTemporaryGooglePage || attempt > 0) throw new Error("Google Apps Script đang khởi động lại. Hãy thử Nạp lại Drive sau vài giây.");
+        if (!isTemporaryGooglePage || attempt === retryLimit - 1) throw new Error("Google Apps Script đang khởi động lại. Hãy thử Nạp lại Drive sau vài giây.");
       }
     } catch (error) {
       lastError = error;
-      if (attempt > 0) throw error;
+      if (attempt === retryLimit - 1) throw error;
     }
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    await new Promise((resolve) => window.setTimeout(resolve, 1000 * (attempt + 1)));
   }
   throw lastError instanceof Error ? lastError : new Error("Không thể kết nối Google Apps Script.");
 }
