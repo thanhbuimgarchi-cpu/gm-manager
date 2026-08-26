@@ -316,6 +316,17 @@ type AppsScriptBridgeMessage<T> = {
 
 const appsScriptBridgeFrames = new Map<string, Promise<HTMLIFrameElement>>();
 
+function appsScriptBridgeTarget(frame: HTMLIFrameElement) {
+  let target = frame.contentWindow;
+  // HtmlService wraps user HTML in sandboxFrame -> userHtmlFrame. WindowProxy
+  // exposes child frames cross-origin, so post directly to the innermost frame.
+  for (let depth = 0; target && depth < 3; depth += 1) {
+    if (!target.frames.length) break;
+    target = target.frames[0];
+  }
+  return target;
+}
+
 function appsScriptBridgeFrame(scriptUrl: string) {
   const existing = appsScriptBridgeFrames.get(scriptUrl);
   if (existing) return existing;
@@ -330,8 +341,11 @@ function appsScriptBridgeFrame(scriptUrl: string) {
     frame.hidden = true;
     frame.setAttribute("aria-hidden", "true");
     frame.addEventListener("load", () => {
-      window.clearTimeout(timer);
-      resolve(frame);
+      // The Apps Script wrapper loads before its two nested sandbox frames.
+      window.setTimeout(() => {
+        window.clearTimeout(timer);
+        resolve(frame);
+      }, 1_200);
     }, { once: true });
     frame.addEventListener("error", () => {
       window.clearTimeout(timer);
@@ -350,6 +364,8 @@ function appsScriptBridgeFrame(scriptUrl: string) {
 
 async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<string, unknown>): Promise<T> {
   const frame = await appsScriptBridgeFrame(scriptUrl);
+  const target = appsScriptBridgeTarget(frame);
+  if (!target) throw new Error("Cầu nối Google Apps Script chưa sẵn sàng.");
   return new Promise<T>((resolve, reject) => {
     const id = `gmcrm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const timeoutMs = String(payload.action || "").includes("audio") ? 180_000 : 90_000;
@@ -358,7 +374,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
       window.removeEventListener("message", receive);
     };
     const receive = (event: MessageEvent<AppsScriptBridgeMessage<T>>) => {
-      if (event.source !== frame.contentWindow || event.data?.channel !== "gm-manager-apps-script-response" || event.data.id !== id) return;
+      if (event.source !== target || event.data?.channel !== "gm-manager-apps-script-response" || event.data.id !== id) return;
       cleanup();
       if (event.data.error) reject(new Error(event.data.error));
       else if (event.data.result) resolve(event.data.result);
@@ -369,7 +385,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
       reject(new Error("Google Apps Script xử lý quá lâu. Hãy thử lại."));
     }, timeoutMs);
     window.addEventListener("message", receive);
-    frame.contentWindow?.postMessage({ channel: "gm-manager-apps-script", id, payload }, "*");
+    target.postMessage({ channel: "gm-manager-apps-script", id, payload }, "*");
   });
 }
 

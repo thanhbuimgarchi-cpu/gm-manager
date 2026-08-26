@@ -33,7 +33,7 @@ function doGet() {
     ".withFailureHandler(function(error){source.postMessage({channel:'gm-manager-apps-script-response',id:message.id,error:(error&&error.message)||'Không thể chạy Apps Script.'},origin);})",
     ".bridgeDispatch(message.payload||{});",
     "});",
-    "parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');",
+    "top.postMessage({channel:'gm-manager-apps-script-ready'},'*');",
     "})();<\/script></body></html>",
   ].join("");
   return HtmlService.createHtmlOutput(html)
