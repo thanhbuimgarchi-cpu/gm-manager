@@ -108,3 +108,7 @@
 .line-list-editor__actions button:disabled { cursor: not-allowed; opacity: .35; }
 @media (max-width: 620px) { .line-list-editor__actions { flex-direction: column; padding-top: 0; }.line-list-editor__actions button { width: 30px; height: 30px; } }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }.dialog-actions > button:first-child { border: 1px solid #d9d8d3; border-radius: 5px; background: #fff; color: #5c5953; }
+
+/* Gateway cards stay compact: no clipped secondary captions or trailing labels. */
+.personnel-entry { grid-template-columns: 42px minmax(0, 1fr); }
+.topbar { justify-content: flex-end; }

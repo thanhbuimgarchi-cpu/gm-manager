@@ -2820,8 +2820,7 @@ export default function Home() {
             <div className="customer-gateway__body">
               <div className="personnel-entry customer-entry">
                 <span className="personnel-entry__icon customer-entry__icon">▰</span>
-                <span><b>Khách hàng</b><small>Chọn hồ sơ trước khi làm việc</small></span>
-                <em>{customerSearchResults.length} hồ sơ</em>
+                <span><b>Khách hàng</b></span>
               </div>
               <label className="customer-search">
                 <span>⌕</span>
@@ -2849,8 +2848,7 @@ export default function Home() {
 
               <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
                 <span className="personnel-entry__icon">♙</span>
-                <span><b>Nhân lực</b><small>Mở khu vực quản lý nhân sự riêng</small></span>
-                <em>→</em>
+                <span><b>Nhân lực</b></span>
               </button>
             </div>
           )}
@@ -2873,10 +2871,6 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <button className="customer-context" onClick={returnToCustomerSearch}>
-            <span className="customer-context__back">←</span>
-            <span><small>Khách hàng đang chọn</small><b>{selectedCustomerLocation?.record.name ?? "Chọn lại khách hàng"}</b><em>{selectedCustomerLocation?.record.projectId}{selectedCustomerLocation?.record.houseId ? ` · ${selectedCustomerLocation.record.houseId}` : ""}</em></span>
-          </button>
           <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
