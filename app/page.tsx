@@ -127,6 +127,7 @@ type WorkRecord = {
   details: Record<string, string>;
   audioNote?: AudioNote;
   isHydrated?: boolean;
+  progressHydrated?: boolean;
   designProgress?: DesignProgressRow[];
   interiorDesignProgress?: DesignProgressRow[];
   warrantyProgress?: WarrantyProgressRow[];
@@ -256,7 +257,8 @@ const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
 const MAX_WORKFLOW_UPLOAD_BYTES = 12 * 1024 * 1024;
 const DRIVE_INDEX_CACHE_MS = 10 * 60 * 1000;
 const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
-const DRIVE_DETAIL_CACHE_MS = 4 * 60 * 1000;
+const DRIVE_DETAIL_CACHE_MS = 30 * 60 * 1000;
+const DRIVE_PROGRESS_CACHE_MS = 30 * 60 * 1000;
 // File metadata changes much less often than customer forms. Keep the latest
 // successful list for instant rendering, then refresh it quietly in the
 // background when it is older than five minutes.
@@ -1390,14 +1392,58 @@ export default function Home() {
     }
     setLoadingCustomerId(location.record.projectId);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId, includeProgress: false });
       if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp chi tiết hồ sơ.");
-      writeDriveCache(cacheKey, result.record);
-      persistRecord({ ...result.record, isHydrated: true }, location.year, location.month);
+      const hydratedRecord = {
+        ...location.record,
+        ...result.record,
+        designProgress: result.record.designProgress ?? location.record.designProgress,
+        interiorDesignProgress: result.record.interiorDesignProgress ?? location.record.interiorDesignProgress,
+        warrantyProgress: result.record.warrantyProgress ?? location.record.warrantyProgress,
+        progressHydrated: result.record.progressHydrated ?? location.record.progressHydrated ?? false,
+        isHydrated: true,
+      };
+      writeDriveCache(cacheKey, hydratedRecord);
+      persistRecord(hydratedRecord, location.year, location.month);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể nạp chi tiết hồ sơ.");
     } finally {
       setLoadingCustomerId(null);
+    }
+  };
+
+  const loadCustomerProgressFromDrive = async (location: CustomerLocation) => {
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (!config.scriptUrl || location.record.progressHydrated) return;
+    const cacheKey = `progress:${location.year}:${location.month}:${location.record.projectId}`;
+    const cached = readDriveCache<Pick<WorkRecord, "designProgress" | "interiorDesignProgress" | "warrantyProgress" | "progressHydrated">>(cacheKey, DRIVE_PROGRESS_CACHE_MS);
+    if (cached) {
+      persistRecord({ ...location.record, ...cached, progressHydrated: true }, location.year, location.month);
+      return;
+    }
+    if (driveRequestsInFlight.current.has(cacheKey)) return;
+    driveRequestsInFlight.current.add(cacheKey);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, {
+        action: "load-consulting",
+        mode: "progress",
+        year: location.year,
+        month: location.month,
+        projectId: location.record.projectId,
+      });
+      if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp tiến độ hồ sơ.");
+      const progress = {
+        designProgress: result.record.designProgress,
+        interiorDesignProgress: result.record.interiorDesignProgress,
+        warrantyProgress: result.record.warrantyProgress,
+        progressHydrated: true,
+      };
+      writeDriveCache(cacheKey, progress);
+      persistRecord({ ...location.record, ...progress }, location.year, location.month);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể nạp tiến độ hồ sơ.");
+    } finally {
+      driveRequestsInFlight.current.delete(cacheKey);
     }
   };
 
@@ -1656,6 +1702,11 @@ export default function Home() {
   useEffect(() => {
     if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments();
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
+
+  useEffect(() => {
+    if (!selectedCustomerLocation || (activeFolder !== "Thiết kế" && activeFolder !== "Bảo hành")) return;
+    void loadCustomerProgressFromDrive(selectedCustomerLocation);
+  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, selectedCustomerLocation?.record.progressHydrated]);
 
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim();

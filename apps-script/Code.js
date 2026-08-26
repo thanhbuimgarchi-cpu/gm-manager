@@ -37,7 +37,6 @@ function doPost(event) {
       }
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
-    if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
 
@@ -46,6 +45,7 @@ function doPost(event) {
     try {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
+      if (payload.action === "list-documents") return json_(listDocuments_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
       if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
@@ -249,6 +249,7 @@ function loadConsultingWorkspace_(payload) {
   const mode = String(payload.mode || "index");
   const refresh = Boolean(payload.refresh);
   if (mode === "detail") return loadCustomerDetail_(customers, payload);
+  if (mode === "progress") return loadCustomerProgress_(customers, payload);
   if (mode === "search") {
     const query = String(payload.query || "").trim();
     const cacheKey = "gmcrm-search-" + Utilities.base64EncodeWebSafe(query).slice(0, 120);
@@ -318,9 +319,35 @@ function loadCustomerDetail_(customers, payload) {
   if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c h\u1ed3 s\u01a1 tr\u00ean Drive.");
   const workbook = latestCustomerWorkbook_(customerFolder, projectId);
   if (!workbook) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng trong th\u01b0 m\u1ee5c T\u01b0 v\u1ea5n.");
-  const record = recordFromWorkbook_(workbook, projectId, customerFolder);
+  const includeProgress = payload.includeProgress !== false;
+  const record = recordFromWorkbook_(workbook, projectId, customerFolder, includeProgress);
   record.isHydrated = true;
   return { ok: true, year: year, month: month, record: record };
+}
+
+function loadCustomerProgress_(customers, payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !projectId) {
+    throw new Error("Thi\u1ebfu th\u00f4ng tin ti\u1ebfn \u0111\u1ed9 c\u1ea7n n\u1ea1p.");
+  }
+  const yearFolder = findFolder_(customers, String(year));
+  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
+  const customerFolder = monthFolder && findFolder_(monthFolder, projectId);
+  if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c h\u1ed3 s\u01a1 tr\u00ean Drive.");
+  return {
+    ok: true,
+    year: year,
+    month: month,
+    record: {
+      projectId: projectId,
+      designProgress: readDesignProgress_(customerFolder, projectId, "architecture"),
+      interiorDesignProgress: readDesignProgress_(customerFolder, projectId, "interior"),
+      warrantyProgress: readWarrantyProgress_(customerFolder, projectId),
+      progressHydrated: true,
+    },
+  };
 }
 
 function customerIndexFromFolder_(customerFolder, projectId) {
@@ -454,7 +481,7 @@ function latestDesignProgressWorkbook_(customerFolder, progressKind) {
   return latest;
 }
 
-function recordFromWorkbook_(file, projectId, customerFolder) {
+function recordFromWorkbook_(file, projectId, customerFolder, includeProgress) {
   const sheets = readXlsxSheets_(file);
   const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
   const details = {};
@@ -532,9 +559,14 @@ function recordFromWorkbook_(file, projectId, customerFolder) {
     details: details,
     functionalFloors: Object.keys(floorsByName).map(function(name) { return floorsByName[name]; }),
   };
-  record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
-  record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
-  record.warrantyProgress = readWarrantyProgress_(customerFolder, projectId);
+  if (includeProgress !== false) {
+    record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
+    record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
+    record.warrantyProgress = readWarrantyProgress_(customerFolder, projectId);
+    record.progressHydrated = true;
+  } else {
+    record.progressHydrated = false;
+  }
   if (segments.length || metadata.audioFileName || totalChunks) {
     record.audioNote = {
       fileName: metadata.audioFileName || "Ghi \u00e2m trong " + file.getName(),
@@ -1124,8 +1156,7 @@ function clearDocumentCache_(year, month, projectId) {
 
 function archiveDocumentFile_(customerFolder, sourceFile, work, replaceExisting) {
   const projectId = customerFolder.getName();
-  const warrantyFolder = getOrCreateFolder_(customerFolder, "Bảo hành");
-  const documentsFolder = getOrCreateFolder_(warrantyFolder, DOCUMENTS_FOLDER_NAME);
+  const documentsFolder = getOrCreateFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
   let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   if (!snapshots.length) {
     documentsFolder.createFolder(documentSnapshotName_(projectId));
@@ -1212,7 +1243,11 @@ function listDocuments_(payload) {
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
-  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  if (!snapshots.length) {
+    documentsFolder.createFolder(documentSnapshotName_(projectId));
+    snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  }
   const requestedId = String(payload.snapshotId || "");
   const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
   const target = snapshots[snapshotIndex];

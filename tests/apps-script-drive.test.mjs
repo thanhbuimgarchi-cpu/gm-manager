@@ -47,3 +47,43 @@ test("getOrCreateFolder_ reuses the oldest folder and trashes empty duplicates",
   assert.equal(newer.trashed, true);
   assert.equal(older.trashed, false);
 });
+
+test("basic customer detail skips the three progress workbooks", () => {
+  const context = loadContext();
+  context.readXlsxSheets_ = () => ({
+    "0. GM-CRM": [],
+    "1. Chủ đầu tư": [],
+    "2. Nhu cầu": [],
+    "3. Thửa đất": [],
+    "4. Công năng": [],
+    "5. Hệ thống": [],
+    "6. Thông tin ghi âm": [],
+  });
+  let progressReads = 0;
+  context.readDesignProgress_ = () => { progressReads += 1; return []; };
+  context.readWarrantyProgress_ = () => { progressReads += 1; return []; };
+  const record = context.recordFromWorkbook_({ getName: () => "customer.xlsx" }, "GM26082026TEST", {}, false);
+  assert.equal(progressReads, 0);
+  assert.equal(record.progressHydrated, false);
+});
+
+test("document listing creates today's dated snapshot for an old project", () => {
+  const context = loadContext({ Utilities: { formatDate: () => "26-08-2026" } });
+  let snapshots = [];
+  const documentsFolder = {
+    createFolder(name) {
+      const created = { getFiles: () => iterator([]) };
+      snapshots = [{ folder: created, id: "today", name, date: "26/08/2026" }];
+      return created;
+    },
+  };
+  context.getCustomerFolder_ = () => ({});
+  context.documentsFolderForProject_ = () => documentsFolder;
+  context.listDocumentSnapshots_ = () => snapshots;
+  context.readDocumentManifest_ = () => ({ files: {}, snapshots: {} });
+  context.projectSourceFiles_ = () => ({});
+  const result = context.listDocuments_({ year: 2026, month: 8, projectId: "GM26082026TEST" });
+  assert.equal(result.snapshots.length, 1);
+  assert.equal(result.snapshots[0].date, "26/08/2026");
+  assert.equal(result.activeSnapshotId, "today");
+});
