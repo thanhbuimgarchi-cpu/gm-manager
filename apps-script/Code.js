@@ -1052,6 +1052,11 @@ const DOCUMENT_MANIFEST_NAME = "_gmcrm_tai_lieu.json";
 const DOCUMENT_WORK_OPTIONS = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
 const DOCUMENT_NATURE_OPTIONS = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 const DOCUMENT_SNAPSHOT_UNLOCK_CODE = "mgarchi";
+const DOCUMENT_HIDDEN_FILE_PATTERN = /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i;
+
+function isHiddenDocumentFile_(fileName) {
+  return DOCUMENT_HIDDEN_FILE_PATTERN.test(String(fileName || "").trim());
+}
 
 function documentSnapshotName_(projectId, date) {
   const value = date || Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
@@ -1202,6 +1207,7 @@ function seedExistingDocuments_(year, month, projectId) {
     const files = workflowFolder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
+      if (isHiddenDocumentFile_(file.getName())) continue;
       // Existing files are copied once into the latest daily folder, then the
       // user can decide whether they are continuous or daily documents.
       archiveDocumentFile_(customerFolder, file, work, false);
@@ -1231,6 +1237,7 @@ function projectSourceFiles_(customerFolder) {
     const files = folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
+      if (isHiddenDocumentFile_(file.getName())) continue;
       const documentKey = "system:" + work + ":" + file.getName();
       sources[documentKey] = { file: file, workflow: work };
     }
@@ -1257,6 +1264,7 @@ function listDocuments_(payload) {
     try {
       listDriveChildrenMetadata_(target.folder.getId()).forEach(function(item) {
         if (item.mimeType === "application/vnd.google-apps.folder") return;
+        if (isHiddenDocumentFile_(item.name)) return;
         const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
         const meta = normalizeDocumentMeta_(manifest.files[item.id], { getId: function() { return item.id; } }, "Chưa gắn");
         files.push({
@@ -1274,6 +1282,7 @@ function listDocuments_(payload) {
       const iterator = target.folder.getFiles();
       while (iterator.hasNext()) {
         const file = iterator.next();
+        if (isHiddenDocumentFile_(file.getName())) continue;
         const modified = file.getLastUpdated();
         const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
         files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, nature: meta.nature, updatedAtMillis: modified.getTime() });

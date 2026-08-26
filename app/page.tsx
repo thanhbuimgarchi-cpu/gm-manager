@@ -365,6 +365,7 @@ const syncedDriveFolders: DriveFolder[] = [
 
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
 const documentNatureOptions: DocumentNature[] = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
+const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
 
 
 const personnelCategories: PersonnelCategory[] = [
@@ -2464,9 +2465,10 @@ export default function Home() {
     </section>
   );
   const renderDocumentLibrary = () => {
+    const visibleDocumentFiles = documentFiles.filter((file) => !isHiddenDocumentFile(file.name));
     const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
       title,
-      files: documentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
+      files: visibleDocumentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
     })).filter((group) => group.files.length);
     const toggleDocumentSnapshot = (snapshotId: string) => {
       if (expandedDocumentSnapshotId === snapshotId) {

@@ -67,6 +67,16 @@ test("basic customer detail skips the three progress workbooks", () => {
   assert.equal(record.progressHydrated, false);
 });
 
+test("document list hides temporary and backup drawing files", () => {
+  const context = loadContext();
+  ["ban-ve.bak", "ban-ve.dwl", "ban-ve.DWL2", "ban-ve.sv$", "ban-ve.ac$", "~$hop-dong.docx", "temp.tmp"].forEach((name) => {
+    assert.equal(context.isHiddenDocumentFile_(name), true, name);
+  });
+  ["ban-ve.dwg", "ho-so.pdf", "thong-tin.xlsx"].forEach((name) => {
+    assert.equal(context.isHiddenDocumentFile_(name), false, name);
+  });
+});
+
 test("document listing never creates a new day by itself", () => {
   const context = loadContext({ Utilities: { formatDate: () => "26-08-2026" } });
   let snapshots = [{ folder: { getFiles: () => iterator([]) }, id: "old", name: "20-08-2026-GM26082026TEST", date: "20/08/2026" }];
