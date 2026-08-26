@@ -1003,6 +1003,14 @@ function writeDriveCache<T>(key: string, value: T) {
   }
 }
 
+function removeDriveCache(key: string) {
+  try {
+    window.localStorage.removeItem(`${driveCachePrefix}${key}`);
+  } catch {
+    // Cache removal is optional; the server result remains authoritative.
+  }
+}
+
 function isDriveCacheFresh(key: string, maxAgeMs: number) {
   try {
     const raw = window.localStorage.getItem(`${driveCachePrefix}${key}`);
@@ -1774,11 +1782,17 @@ export default function Home() {
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa bản ngày.");
       const nextSnapshots = documentSnapshots.filter((item) => item.id !== snapshot.id);
       const nextSelectedId = selectedDocumentSnapshotId === snapshot.id ? (nextSnapshots[0]?.id ?? "") : selectedDocumentSnapshotId;
+      const nextCached = nextSelectedId ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(nextSelectedId), DRIVE_FILE_LIST_CACHE_MS) : null;
+      const nextFiles = nextCached ? mergeDocumentMetadataOverrides(nextCached.files, nextSelectedId) : [];
+      removeDriveCache(documentCacheKey(snapshot.id));
+      removeDriveCache(documentMetadataOverrideKey(snapshot.id));
+      writeDriveCache(documentCacheKey(""), { snapshots: nextSnapshots, activeSnapshotId: nextSelectedId, files: nextFiles });
       setDocumentSnapshots(nextSnapshots);
       setSelectedDocumentSnapshotId(nextSelectedId);
-      setDocumentFiles([]);
-      setLoadedDocumentSnapshotId("");
-      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId(nextSelectedId);
+      setDocumentFiles(nextFiles);
+      setLoadedDocumentSnapshotId(nextCached ? nextSelectedId : "");
+      setDocumentsError("");
+      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
       setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");

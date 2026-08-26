@@ -113,3 +113,30 @@ test("new-day command creates only one snapshot for the real current date", () =
   assert.equal(repeated.alreadyExists, true);
   assert.equal(repeated.snapshot.id, "today");
 });
+
+test("deleting a document day trashes only that day and removes its manifest metadata", () => {
+  const context = loadContext();
+  const dayFolder = {
+    trashed: false,
+    getFiles: () => iterator([{ getId: () => "file-a" }, { getId: () => "file-b" }]),
+    setTrashed(value) { this.trashed = value; },
+  };
+  const manifest = { files: { "file-a": { work: "Tư vấn" }, "file-b": { work: "Thiết kế" }, keep: { work: "Bảo hành" } }, snapshots: { day: { locked: false }, keepDay: { locked: true } } };
+  let wroteManifest = null;
+  let cleared = false;
+  context.documentsFolderForProject_ = () => ({ id: "documents" });
+  context.documentSnapshotForProject_ = () => ({ id: "day", folder: dayFolder });
+  context.readDocumentManifest_ = () => manifest;
+  context.writeDocumentManifest_ = (_folder, next) => { wroteManifest = structuredClone(next); };
+  context.clearDocumentCache_ = () => { cleared = true; };
+  const result = context.deleteDocumentSnapshot_({ year: 2026, month: 8, projectId: "GM26082026TEST", snapshotId: "day" });
+  assert.equal(result.ok, true);
+  assert.equal(result.deletedSnapshotId, "day");
+  assert.equal(dayFolder.trashed, true);
+  assert.equal(wroteManifest.files["file-a"], undefined);
+  assert.equal(wroteManifest.files["file-b"], undefined);
+  assert.deepEqual(wroteManifest.files.keep, { work: "Bảo hành" });
+  assert.equal(wroteManifest.snapshots.day, undefined);
+  assert.equal(wroteManifest.snapshots.keepDay.locked, true);
+  assert.equal(cleared, true);
+});

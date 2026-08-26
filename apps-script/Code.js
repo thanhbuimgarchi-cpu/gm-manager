@@ -1338,10 +1338,12 @@ function deleteDocumentSnapshot_(payload) {
   const projectId = String(payload.projectId || "").trim();
   const snapshotId = String(payload.snapshotId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const documentsFolder = documentsFolderForProject_(year, month, projectId, false);
+  if (!documentsFolder) throw new Error("Không tìm thấy thư mục Tài liệu của hồ sơ này.");
   const snapshot = documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
   const manifest = readDocumentManifest_(documentsFolder);
   if (!!((manifest.snapshots || {})[snapshotId] || {}).locked) throw new Error("Bản ngày đang khóa. Hãy mở khóa trước khi xóa.");
+  manifest.files = manifest.files || {};
   const copiedFiles = snapshot.folder.getFiles();
   while (copiedFiles.hasNext()) delete manifest.files[copiedFiles.next().getId()];
   manifest.snapshots = manifest.snapshots || {};
@@ -1349,7 +1351,7 @@ function deleteDocumentSnapshot_(payload) {
   snapshot.folder.setTrashed(true);
   writeDocumentManifest_(documentsFolder, manifest);
   clearDocumentCache_(year, month, projectId);
-  return { ok: true };
+  return { ok: true, deletedSnapshotId: snapshotId };
 }
 
 function updateDocumentMetadata_(payload) {
