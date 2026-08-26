@@ -49,6 +49,7 @@ function bridgeDispatch(payload) {
 }
 
 function redeployLatest(payload) {
+  payload = payload || {};
   const deploymentLock = LockService.getScriptLock();
   deploymentLock.waitLock(30000);
   try {
