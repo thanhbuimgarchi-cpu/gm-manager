@@ -58,5 +58,7 @@ jobs:
       - name: Push the latest source
         run: npx --yes @google/clasp@${CLASP_VERSION} push --force
 
-      - name: Update the existing Web App deployment
-        run: npx --yes @google/clasp@${CLASP_VERSION} update-deployment "${APPS_SCRIPT_DEPLOYMENT_ID}" --description "GM-Manager ${GITHUB_SHA::7}"
+      # Do not update the public deployment through clasp here. With the
+      # current Google authorization, that API call turns the otherwise-public
+      # /exec URL into a 403 until the owner republishes it in Apps Script.
+      # Source remains synchronized; production is republished by its owner.

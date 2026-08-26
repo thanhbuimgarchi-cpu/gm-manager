@@ -284,10 +284,6 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1/exec",
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
-const retiredDriveScriptUrls = new Set([
-  "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
-  "https://script.google.com/macros/s/AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt/exec",
-]);
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
@@ -316,6 +312,16 @@ type AppsScriptBridgeMessage<T> = {
 
 const appsScriptBridgeFrames = new Map<string, Promise<HTMLIFrameElement>>();
 
+function appsScriptBridgeOwnsWindow(frame: HTMLIFrameElement, source: MessageEventSource | null) {
+  let target = frame.contentWindow;
+  for (let depth = 0; target && depth < 5; depth += 1) {
+    if (target === source) return true;
+    if (!target.frames.length) break;
+    target = target.frames[0];
+  }
+  return false;
+}
+
 function appsScriptBridgeTarget(frame: HTMLIFrameElement) {
   let target = frame.contentWindow;
   // HtmlService wraps user HTML in sandboxFrame -> userHtmlFrame. WindowProxy
@@ -332,27 +338,31 @@ function appsScriptBridgeFrame(scriptUrl: string) {
   if (existing) return existing;
   const pending = new Promise<HTMLIFrameElement>((resolve, reject) => {
     const frame = document.createElement("iframe");
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("message", receiveReady);
+    };
+    const receiveReady = (event: MessageEvent<AppsScriptBridgeMessage<unknown>>) => {
+      if (event.data?.channel !== "gm-manager-apps-script-ready" || !appsScriptBridgeOwnsWindow(frame, event.source)) return;
+      cleanup();
+      resolve(frame);
+    };
     const timer = window.setTimeout(() => {
+      cleanup();
       frame.remove();
       appsScriptBridgeFrames.delete(scriptUrl);
-      reject(new Error("Google Apps Script không phản hồi."));
+      reject(new Error("Google Apps Script chưa sẵn sàng. Hãy bấm Nạp lại."));
     }, 20_000);
     frame.title = "GM-Manager Drive bridge";
     frame.hidden = true;
     frame.setAttribute("aria-hidden", "true");
-    frame.addEventListener("load", () => {
-      // The Apps Script wrapper loads before its two nested sandbox frames.
-      window.setTimeout(() => {
-        window.clearTimeout(timer);
-        resolve(frame);
-      }, 1_200);
-    }, { once: true });
     frame.addEventListener("error", () => {
-      window.clearTimeout(timer);
+      cleanup();
       frame.remove();
       appsScriptBridgeFrames.delete(scriptUrl);
       reject(new Error("Không thể mở cầu nối Google Apps Script."));
     }, { once: true });
+    window.addEventListener("message", receiveReady);
     const bridgeUrl = new URL(scriptUrl);
     bridgeUrl.searchParams.set("gmcrm_bridge", "1");
     frame.src = bridgeUrl.toString();
@@ -374,7 +384,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
       window.removeEventListener("message", receive);
     };
     const receive = (event: MessageEvent<AppsScriptBridgeMessage<T>>) => {
-      if (event.source !== target || event.data?.channel !== "gm-manager-apps-script-response" || event.data.id !== id) return;
+      if (!appsScriptBridgeOwnsWindow(frame, event.source) || event.data?.channel !== "gm-manager-apps-script-response" || event.data.id !== id) return;
       cleanup();
       if (event.data.error) reject(new Error(event.data.error));
       else if (event.data.result) resolve(event.data.result);
@@ -1210,18 +1220,9 @@ export default function Home() {
       }
     }
 
-    const savedConfig = window.localStorage.getItem(driveSyncConfigKey);
-    if (savedConfig) {
-      try {
-        const config = JSON.parse(savedConfig) as Partial<DriveSyncConfig>;
-        const nextUrl = !config.scriptUrl || retiredDriveScriptUrls.has(config.scriptUrl) ? defaultDriveSyncConfig.scriptUrl : config.scriptUrl;
-        setDriveScriptUrl(nextUrl);
-        if (nextUrl !== config.scriptUrl) window.localStorage.setItem(driveSyncConfigKey, JSON.stringify({ scriptUrl: nextUrl }));
-        return;
-      } catch {
-        window.localStorage.removeItem(driveSyncConfigKey);
-      }
-    }
+    // Production has one canonical deployment. Replacing any URL saved by an
+    // older build prevents a device from getting stuck on a retired /exec URL.
+    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
     setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
   }, []);
 
