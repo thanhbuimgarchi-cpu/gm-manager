@@ -1244,8 +1244,17 @@ function listDocuments_(payload) {
   const customerFolder = getCustomerFolder_(year, month, projectId, true);
   const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
   let snapshots = listDocumentSnapshots_(documentsFolder, projectId);
-  if (!snapshots.length) {
-    documentsFolder.createFolder(documentSnapshotName_(projectId));
+  const todayName = documentSnapshotName_(projectId);
+  if (!snapshots.some(function(snapshot) { return snapshot.name === todayName; })) {
+    // Opening Tài liệu always makes the current day visible. When documents
+    // have already been classified, use the regular snapshot routine so daily
+    // files are carried forward; otherwise create an empty date folder.
+    try {
+      createDocumentSnapshot_({ year: year, month: month, projectId: projectId });
+    } catch (error) {
+      if (String(error && error.message || error).indexOf("Hãy gắn Công việc và Tính chất") === -1) throw error;
+      documentsFolder.createFolder(todayName);
+    }
     snapshots = listDocumentSnapshots_(documentsFolder, projectId);
   }
   const requestedId = String(payload.snapshotId || "");

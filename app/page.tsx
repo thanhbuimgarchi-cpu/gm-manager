@@ -1245,6 +1245,11 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
+    setDocumentSnapshots([]);
+    setSelectedDocumentSnapshotId("");
+    setExpandedDocumentSnapshotId("");
+    setDocumentFiles([]);
+    setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
@@ -1258,6 +1263,11 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
+    setDocumentSnapshots([]);
+    setSelectedDocumentSnapshotId("");
+    setExpandedDocumentSnapshotId("");
+    setDocumentFiles([]);
+    setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
@@ -1580,16 +1590,19 @@ export default function Home() {
     }
   };
 
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v8:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
-  const loadDocuments = async (snapshotId = selectedDocumentSnapshotId, refresh = false) => {
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v9:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const loadDocuments = async (snapshotId?: string, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    const cacheKey = documentCacheKey(snapshotId);
+    const requestedSnapshotId = snapshotId || "";
+    const cacheKey = documentCacheKey(requestedSnapshotId);
     const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
     const fresh = isDriveCacheFresh(cacheKey, DRIVE_FILE_LIST_FRESH_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
       setDocumentFiles(cached.files);
-      setSelectedDocumentSnapshotId((current) => snapshotId || current || cached.activeSnapshotId);
+      const activeId = requestedSnapshotId || cached.activeSnapshotId;
+      setSelectedDocumentSnapshotId(activeId);
+      setExpandedDocumentSnapshotId((current) => current || activeId);
     }
     if (fresh && !refresh) return;
     setLoadingDocuments(!cached);
@@ -1600,7 +1613,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
-        snapshotId: snapshotId || undefined,
+        snapshotId: requestedSnapshotId || undefined,
         refresh,
       });
       if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
@@ -1608,7 +1621,9 @@ export default function Home() {
       writeDriveCache(cacheKey, next);
       setDocumentSnapshots(next.snapshots);
       setDocumentFiles(next.files);
-      setSelectedDocumentSnapshotId((current) => snapshotId || current || next.activeSnapshotId);
+      const activeId = requestedSnapshotId || next.activeSnapshotId;
+      setSelectedDocumentSnapshotId(activeId);
+      setExpandedDocumentSnapshotId((current) => current || activeId);
     } catch (error) {
       if (!cached) setDocumentsError(error instanceof Error ? error.message : "Không thể nạp Tài liệu.");
     } finally {
@@ -1732,7 +1747,7 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments();
+    if (activeFolder === "Tài liệu" && selectedCustomerLocation) void loadDocuments(undefined, true);
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
   useEffect(() => {
@@ -2425,8 +2440,8 @@ export default function Home() {
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Chọn một ngày để xem tệp. Phiếu và tiến độ hệ thống luôn là <b>Xuyên suốt</b>; chỉ tệp Theo ngày mới được sao lưu vào bản ngày mới.</p></div>
-        <button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments || !canCreateDocumentSnapshot} title={canCreateDocumentSnapshot ? "Tạo bản ngày mới" : "Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước"}><span>＋</span> Bản ngày mới</button>
+        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Ngày mới được nạp tự động từ Drive. Phiếu và tiến độ hệ thống luôn là <b>Xuyên suốt</b>; chỉ tệp Theo ngày mới được sao lưu vào bản ngày mới.</p></div>
+        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true)} disabled={loadingDocuments}>↻ Nạp ngày từ Drive</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments || !canCreateDocumentSnapshot} title={canCreateDocumentSnapshot ? "Tạo bản ngày mới" : "Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước"}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
@@ -2555,7 +2570,7 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM" /></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM-manager" /><span className="brand__wordmark">GM-manager</span></div>
             <div className="customer-gateway__actions">
               {renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
@@ -2641,7 +2656,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM" /></div>
+        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM-manager" /><span className="brand__wordmark">GM-manager</span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (

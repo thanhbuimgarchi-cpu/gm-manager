@@ -67,13 +67,13 @@ test("basic customer detail skips the three progress workbooks", () => {
   assert.equal(record.progressHydrated, false);
 });
 
-test("document listing creates today's dated snapshot for an old project", () => {
+test("document listing adds today's dated snapshot when a project only has an older one", () => {
   const context = loadContext({ Utilities: { formatDate: () => "26-08-2026" } });
-  let snapshots = [];
+  let snapshots = [{ folder: { getFiles: () => iterator([]) }, id: "old", name: "20-08-2026-GM26082026TEST", date: "20/08/2026" }];
   const documentsFolder = {
     createFolder(name) {
       const created = { getFiles: () => iterator([]) };
-      snapshots = [{ folder: created, id: "today", name, date: "26/08/2026" }];
+      snapshots = [{ folder: created, id: "today", name, date: "26/08/2026" }, ...snapshots];
       return created;
     },
   };
@@ -82,8 +82,9 @@ test("document listing creates today's dated snapshot for an old project", () =>
   context.listDocumentSnapshots_ = () => snapshots;
   context.readDocumentManifest_ = () => ({ files: {}, snapshots: {} });
   context.projectSourceFiles_ = () => ({});
+  context.createDocumentSnapshot_ = () => { throw new Error("Hãy gắn Công việc và Tính chất cho ít nhất một tệp trước khi tạo bản ngày mới."); };
   const result = context.listDocuments_({ year: 2026, month: 8, projectId: "GM26082026TEST" });
-  assert.equal(result.snapshots.length, 1);
+  assert.equal(result.snapshots.length, 2);
   assert.equal(result.snapshots[0].date, "26/08/2026");
   assert.equal(result.activeSnapshotId, "today");
 });
