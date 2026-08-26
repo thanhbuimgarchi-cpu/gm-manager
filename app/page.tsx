@@ -281,11 +281,12 @@ const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // supplied automatically for compatibility, so users only ever enter the URL.
 const deployedAppsScriptCompatibilityToken = "010101";
 const defaultDriveSyncConfig: DriveSyncConfig = {
-  scriptUrl: "https://script.google.com/macros/s/AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt/exec",
+  scriptUrl: "https://script.google.com/macros/s/AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1/exec",
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const retiredDriveScriptUrls = new Set([
   "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
+  "https://script.google.com/macros/s/AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt/exec",
 ]);
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
