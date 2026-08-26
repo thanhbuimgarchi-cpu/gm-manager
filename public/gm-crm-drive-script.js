@@ -12,6 +12,8 @@
 const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const SCRIPT_PROJECT_ID = "1E2YbfpBHw2HpLySbRjoAPJ72__mekfu3NwoYwTcLnCj4qSPSNACV5KfA";
+const PRODUCTION_DEPLOYMENT_ID = "AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1";
 
 /**
  * Browser bridge used by the public GitHub Pages app.
@@ -46,9 +48,44 @@ function bridgeDispatch(payload) {
   return JSON.parse(output.getContent());
 }
 
+function redeployLatest_(payload) {
+  const deploymentLock = LockService.getScriptLock();
+  deploymentLock.waitLock(30000);
+  try {
+    const description = String(payload.description || "GM-Manager automatic deployment").replace(/[^\w .:-]/g, "").slice(0, 100);
+    const apiRoot = "https://script.googleapis.com/v1/projects/" + encodeURIComponent(SCRIPT_PROJECT_ID);
+    const requestOptions = {
+      contentType: "application/json",
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    };
+    const versionResponse = UrlFetchApp.fetch(apiRoot + "/versions", {
+      ...requestOptions,
+      method: "post",
+      payload: JSON.stringify({ description: description }),
+    });
+    if (versionResponse.getResponseCode() < 200 || versionResponse.getResponseCode() >= 300) {
+      throw new Error("Không thể tạo phiên bản Apps Script: " + versionResponse.getContentText().slice(0, 300));
+    }
+    const version = JSON.parse(versionResponse.getContentText());
+    const updateResponse = UrlFetchApp.fetch(apiRoot + "/deployments/" + encodeURIComponent(PRODUCTION_DEPLOYMENT_ID), {
+      ...requestOptions,
+      method: "put",
+      payload: JSON.stringify({ deploymentConfig: { versionNumber: version.versionNumber, manifestFileName: "appsscript", description: description } }),
+    });
+    if (updateResponse.getResponseCode() < 200 || updateResponse.getResponseCode() >= 300) {
+      throw new Error("Không thể cập nhật Web App: " + updateResponse.getContentText().slice(0, 300));
+    }
+    return { ok: true, versionNumber: version.versionNumber, deploymentId: PRODUCTION_DEPLOYMENT_ID };
+  } finally {
+    deploymentLock.releaseLock();
+  }
+}
+
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
+    if (payload.action === "redeploy-latest") return json_(redeployLatest_(payload));
     if (payload.action === "audio-insight") return json_(transcribeAudio_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {
