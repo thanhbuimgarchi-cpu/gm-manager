@@ -13,6 +13,39 @@ const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+/**
+ * Browser bridge used by the public GitHub Pages app.
+ *
+ * Apps Script ContentService responses are redirected to googleusercontent.com.
+ * Browsers can reject that cross-origin fetch even though the same deployment
+ * works from a server. HtmlService + google.script.run keeps the request inside
+ * Apps Script and returns the JSON result to the parent with postMessage.
+ */
+function doGet() {
+  const html = [
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>GM-Manager Drive Bridge</title></head><body>",
+    "<script>(function(){",
+    "function allowed(origin){return origin==='https://thanhbuimgarchi-cpu.github.io'||/^http:\\/\\/(?:localhost|127\\.0\\.0\\.1)(?::\\d+)?$/.test(origin);}",
+    "window.addEventListener('message',function(event){",
+    "var message=event.data||{};if(!allowed(event.origin)||message.channel!=='gm-manager-apps-script'||!message.id)return;",
+    "var source=event.source;var origin=event.origin;",
+    "google.script.run.withSuccessHandler(function(result){source.postMessage({channel:'gm-manager-apps-script-response',id:message.id,result:result},origin);})",
+    ".withFailureHandler(function(error){source.postMessage({channel:'gm-manager-apps-script-response',id:message.id,error:(error&&error.message)||'Không thể chạy Apps Script.'},origin);})",
+    ".bridgeDispatch(message.payload||{});",
+    "});",
+    "parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');",
+    "})();<\/script></body></html>",
+  ].join("");
+  return HtmlService.createHtmlOutput(html)
+    .setTitle("GM-Manager Drive Bridge")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function bridgeDispatch(payload) {
+  const output = doPost({ postData: { contents: JSON.stringify(payload || {}) } });
+  return JSON.parse(output.getContent());
+}
+
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");

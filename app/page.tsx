@@ -307,32 +307,84 @@ function isWindowsDesktop() {
   return /windows nt/i.test(navigator.userAgent);
 }
 
+type AppsScriptBridgeMessage<T> = {
+  channel?: string;
+  id?: string;
+  result?: T;
+  error?: string;
+};
+
+const appsScriptBridgeFrames = new Map<string, Promise<HTMLIFrameElement>>();
+
+function appsScriptBridgeFrame(scriptUrl: string) {
+  const existing = appsScriptBridgeFrames.get(scriptUrl);
+  if (existing) return existing;
+  const pending = new Promise<HTMLIFrameElement>((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    const timer = window.setTimeout(() => {
+      frame.remove();
+      appsScriptBridgeFrames.delete(scriptUrl);
+      reject(new Error("Google Apps Script không phản hồi."));
+    }, 20_000);
+    frame.title = "GM-Manager Drive bridge";
+    frame.hidden = true;
+    frame.setAttribute("aria-hidden", "true");
+    frame.addEventListener("load", () => {
+      window.clearTimeout(timer);
+      resolve(frame);
+    }, { once: true });
+    frame.addEventListener("error", () => {
+      window.clearTimeout(timer);
+      frame.remove();
+      appsScriptBridgeFrames.delete(scriptUrl);
+      reject(new Error("Không thể mở cầu nối Google Apps Script."));
+    }, { once: true });
+    const bridgeUrl = new URL(scriptUrl);
+    bridgeUrl.searchParams.set("gmcrm_bridge", "1");
+    frame.src = bridgeUrl.toString();
+    document.body.appendChild(frame);
+  });
+  appsScriptBridgeFrames.set(scriptUrl, pending);
+  return pending;
+}
+
+async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<string, unknown>): Promise<T> {
+  const frame = await appsScriptBridgeFrame(scriptUrl);
+  return new Promise<T>((resolve, reject) => {
+    const id = `gmcrm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timeoutMs = String(payload.action || "").includes("audio") ? 180_000 : 90_000;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("message", receive);
+    };
+    const receive = (event: MessageEvent<AppsScriptBridgeMessage<T>>) => {
+      if (event.source !== frame.contentWindow || event.data?.channel !== "gm-manager-apps-script-response" || event.data.id !== id) return;
+      cleanup();
+      if (event.data.error) reject(new Error(event.data.error));
+      else if (event.data.result) resolve(event.data.result);
+      else reject(new Error("Google Apps Script không trả về dữ liệu."));
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Google Apps Script xử lý quá lâu. Hãy thử lại."));
+    }, timeoutMs);
+    window.addEventListener("message", receive);
+    frame.contentWindow?.postMessage({ channel: "gm-manager-apps-script", id, payload }, "*");
+  });
+}
+
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
-  const body = JSON.stringify({ ...payload, token: deployedAppsScriptCompatibilityToken });
+  const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
   const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
-  // Apps Script may briefly restart after a deployment. Retry read calls long
-  // enough for that restart instead of surfacing a transient fetch error.
+  // Use the HtmlService bridge because ContentService's googleusercontent.com
+  // redirect is not consistently CORS-readable from GitHub Pages.
   for (let attempt = 0; attempt < retryLimit; attempt += 1) {
     try {
-      const requestUrl = new URL(config.scriptUrl);
-      requestUrl.searchParams.set("_gmcrm", `${Date.now()}-${attempt}`);
-      const response = await fetch(requestUrl, {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body,
-        redirect: "follow",
-      });
-      const responseText = await response.text();
-      try {
-        return { response, result: JSON.parse(responseText) as T };
-      } catch {
-        const isTemporaryGooglePage = /<!doctype html|<html|window\[['"]ppConfig['"]\]/i.test(responseText);
-        if (!isTemporaryGooglePage || attempt === retryLimit - 1) throw new Error("Google Apps Script đang khởi động lại. Hãy thử Nạp lại Drive sau vài giây.");
-      }
+      const result = await postViaAppsScriptBridge<T>(config.scriptUrl, requestPayload);
+      return { response: new Response(JSON.stringify(result), { status: 200 }), result };
     } catch (error) {
       lastError = error;
       if (attempt === retryLimit - 1) throw error;
