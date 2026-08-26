@@ -242,6 +242,11 @@ type DriveSyncConfig = {
   scriptUrl: string;
 };
 
+type DesktopNotificationBridge = {
+  isWindows: boolean;
+  showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
+};
+
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
@@ -277,6 +282,7 @@ const deployedAppsScriptCompatibilityToken = "010101";
 const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycbyItbx_J_G03Q8LWtEzpROCUm-stBCDDeGXrVz2wBravN5A6CmMOM6qGdquBceBVctt/exec",
 };
+const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const retiredDriveScriptUrls = new Set([
   "https://script.google.com/macros/s/AKfycbx-O6jHLrtU-4GcpoWganEIAFxISrNpZD0lYRt5YK8fxzX7nBIsCHtAMvkQ68-Dxkbr/exec",
 ]);
@@ -289,6 +295,14 @@ function isAppsScriptUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+function desktopBridge() {
+  return (window as Window & { gmDesktop?: DesktopNotificationBridge }).gmDesktop;
+}
+
+function isWindowsDesktop() {
+  return /windows nt/i.test(navigator.userAgent);
 }
 
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
@@ -1136,7 +1150,7 @@ export default function Home() {
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
-    const updateInstallState = () => setIsAppInstalled(standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+    const updateInstallState = () => setIsAppInstalled(Boolean(desktopBridge()) || standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
     const captureInstallPrompt = (event: Event) => {
       event.preventDefault();
       setDeferredInstallPrompt(event as InstallPromptEvent);
@@ -1265,6 +1279,11 @@ export default function Home() {
       setNotice("GM-CRM đã được cài trên thiết bị này.");
       return;
     }
+    if (isWindowsDesktop()) {
+      setNotice("Đang tải bộ cài GM-CRM cho Windows…");
+      window.location.assign(windowsInstallerUrl);
+      return;
+    }
     if (deferredInstallPrompt) {
       await deferredInstallPrompt.prompt();
       const choice = await deferredInstallPrompt.userChoice;
@@ -1291,6 +1310,19 @@ export default function Home() {
   };
 
   const sendTestNotification = async () => {
+    const desktop = desktopBridge();
+    if (desktop) {
+      const shown = await desktop.showNotification({
+        title: "GM-CRM",
+        body: "Thông báo trên Windows đã được bật thành công.",
+        url: `${import.meta.env.BASE_URL}`,
+      });
+      if (shown) {
+        setNotificationPermission("granted");
+        setNotice("Đã bật và gửi thông báo thử trên Windows.");
+        return;
+      }
+    }
     if (!("Notification" in window) || !("serviceWorker" in navigator)) {
       setNotificationPermission("unsupported");
       setNotice("Trình duyệt này chưa hỗ trợ thông báo ứng dụng.");
@@ -1317,7 +1349,7 @@ export default function Home() {
   const renderMobileAppActions = () => <>
     {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật ngay</button>}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
-    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
+    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : isWindowsDesktop() ? "◌ Bật thông báo PC" : "◌ Bật thông báo"}</button>
   </>;
 
   const persist = (nextYears: YearFolder[]) => {
@@ -2774,7 +2806,7 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
             {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
-            <p>{mobileInstallHelp === "desktop" ? "GM-CRM sẽ mở trong cửa sổ riêng và có biểu tượng ở Start/Desktop." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
+            <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
           </section>
         </div>
       )}

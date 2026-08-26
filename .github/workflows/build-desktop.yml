@@ -1,0 +1,48 @@
+name: Build Windows installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "desktop/**"
+      - "public/**"
+      - ".github/workflows/build-desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gm-crm-windows-installer
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package.json
+      - name: Install the Windows packager
+        working-directory: desktop
+        run: npm install --no-package-lock
+      - name: Build the installer
+        working-directory: desktop
+        run: npm exec electron-builder --win nsis --x64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Publish the current installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release view desktop-latest --repo $env:REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create desktop-latest --repo $env:REPOSITORY --title "GM-CRM cho Windows" --notes "Bộ cài Windows mới nhất của GM-CRM."
+          }
+          gh release upload desktop-latest "desktop/release/GM-CRM-Setup.exe#GM-CRM-Setup.exe" --repo $env:REPOSITORY --clobber
