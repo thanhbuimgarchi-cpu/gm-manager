@@ -1122,7 +1122,6 @@ function uploadWorkflowFile_(payload) {
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";
 const DOCUMENT_MANIFEST_NAME = "_gmcrm_tai_lieu.json";
 const DOCUMENT_WORK_OPTIONS = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
-const DOCUMENT_NATURE_OPTIONS = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 const DOCUMENT_SNAPSHOT_UNLOCK_CODE = "mgarchi";
 const DOCUMENT_HIDDEN_FILE_PATTERN = /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i;
 
@@ -1178,7 +1177,6 @@ function normalizeDocumentMeta_(meta, file, defaultWork) {
   const assigned = raw.assigned === true;
   return {
     work: assigned && DOCUMENT_WORK_OPTIONS.indexOf(raw.work) >= 0 ? raw.work : (defaultWork || "Chưa gắn"),
-    nature: assigned && DOCUMENT_NATURE_OPTIONS.indexOf(raw.nature) >= 0 ? raw.nature : "Chưa gắn",
     documentKey: String(raw.documentKey || file.getId()),
     sourceId: String(raw.sourceId || file.getId()),
     assigned: assigned,
@@ -1191,13 +1189,13 @@ function normalizeDocumentMeta_(meta, file, defaultWork) {
 function preferredDocumentMeta_(workflow, file) {
   const name = String(file.getName() || "").toLowerCase();
   if (name.indexOf("phiếu thông tin khách hàng") === 0) {
-    return { work: "Tư vấn", nature: "Xuyên suốt", assigned: true };
+    return { work: "Tư vấn", assigned: true };
   }
   if (name.indexOf("tiến độ thiết kế kiến trúc") === 0 || name.indexOf("tiến độ thiết kế nội thất") === 0) {
-    return { work: "Thiết kế", nature: "Xuyên suốt", assigned: true };
+    return { work: "Thiết kế", assigned: true };
   }
   if (name.indexOf("phiếu thông tin bảo hành") === 0) {
-    return { work: "Bảo hành", nature: "Xuyên suốt", assigned: true };
+    return { work: "Bảo hành", assigned: true };
   }
   return null;
 }
@@ -1232,7 +1230,17 @@ const THREE_D_CATEGORIES = [
 ];
 
 function ensureThreeDFolders_(customerFolder) {
-  const root = getOrCreateFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  let root = findFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  if (!root) {
+    const documentsFolder = findFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
+    const legacyRoot = documentsFolder ? findFolder_(documentsFolder, THREE_D_FOLDER_NAME) : null;
+    if (legacyRoot) {
+      legacyRoot.moveTo(customerFolder);
+      root = legacyRoot;
+    } else {
+      root = getOrCreateFolder_(customerFolder, THREE_D_FOLDER_NAME);
+    }
+  }
   return {
     root: root,
     folders: THREE_D_CATEGORIES.map(function(category) {
@@ -1245,7 +1253,7 @@ function threeDFoldersForProject_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
   if (!customerFolder) return null;
   if (createMissing) return ensureThreeDFolders_(customerFolder);
-  const root = createMissing ? getOrCreateFolder_(customerFolder, THREE_D_FOLDER_NAME) : findFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  const root = findFolder_(customerFolder, THREE_D_FOLDER_NAME);
   if (!root) return null;
   const folders = THREE_D_CATEGORIES.map(function(category) {
     const folder = createMissing ? getOrCreateFolder_(root, category.name) : findFolder_(root, category.name);
@@ -1326,7 +1334,6 @@ function documentFileOutput_(file, meta) {
     updatedAt: Utilities.formatDate(updated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
     mimeType: file.getMimeType(),
     work: meta.work,
-    nature: meta.nature,
   };
 }
 
@@ -1375,7 +1382,6 @@ function listDocuments_(payload) {
           updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
           mimeType: item.mimeType,
           work: meta.work,
-          nature: meta.nature,
           updatedAtMillis: modified.getTime(),
         });
       });
@@ -1386,7 +1392,7 @@ function listDocuments_(payload) {
         if (isHiddenDocumentFile_(file.getName())) continue;
         const modified = file.getLastUpdated();
         const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
-        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, nature: meta.nature, updatedAtMillis: modified.getTime() });
+        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, updatedAtMillis: modified.getTime() });
       }
     }
   }
@@ -1448,10 +1454,8 @@ function copyNearestDocumentSnapshotFiles_(documentsFolder, sourceSnapshot, targ
     const sourceMeta = normalizeDocumentMeta_(manifest.files[sourceFile.getId()], sourceFile, "Chưa gắn");
     const copiedFile = sourceFile.makeCopy(sourceFile.getName(), targetFolder);
     const copiedMeta = {
-      // A new day inherits the workflow assignment only. Its nature must be
-      // chosen again because "Theo ngày" and "Xuyên suốt" describe the new copy.
+      // A new day always inherits the work assignment from the nearest prior day.
       work: sourceMeta.work,
-      nature: "Chưa gắn",
       documentKey: "snapshot-copy:" + targetFolder.getId() + ":" + sourceFile.getId(),
       sourceId: sourceMeta.sourceId || sourceFile.getId(),
       assigned: sourceMeta.work !== "Chưa gắn",
@@ -1541,7 +1545,6 @@ function updateDocumentMetadata_(payload) {
   const current = normalizeDocumentMeta_({ ...existing, documentKey: fileId, sourceId: fileId, assigned: true }, file, "Chưa gắn");
   current.assigned = true;
   if (DOCUMENT_WORK_OPTIONS.indexOf(String(payload.work || "")) >= 0) current.work = String(payload.work);
-  if (DOCUMENT_NATURE_OPTIONS.indexOf(String(payload.nature || "")) >= 0) current.nature = String(payload.nature);
   const parents = file.getParents();
   let belongsToSnapshot = false;
   while (parents.hasNext()) if (parents.next().getId() === snapshot.id) belongsToSnapshot = true;

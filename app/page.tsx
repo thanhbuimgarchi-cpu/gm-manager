@@ -207,10 +207,7 @@ type DocumentFile = {
   updatedAt: string;
   mimeType: string;
   work: string;
-  nature: DocumentNature;
 };
-
-type DocumentNature = "Chưa gắn" | "Xuyên suốt" | "Theo ngày";
 
 type DocumentSnapshot = {
   id: string;
@@ -453,11 +450,11 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Nghiệm thu", icon: "✓" },
   { label: "Bảo hành", icon: "⚙" },
   { label: "Tài liệu", icon: "▱" },
+  { label: "3D", icon: "▧" },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
 
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
-const documentNatureOptions: DocumentNature[] = ["Chưa gắn", "Xuyên suốt", "Theo ngày"];
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
 
 
@@ -1699,13 +1696,13 @@ export default function Home() {
     }
   };
 
-  // v13 intentionally starts with a clean document index. Earlier versions
+  // v14 intentionally starts with a clean document index. Earlier versions
   // could retain a deleted day in local cache after a background refresh.
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v13:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
-  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v1:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v14:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v2:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
   const mergeDocumentMetadataOverrides = (files: DocumentFile[], snapshotId: string, location = selectedCustomerLocation) => {
     const cacheKey = documentMetadataOverrideKey(snapshotId, location);
-    const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work" | "nature">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
+    const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
     return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
   };
   const loadDocuments = async (snapshotId?: string, refresh = false) => {
@@ -1824,15 +1821,15 @@ export default function Home() {
     }
   };
 
-  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work" | "nature">>) => {
+  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work">>) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim() || !selectedDocumentSnapshotId) return;
     const before = documentFiles;
     const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
     const changedFile = nextFiles.find((file) => file.id === fileId);
     if (!changedFile) return;
     const metadataCacheKey = documentMetadataOverrideKey(selectedDocumentSnapshotId);
-    const currentOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work" | "nature">>>(metadataCacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
-    writeDriveCache(metadataCacheKey, { ...currentOverrides, [fileId]: { work: changedFile.work, nature: changedFile.nature } });
+    const currentOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(metadataCacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
+    writeDriveCache(metadataCacheKey, { ...currentOverrides, [fileId]: { work: changedFile.work } });
     setDocumentFiles(nextFiles);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
@@ -1843,7 +1840,6 @@ export default function Home() {
         snapshotId: selectedDocumentSnapshotId,
         fileId,
         work: changedFile.work,
-        nature: changedFile.nature,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật phân loại tệp.");
       writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
@@ -1925,6 +1921,8 @@ export default function Home() {
   useEffect(() => {
     if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
       void loadDocuments();
+    }
+    if (activeFolder === "3D" && selectedCustomerLocation) {
       void loadThreeDLibrary();
     }
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
@@ -2581,7 +2579,7 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [personnelView, driveScriptUrl]);
   useEffect(() => {
-    if (!selectedCustomerProjectId || activeFolder === "Tài liệu" || !driveScriptUrl.trim()) return;
+    if (!selectedCustomerProjectId || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
     void loadWorkflowFiles(activeFolder, true);
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
@@ -2633,7 +2631,7 @@ export default function Home() {
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; mỗi ngày chỉ có một bản.</p></div>
+        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
         <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
@@ -2649,22 +2647,22 @@ export default function Home() {
               {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tính chất</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><select value={file.nature} onChange={(event) => void updateDocumentMetadata(file.id, { nature: event.target.value as DocumentNature })} aria-label={`Tính chất của ${file.name}`}>{documentNatureOptions.map((nature) => <option key={nature} value={nature}>{nature}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
       </div>
-      <section className="three-d-library" aria-label="Thư mục 3D">
-        <header className="three-d-library__heading"><div><p className="eyebrow">3D</p><h2>Thư mục 3D</h2><p>Không lưu theo ngày. Tệp được đặt riêng trong Kiến trúc hoặc Nội thất.</p></div><div>{threeDLibrary.rootUrl && <a href={threeDLibrary.rootUrl} target="_blank" rel="noreferrer" className="three-d-library__open">Mở 3D ↗</a>}<button type="button" className="document-library__refresh" onClick={() => void loadThreeDLibrary(true)} disabled={loadingThreeDLibrary} title="Cập nhật 3D từ Drive" aria-label="Cập nhật thư mục 3D">{loadingThreeDLibrary ? "…" : "↻"}</button></div></header>
-        <div className="three-d-library__grid">
-          {(threeDLibrary.folders.length ? threeDLibrary.folders : ([{ key: "architecture", name: "Kiến trúc", folderUrl: "", files: [] }, { key: "interior", name: "Nội thất", folderUrl: "", files: [] }] as ThreeDLibraryFolder[])).map((folder) => <section className="three-d-library__folder" key={folder.key}>
-            <header><span>▧</span><h3>{folder.name}</h3>{folder.folderUrl && <a href={folder.folderUrl} target="_blank" rel="noreferrer" aria-label={`Mở thư mục 3D ${folder.name}`} title="Mở thư mục trên Drive">↗</a>}</header>
-            {loadingThreeDLibrary && !threeDLibrary.folders.length ? <p>Đang chuẩn bị thư mục…</p> : folder.files.length ? <ul>{folder.files.map((file) => <li key={file.id}><a href={file.downloadUrl} download={file.name}>{file.name}</a><small>{file.updatedAt}</small></li>)}</ul> : <p>Chưa có tệp.</p>}
-          </section>)}
-        </div>
-      </section>
     </section>;
   };
+  const renderThreeDLibrary = () => <section className="three-d-library" aria-label="Thư mục 3D">
+    <header className="three-d-library__heading"><div><p className="eyebrow">3D</p><h1>Thư mục 3D</h1><p>Nằm cùng cấp với Tài liệu trong hồ sơ dự án. Không lưu theo ngày; tệp được đặt vào Kiến trúc hoặc Nội thất.</p></div><div>{threeDLibrary.rootUrl && <a href={threeDLibrary.rootUrl} target="_blank" rel="noreferrer" className="three-d-library__open">Mở 3D ↗</a>}<button type="button" className="document-library__refresh" onClick={() => void loadThreeDLibrary(true)} disabled={loadingThreeDLibrary} title="Cập nhật 3D từ Drive" aria-label="Cập nhật thư mục 3D">{loadingThreeDLibrary ? "…" : "↻"}</button></div></header>
+    <div className="three-d-library__grid">
+      {(threeDLibrary.folders.length ? threeDLibrary.folders : ([{ key: "architecture", name: "Kiến trúc", folderUrl: "", files: [] }, { key: "interior", name: "Nội thất", folderUrl: "", files: [] }] as ThreeDLibraryFolder[])).map((folder) => <section className="three-d-library__folder" key={folder.key}>
+        <header><span>▧</span><h2>{folder.name}</h2>{folder.folderUrl && <a href={folder.folderUrl} target="_blank" rel="noreferrer" aria-label={`Mở thư mục 3D ${folder.name}`} title="Mở thư mục trên Drive">↗</a>}</header>
+        {loadingThreeDLibrary && !threeDLibrary.folders.length ? <p>Đang chuẩn bị thư mục…</p> : folder.files.length ? <ul>{folder.files.map((file) => <li key={file.id}><a href={file.downloadUrl} download={file.name}>{file.name}</a><small>{file.updatedAt}</small></li>)}</ul> : <p>Chưa có tệp.</p>}
+      </section>)}
+    </div>
+  </section>;
   const renderWorkflowCustomerSearch = () => (
     <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
@@ -2972,6 +2970,10 @@ export default function Home() {
           <section className="document-workspace">
             {renderDocumentLibrary()}
           </section>
+        ) : activeFolder === "3D" ? (
+          <section className="document-workspace">
+            {renderThreeDLibrary()}
+          </section>
         ) : (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
@@ -2981,7 +2983,7 @@ export default function Home() {
             </section>
           </section>
         )}
-        {activeFolder !== "Tài liệu" && selectedCustomerLocation && renderWorkflowFiles()}
+        {activeFolder !== "Tài liệu" && activeFolder !== "3D" && selectedCustomerLocation && renderWorkflowFiles()}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       </section>
 

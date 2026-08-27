@@ -333,9 +333,9 @@
 .document-day__actions .document-day__lock--locked { border-color: #a98d71; background: #f4eee7; color: #684d36; }
 .document-day__actions .document-day__delete:hover:not(:disabled) { border-color: #b76558; color: #a43f34; }
 .document-day__content { border-top: 1px solid #e9e6e0; background: #fff; }
-.three-d-library { border-top: 1px solid #dedbd5; background: #fff; padding: 20px 25px 24px; }
+.three-d-library { overflow: hidden; border: 1px solid #dedbd5; border-radius: 10px; background: #fff; padding: 20px 25px 24px; }
 .three-d-library__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
-.three-d-library__heading h2 { margin: 2px 0 4px; color: #393530; font-size: 16px; }
+.three-d-library__heading h1 { margin: 2px 0 4px; color: #393530; font-size: 24px; letter-spacing: -.55px; }
 .three-d-library__heading p { margin: 0; color: #827c73; font-size: 10px; }
 .three-d-library__heading > div:last-child { display: flex; align-items: center; gap: 7px; }
 .three-d-library__open { display: inline-flex; min-height: 28px; align-items: center; padding: 0 9px; border: 1px solid #dedad3; border-radius: 5px; color: #655e56; font-size: 10px; text-decoration: none; }
@@ -344,7 +344,7 @@
 .three-d-library__folder { min-width: 0; border: 1px solid #e5e1da; border-radius: 7px; background: #fbfaf8; }
 .three-d-library__folder header { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; border-bottom: 1px solid #ece8e2; }
 .three-d-library__folder header > span { color: #9b795d; font-size: 15px; }
-.three-d-library__folder h3 { flex: 1; margin: 0; color: #574b3f; font-size: 11px; }
+.three-d-library__folder h2 { flex: 1; margin: 0; color: #574b3f; font-size: 11px; }
 .three-d-library__folder header a { color: #806852; text-decoration: none; }
 .three-d-library__folder p { margin: 0; padding: 13px 11px; color: #958d83; font-size: 10px; }
 .three-d-library__folder ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
