@@ -2799,7 +2799,7 @@ export default function Home() {
               </aside>
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading personnel-workspace__heading--compact">
-                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Khách hàng</button></div>
+                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← UI tổng</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
