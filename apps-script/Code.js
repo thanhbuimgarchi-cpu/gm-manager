@@ -1597,7 +1597,7 @@ function loadPersonnel_() {
 function syncPersonnelWorkbook_(personnel) {
   const folder = personnelFolder_();
   const categoryLabels = {
-    management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
+    coordination: "Điều phối", management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
     construction: "Nhân công xây dựng", workshop: "Nhân công xưởng", partner: "Đối tác",
   };
   const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Ngày sinh", "Số điện thoại", "Chức vụ", "Địa chỉ", "_ID"]];

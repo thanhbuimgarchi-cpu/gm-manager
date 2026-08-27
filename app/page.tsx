@@ -459,6 +459,7 @@ const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|
 
 
 const personnelCategories: PersonnelCategory[] = [
+  { id: "coordination", label: "Điều phối", icon: "⇄", description: "Điều phối công việc, lịch triển khai và nguồn lực" },
   { id: "management", label: "Ban quản lý", icon: "♛", description: "Ban giám đốc và đội ngũ quản lý GM" },
   { id: "office", label: "Nhân viên văn phòng", icon: "▤", description: "Hành chính, kế toán, kinh doanh và thiết kế" },
   { id: "site", label: "Nhân viên công trình", icon: "⌂", description: "Chỉ huy, giám sát và điều phối công trình" },
@@ -1173,6 +1174,7 @@ export default function Home() {
   const [customerName, setCustomerName] = useState("");
   const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
+  const [loginOpen, setLoginOpen] = useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -1457,6 +1459,7 @@ export default function Home() {
   const renderMobileAppActions = () => <>
     {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật ngay</button>}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => setLoginOpen(true)}>◉ Đăng nhập</button>
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
   </>;
 
@@ -2774,7 +2777,7 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM-manager" /></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></div>
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
@@ -2858,7 +2861,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo.png`} alt="GM-manager" /></div>
+        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
@@ -3014,6 +3017,18 @@ export default function Home() {
             <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             <button className="add-button" type="submit">Lưu kết nối</button>
+          </form>
+        </div>
+      )}
+
+      {loginOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}>
+          <form className="add-dialog login-dialog" onSubmit={(event) => { event.preventDefault(); setNotice("Đăng nhập tài khoản sẽ được bật sau khi thiết lập máy chủ xác thực."); }} onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setLoginOpen(false)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Tài khoản</p><h2>Đăng nhập GM-manager</h2>
+            <label>Tài khoản<input name="username" autoComplete="username" placeholder="Email hoặc tên tài khoản" autoFocus required /></label>
+            <label>Mật khẩu<input name="password" type="password" autoComplete="current-password" placeholder="Nhập mật khẩu" required /></label>
+            <div className="login-dialog__actions"><button className="add-button" type="submit">Đăng nhập</button><button className="login-google" type="button" onClick={() => setNotice("Đăng nhập Google sẽ được bật sau khi cấu hình Google OAuth.")}><span aria-hidden="true">G</span> Đăng nhập với Google</button></div>
           </form>
         </div>
       )}

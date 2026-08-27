@@ -130,6 +130,24 @@
 @media (max-width: 620px) { .line-list-editor__actions { flex-direction: column; padding-top: 0; }.line-list-editor__actions button { width: 30px; height: 30px; } }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }.dialog-actions > button:first-child { border: 1px solid #d9d8d3; border-radius: 5px; background: #fff; color: #5c5953; }
 
+/* Account entry, personnel navigation, and square GM mark. */
+.pwa-action--login { border: 0; background: transparent; color: #5e5a54; font: inherit; font-size: 11px; }
+.pwa-action--login:hover { color: #6d4f37; }
+.login-dialog { width: min(390px, 100%); }
+.login-dialog__actions { display: grid; gap: 8px; margin-top: 18px; }
+.login-dialog__actions .add-button, .login-google { width: 100%; min-height: 38px; }
+.login-google { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #d7d4ce; border-radius: 7px; background: #fff; color: #4e4a43; font: inherit; font-size: 11px; }
+.login-google:hover { border-color: #b4967d; background: #faf7f3; color: #624a35; }
+.login-google span { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #4285f4; color: #fff; font-size: 11px; font-weight: 700; }
+.brand--with-logo { min-width: 32px; min-height: 32px; }
+.brand--with-logo img { width: 32px; height: 32px; aspect-ratio: 1; object-fit: contain; }
+.customer-gateway__brand img { transform: translateY(2px); }
+@media (max-width: 620px) {
+  .brand--with-logo { min-width: 24px; min-height: 24px; }
+  .brand--with-logo img, .customer-gateway__brand img { width: 24px; height: 24px; transform: translateY(1px); }
+  .customer-gateway__actions .pwa-action--login { min-height: 30px; padding: 0 7px; font-size: 9px; }
+}
+
 /* Gateway cards stay compact: no clipped secondary captions or trailing labels. */
 .personnel-entry { grid-template-columns: 42px minmax(0, 1fr); }
 .topbar { justify-content: flex-end; }
