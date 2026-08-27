@@ -1156,6 +1156,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
 
 export default function Home() {
   const now = getVietnamDate();
+  const appVersionLabel = APP_VERSION === "development" ? "dev" : APP_VERSION.slice(0, 7);
   const [activeFolder, setActiveFolder] = useState("Tư vấn");
   const [years, setYears] = useState<YearFolder[]>(initialYears);
   const [selectedYear, setSelectedYear] = useState(now.year);
@@ -1284,7 +1285,7 @@ export default function Home() {
     let reloadingForWorker = false;
     const markWorkerUpdate = () => {
       setUpdateAvailable(true);
-      setNotice("GM-CRM có bản mới. Nhấn Cập nhật ngay để sử dụng.");
+      setNotice("GM-CRM có bản mới. Nhấn Cập nhật để sử dụng.");
     };
     if ("serviceWorker" in navigator) {
       void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).then((registration) => {
@@ -1482,8 +1483,9 @@ export default function Home() {
     setNotice("Đã gửi thông báo thử đến thiết bị này.");
   };
 
+  const renderUpdateAction = () => updateAvailable ? <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button> : null;
   const renderMobileAppActions = () => <>
-    {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật ngay</button>}
+    {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => setLoginOpen(true)}>◉ Đăng nhập</button>
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
@@ -2803,9 +2805,10 @@ export default function Home() {
       {!selectedCustomerProjectId && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
+              {personnelView && renderUpdateAction()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
               <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
             </div>
@@ -2887,7 +2890,7 @@ export default function Home() {
       )}
 
       <aside className="sidebar">
-        <div className="brand brand--with-logo"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></div>
+        <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
           {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
@@ -2902,7 +2905,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
-          <div className="topbar__actions"><button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {activeFolder === "Tư vấn" ? (
