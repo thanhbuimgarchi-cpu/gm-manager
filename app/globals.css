@@ -141,10 +141,10 @@
 .login-google span { display: grid; width: 18px; height: 18px; place-items: center; border-radius: 50%; background: #4285f4; color: #fff; font-size: 11px; font-weight: 700; }
 .brand--with-logo { min-width: 32px; min-height: 32px; }
 .brand--with-logo img { width: 32px; height: 32px; aspect-ratio: 1; object-fit: contain; }
-.customer-gateway__brand img { transform: translateY(2px); }
+.customer-gateway__brand img { transform: translateY(9px); }
 @media (max-width: 620px) {
   .brand--with-logo { min-width: 24px; min-height: 24px; }
-  .brand--with-logo img, .customer-gateway__brand img { width: 24px; height: 24px; transform: translateY(1px); }
+  .brand--with-logo img, .customer-gateway__brand img { width: 24px; height: 24px; transform: translateY(5px); }
   .customer-gateway__actions .pwa-action--login { min-height: 30px; padding: 0 7px; font-size: 9px; }
 }
 
