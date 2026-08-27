@@ -283,6 +283,7 @@ const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
 const personnelStorageKey = "gm-manager-personnel-v1";
+const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
 const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // The currently deployed Apps Script still verifies its historical token. It is
 // supplied automatically for compatibility, so users only ever enter the URL.
@@ -308,6 +309,10 @@ function desktopBridge() {
 
 function isWindowsDesktop() {
   return /windows nt/i.test(navigator.userAgent);
+}
+
+function isMobileDevice() {
+  return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
 type AppsScriptBridgeMessage<T> = {
@@ -1180,6 +1185,7 @@ export default function Home() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
+  const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
@@ -1215,6 +1221,17 @@ export default function Home() {
   const driveRequestsInFlight = useRef(new Set<string>());
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
+  const promptForMobileNotifications = () => {
+    if (!isMobileDevice()) return;
+    try { window.localStorage.setItem(mobileNotificationSetupKey, "pending"); } catch { /* Optional prompt state. */ }
+    setNotificationSetupOpen(true);
+  };
+
+  const dismissMobileNotificationSetup = () => {
+    try { window.localStorage.setItem(mobileNotificationSetupKey, "dismissed"); } catch { /* Optional prompt state. */ }
+    setNotificationSetupOpen(false);
+  };
+
   useEffect(() => {
     const currentDate = getVietnamDate();
     setSelectedYear(currentDate.year);
@@ -1248,7 +1265,11 @@ export default function Home() {
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
-    const updateInstallState = () => setIsAppInstalled(Boolean(desktopBridge()) || standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+    const updateInstallState = () => {
+      const installed = Boolean(desktopBridge()) || standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+      setIsAppInstalled(installed);
+      if (installed && isMobileDevice() && window.localStorage.getItem(mobileNotificationSetupKey) === "pending" && (!("Notification" in window) || Notification.permission === "default")) setNotificationSetupOpen(true);
+    };
     const captureInstallPrompt = (event: Event) => {
       event.preventDefault();
       setDeferredInstallPrompt(event as InstallPromptEvent);
@@ -1256,6 +1277,7 @@ export default function Home() {
     const markInstalled = () => {
       setIsAppInstalled(true);
       setDeferredInstallPrompt(null);
+      promptForMobileNotifications();
     };
     updateInstallState();
     if ("Notification" in window) setNotificationPermission(Notification.permission);
@@ -1397,7 +1419,10 @@ export default function Home() {
     if (deferredInstallPrompt) {
       await deferredInstallPrompt.prompt();
       const choice = await deferredInstallPrompt.userChoice;
-      if (choice.outcome === "accepted") setNotice("Đã cài GM-CRM lên màn hình chính.");
+      if (choice.outcome === "accepted") {
+        setNotice("Đã cài GM-CRM lên màn hình chính.");
+        promptForMobileNotifications();
+      }
       setDeferredInstallPrompt(null);
       return;
     }
@@ -1453,6 +1478,7 @@ export default function Home() {
       tag: "gm-crm-notification-test",
       data: { url: `${import.meta.env.BASE_URL}` },
     });
+    try { if (isMobileDevice()) window.localStorage.setItem(mobileNotificationSetupKey, "complete"); } catch { /* Optional prompt state. */ }
     setNotice("Đã gửi thông báo thử đến thiết bị này.");
   };
 
@@ -3040,6 +3066,18 @@ export default function Home() {
             <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
             {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
             <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
+            {mobileInstallHelp !== "desktop" && <div className="dialog-actions"><button type="button" onClick={() => setMobileInstallHelp(null)}>Để sau</button><button type="button" className="add-button" onClick={() => { setMobileInstallHelp(null); promptForMobileNotifications(); }}>Đã cài xong</button></div>}
+          </section>
+        </div>
+      )}
+
+      {notificationSetupOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
+          <section className="security-dialog notification-setup-dialog" role="dialog" aria-label="Bật thông báo" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
+            <p className="eyebrow">GM-manager đã được cài</p><h2>Bật thông báo?</h2>
+            <p>Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Bạn luôn có thể bật lại từ nút Thông báo.</p>
+            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>Bật thông báo</button></div>
           </section>
         </div>
       )}
