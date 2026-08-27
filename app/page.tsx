@@ -1920,7 +1920,10 @@ export default function Home() {
 
   useEffect(() => {
     if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
-      void loadDocuments();
+      // Keep the day that the user was viewing when returning from another
+      // folder. Loading the generic "latest" day here left the expanded day
+      // and the loaded files out of sync, which incorrectly showed "Nạp tệp".
+      void loadDocuments(selectedDocumentSnapshotId || expandedDocumentSnapshotId || undefined);
     }
     if (activeFolder === "3D" && selectedCustomerLocation) {
       void loadThreeDLibrary();
