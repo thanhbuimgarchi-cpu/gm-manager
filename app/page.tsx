@@ -1226,6 +1226,7 @@ export default function Home() {
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
   const [loadedDocumentSnapshotId, setLoadedDocumentSnapshotId] = useState("");
   const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
+  const [documentFilesBySnapshotId, setDocumentFilesBySnapshotId] = useState<Record<string, DocumentFile[]>>({});
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [documentSnapshotActionId, setDocumentSnapshotActionId] = useState<string | null>(null);
   const [documentsError, setDocumentsError] = useState("");
@@ -1391,6 +1392,7 @@ export default function Home() {
     setExpandedDocumentSnapshotId("");
     setLoadedDocumentSnapshotId("");
     setDocumentFiles([]);
+    setDocumentFilesBySnapshotId({});
     setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
@@ -1410,6 +1412,7 @@ export default function Home() {
     setExpandedDocumentSnapshotId("");
     setLoadedDocumentSnapshotId("");
     setDocumentFiles([]);
+    setDocumentFilesBySnapshotId({});
     setDocumentsError("");
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
@@ -1826,18 +1829,20 @@ export default function Home() {
     const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
     return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
   };
-  const loadDocuments = async (snapshotId?: string, refresh = false) => {
+  const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedSnapshotId = snapshotId || "";
     const cacheKey = documentCacheKey(requestedSnapshotId);
     const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
-      setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, requestedSnapshotId || cached.activeSnapshotId));
       const activeId = requestedSnapshotId || cached.activeSnapshotId;
+      const files = mergeDocumentMetadataOverrides(cached.files, activeId);
+      setDocumentFiles(files);
+      if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: files }));
       setSelectedDocumentSnapshotId(activeId);
       setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => current || activeId);
+      setExpandedDocumentSnapshotId((current) => activateLatest ? activeId : current || activeId);
       return;
     }
     setLoadingDocuments(true);
@@ -1858,9 +1863,10 @@ export default function Home() {
       if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
       setDocumentSnapshots(next.snapshots);
       setDocumentFiles(next.files);
+      if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: next.files }));
       setSelectedDocumentSnapshotId(activeId);
       setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => current || activeId);
+      setExpandedDocumentSnapshotId((current) => activateLatest ? activeId : current || activeId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
       if (!cached) setDocumentsError(message);
@@ -1888,7 +1894,9 @@ export default function Home() {
       if (result.alreadyExists) {
         const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(result.snapshot.id), DRIVE_DOCUMENT_CACHE_MS);
         if (cached) {
-          setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, result.snapshot.id));
+          const files = mergeDocumentMetadataOverrides(cached.files, result.snapshot.id);
+          setDocumentFiles(files);
+          setDocumentFilesBySnapshotId((current) => ({ ...current, [result.snapshot.id]: files }));
           setLoadedDocumentSnapshotId(result.snapshot.id);
         } else {
           setDocumentFiles([]);
@@ -1899,6 +1907,7 @@ export default function Home() {
         const copiedFiles = mergeDocumentMetadataOverrides(result.files ?? [], result.snapshot.id);
         const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: copiedFiles };
         setDocumentFiles(copiedFiles);
+        setDocumentFilesBySnapshotId((current) => ({ ...current, [result.snapshot.id]: copiedFiles }));
         setLoadedDocumentSnapshotId(result.snapshot.id);
         writeDriveCache(documentCacheKey(result.snapshot.id), next);
         writeDriveCache(documentCacheKey(""), next);
@@ -1952,6 +1961,7 @@ export default function Home() {
     const currentOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(metadataCacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
     writeDriveCache(metadataCacheKey, { ...currentOverrides, [fileId]: { work: changedFile.work } });
     setDocumentFiles(nextFiles);
+    setDocumentFilesBySnapshotId((current) => ({ ...current, [selectedDocumentSnapshotId]: nextFiles }));
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "update-document-metadata",
@@ -2028,6 +2038,10 @@ export default function Home() {
       setDocumentSnapshots(nextSnapshots);
       setSelectedDocumentSnapshotId(nextSelectedId);
       setDocumentFiles(nextFiles);
+      setDocumentFilesBySnapshotId((current) => {
+        const { [snapshot.id]: _removed, ...remaining } = current;
+        return nextCached && nextSelectedId ? { ...remaining, [nextSelectedId]: nextFiles } : remaining;
+      });
       setLoadedDocumentSnapshotId(nextCached ? nextSelectedId : "");
       setDocumentsError("");
       if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
@@ -2041,10 +2055,9 @@ export default function Home() {
 
   useEffect(() => {
     if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
-      // Keep the day that the user was viewing when returning from another
-      // folder. Loading the generic "latest" day here left the expanded day
-      // and the loaded files out of sync, which incorrectly showed "Nạp tệp".
-      void loadDocuments(selectedDocumentSnapshotId || expandedDocumentSnapshotId || undefined);
+      // Returning to Tài liệu always prioritizes the newest day. Older days
+      // remain on demand, while a day that was already loaded stays in cache.
+      void loadDocuments(undefined, false, true);
     }
     if (activeFolder === "3D" && selectedCustomerLocation) {
       void loadThreeDLibrary();
@@ -2766,9 +2779,12 @@ export default function Home() {
       setExpandedDocumentSnapshotId(snapshotId);
       setSelectedDocumentSnapshotId(snapshotId);
       setDocumentsError("");
-      const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_DOCUMENT_CACHE_MS);
-      if (cached) {
-        setDocumentFiles(mergeDocumentMetadataOverrides(cached.files, snapshotId));
+      const rememberedFiles = documentFilesBySnapshotId[snapshotId];
+      const cached = rememberedFiles === undefined ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_DOCUMENT_CACHE_MS) : null;
+      if (rememberedFiles !== undefined || cached) {
+        const files = rememberedFiles ?? mergeDocumentMetadataOverrides(cached!.files, snapshotId);
+        setDocumentFiles(files);
+        if (rememberedFiles === undefined) setDocumentFilesBySnapshotId((current) => ({ ...current, [snapshotId]: files }));
         setLoadedDocumentSnapshotId(snapshotId);
       } else {
         setDocumentFiles([]);
@@ -2784,7 +2800,7 @@ export default function Home() {
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
         <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
-        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
+        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
