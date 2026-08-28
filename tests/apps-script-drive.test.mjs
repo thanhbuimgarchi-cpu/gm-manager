@@ -140,3 +140,15 @@ test("deleting a document day trashes only that day and removes its manifest met
   assert.equal(wroteManifest.snapshots.keepDay.locked, true);
   assert.equal(cleared, true);
 });
+
+test("work notes only keep the allowed choices and valid due dates", () => {
+  const context = loadContext();
+  const notes = context.normalizeWorkNotes_([
+    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", content: "Duyệt bản vẽ", dueDate: "2026-08-31", status: "Đỏ" },
+    { id: "note-2", priority: "Không hợp lệ", workType: "Khác", dueDate: "31/08/2026", status: "Tím" },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(notes)), [
+    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", content: "Duyệt bản vẽ", dueDate: "2026-08-31", status: "Đỏ" },
+    { id: "note-2", priority: "Bình thường", workType: "Tư vấn", assignee: "", content: "", dueDate: "", status: "Cam" },
+  ]);
+});

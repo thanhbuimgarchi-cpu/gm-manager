@@ -108,6 +108,7 @@ function doPost(event) {
       }
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
+    if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
@@ -118,6 +119,7 @@ function doPost(event) {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
+      if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
@@ -1043,6 +1045,7 @@ function listWorkflowFiles_(payload) {
     const iterator = workflowFolder.getFiles();
     while (iterator.hasNext()) {
       const file = iterator.next();
+      if (file.getName() === WORK_NOTES_FILE_NAME) continue;
       if (isSpecialWorkflowWorkbook_(file.getName())) continue;
       const fileUpdated = file.getLastUpdated();
       files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(fileUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: fileUpdated.getTime() });
@@ -1117,6 +1120,71 @@ function uploadWorkflowFile_(payload) {
   const file = workflowFolder.createFile(blob);
   CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
   return { ok: true, fileId: file.getId(), fileName: fileName, fileUrl: file.getUrl(), folderUrl: workflowFolder.getUrl() };
+}
+
+const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
+const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
+const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
+const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh"];
+
+function workNotesFolder_(year, month, projectId, createMissing) {
+  const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  if (!customerFolder) return null;
+  return createMissing ? getOrCreateFolder_(customerFolder, "Ghi chú") : findFolder_(customerFolder, "Ghi chú");
+}
+
+function workNotesPayload_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin hồ sơ ghi chú.");
+  return { year: year, month: month, projectId: projectId };
+}
+
+function workNoteText_(value, maximum) {
+  return String(value === null || value === undefined ? "" : value).trim().slice(0, maximum);
+}
+
+function normalizeWorkNotes_(notes) {
+  return (Array.isArray(notes) ? notes : []).slice(0, 500).map(function(note, index) {
+    const priority = workNoteText_(note && note.priority, 30);
+    const workType = workNoteText_(note && note.workType, 50);
+    const status = workNoteText_(note && note.status, 20);
+    const dueDate = workNoteText_(note && note.dueDate, 10);
+    return {
+      id: workNoteText_(note && note.id, 100) || "work-note-" + index + "-" + new Date().getTime(),
+      priority: WORK_NOTE_PRIORITIES.indexOf(priority) >= 0 ? priority : "Bình thường",
+      workType: WORK_NOTE_TYPES.indexOf(workType) >= 0 ? workType : "Tư vấn",
+      assignee: workNoteText_(note && note.assignee, 160),
+      content: workNoteText_(note && note.content, 4000),
+      dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : "",
+      status: WORK_NOTE_STATUSES.indexOf(status) >= 0 ? status : "Cam",
+    };
+  });
+}
+
+function loadWorkNotes_(payload) {
+  const details = workNotesPayload_(payload);
+  const folder = workNotesFolder_(details.year, details.month, details.projectId, false);
+  if (!folder) return { ok: true, notes: [] };
+  const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
+  if (!file) return { ok: true, notes: [] };
+  try {
+    return { ok: true, notes: normalizeWorkNotes_(JSON.parse(file.getBlob().getDataAsString() || "[]")) };
+  } catch (error) {
+    throw new Error("Không thể đọc dữ liệu ghi chú công việc.");
+  }
+}
+
+function syncWorkNotes_(payload) {
+  const details = workNotesPayload_(payload);
+  const folder = workNotesFolder_(details.year, details.month, details.projectId, true);
+  const notes = normalizeWorkNotes_(payload.notes);
+  const content = JSON.stringify(notes);
+  const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
+  if (file) file.setContent(content);
+  else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  return { ok: true, savedCount: notes.length };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";

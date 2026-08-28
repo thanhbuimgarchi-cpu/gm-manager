@@ -242,6 +242,19 @@ type PersonnelMember = {
 
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
 
+type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
+type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh";
+
+type WorkNote = {
+  id: string;
+  priority: WorkNotePriority;
+  workType: string;
+  assignee: string;
+  content: string;
+  dueDate: string;
+  status: WorkNoteStatus;
+};
+
 type DriveSyncConfig = {
   scriptUrl: string;
 };
@@ -460,6 +473,9 @@ const syncedDriveFolders: DriveFolder[] = [
 ].filter((folder) => !folder.label.startsWith("-"));
 
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
+const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
+const workNoteTypes = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"] as const;
+const workNoteStatuses: WorkNoteStatus[] = ["Đỏ", "Cam", "Xanh"];
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
 
 
@@ -1202,6 +1218,9 @@ export default function Home() {
   const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
   const [workflowFilesError, setWorkflowFilesError] = useState("");
   const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
+  const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
+  const [loadingWorkNotes, setLoadingWorkNotes] = useState(false);
+  const [savingWorkNotes, setSavingWorkNotes] = useState(false);
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
@@ -1218,6 +1237,7 @@ export default function Home() {
   const driveSyncTimer = useRef<number | null>(null);
   const designSyncTimers = useRef<Partial<Record<DesignProgressKind, number>>>({});
   const warrantySyncTimer = useRef<number | null>(null);
+  const workNotesSyncTimer = useRef<number | null>(null);
   const customerSearchTimer = useRef<number | null>(null);
   const driveRequestsInFlight = useRef(new Set<string>());
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
@@ -1627,6 +1647,76 @@ export default function Home() {
   };
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
+  const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
+  const loadWorkNotes = async (refresh = false) => {
+    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const cacheKey = workNotesCacheKey();
+    const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
+    if (cachedNotes && !refresh) setWorkNotes(cachedNotes);
+    setLoadingWorkNotes(!cachedNotes);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "load-work-notes",
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        projectId: selectedCustomerLocation.record.projectId,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể nạp ghi chú công việc.");
+      const nextNotes = result.notes ?? [];
+      setWorkNotes(nextNotes);
+      writeDriveCache(cacheKey, nextNotes);
+    } catch (error) {
+      if (!cachedNotes) setNotice(error instanceof Error ? error.message : "Không thể nạp ghi chú công việc.");
+    } finally {
+      setLoadingWorkNotes(false);
+    }
+  };
+  const saveWorkNotesToDrive = async (notes: WorkNote[], location = selectedCustomerLocation) => {
+    if (!location || !driveScriptUrl.trim()) return;
+    setSavingWorkNotes(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "sync-work-notes",
+        year: location.year,
+        month: location.month,
+        projectId: location.record.projectId,
+        notes,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu ghi chú công việc.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể lưu ghi chú công việc.");
+    } finally {
+      setSavingWorkNotes(false);
+    }
+  };
+  const persistWorkNotes = (nextNotes: WorkNote[]) => {
+    setWorkNotes(nextNotes);
+    const cacheKey = workNotesCacheKey();
+    if (cacheKey) writeDriveCache(cacheKey, nextNotes);
+    if (workNotesSyncTimer.current) window.clearTimeout(workNotesSyncTimer.current);
+    const location = selectedCustomerLocation;
+    workNotesSyncTimer.current = window.setTimeout(() => {
+      workNotesSyncTimer.current = null;
+      void saveWorkNotesToDrive(nextNotes, location);
+    }, 650);
+  };
+  const addWorkNote = () => {
+    persistWorkNotes([...workNotes, {
+      id: `work-note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      priority: "Bình thường",
+      workType: "Tư vấn",
+      assignee: "",
+      content: "",
+      dueDate: "",
+      status: "Cam",
+    }]);
+  };
+  const updateWorkNote = (id: string, field: Exclude<keyof WorkNote, "id">, value: string) => {
+    persistWorkNotes(workNotes.map((note) => note.id === id ? { ...note, [field]: value } as WorkNote : note));
+  };
+  const removeWorkNote = (id: string) => {
+    persistWorkNotes(workNotes.filter((note) => note.id !== id));
+  };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = workflowFilesCacheKey(folder);
@@ -2601,7 +2691,7 @@ export default function Home() {
     setPersonnelMenuId(null);
   };
   useEffect(() => {
-    if (!personnelView || !driveScriptUrl.trim()) return;
+    if ((!personnelView && activeFolder !== "Ghi chú") || !driveScriptUrl.trim()) return;
     let cancelled = false;
     setLoadingPersonnel(true);
     void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
@@ -2611,7 +2701,11 @@ export default function Home() {
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
     return () => { cancelled = true; };
-  }, [personnelView, driveScriptUrl]);
+  }, [personnelView, activeFolder, driveScriptUrl]);
+  useEffect(() => {
+    if (activeFolder !== "Ghi chú" || !selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    void loadWorkNotes();
+  }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
   useEffect(() => {
     if (!selectedCustomerProjectId || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
     void loadWorkflowFiles(activeFolder, true);
@@ -2631,6 +2725,30 @@ export default function Home() {
               <span><b>{file.name}</b><small>{file.isFolder ? "Thư mục" : "Chỉnh sửa"}: {file.updatedAt}</small></span><em>{file.isFolder ? "↗" : "↓"}</em>
             </a>
           )) : null}
+      </div>
+    </section>
+  );
+  const renderWorkNotes = () => (
+    <section className="work-notes" aria-label="Ghi chú công việc">
+      <header className="work-notes__heading">
+        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>Giao việc, gắn nhân lực và theo dõi hạn hoàn thành của hồ sơ này.</p></div>
+        <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu"}</span><button type="button" onClick={addWorkNote}><b>＋</b> Ghi chú</button></div>
+      </header>
+      <div className="work-notes__table-wrap">
+        <table className="work-notes__table">
+          <thead><tr><th>Ưu tiên</th><th>Công việc</th><th>Gắn nhân lực</th><th>Nội dung công việc</th><th>Thời gian hoàn thành</th><th>Trạng thái</th></tr></thead>
+          <tbody>{loadingWorkNotes ? <tr><td colSpan={6} className="work-notes__empty">Đang nạp ghi chú…</td></tr>
+            : workNotes.length ? workNotes.map((note) => (
+              <tr key={note.id}>
+                <td><select value={note.priority} onChange={(event) => updateWorkNote(note.id, "priority", event.target.value)} aria-label="Ưu tiên">{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></td>
+                <td><select value={note.workType} onChange={(event) => updateWorkNote(note.id, "workType", event.target.value)} aria-label="Công việc">{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></td>
+                <td><select value={note.assignee} onChange={(event) => updateWorkNote(note.id, "assignee", event.target.value)} aria-label="Gắn nhân lực"><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
+                <td><GrowingTextarea value={note.content} onChange={(event) => updateWorkNote(note.id, "content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" /></td>
+                <td><input type="date" value={note.dueDate} onChange={(event) => updateWorkNote(note.id, "dueDate", event.target.value)} aria-label="Thời gian hoàn thành" /></td>
+                <td><div className="work-notes__status"><select className={`work-notes__status-select work-notes__status-select--${note.status.toLowerCase()}`} value={note.status} onChange={(event) => updateWorkNote(note.id, "status", event.target.value)} aria-label="Trạng thái">{workNoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select><button type="button" onClick={() => removeWorkNote(note.id)} aria-label="Xóa ghi chú">×</button></div></td>
+              </tr>
+            )) : <tr><td colSpan={6} className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</td></tr>}</tbody>
+        </table>
       </div>
     </section>
   );
@@ -2908,7 +3026,12 @@ export default function Home() {
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
-        {activeFolder === "Tư vấn" ? (
+        {activeFolder === "Ghi chú" ? (
+          <section className="workflow-page">
+            {renderWorkflowCustomerSearch()}
+            {selectedCustomerLocation && renderWorkNotes()}
+          </section>
+        ) : activeFolder === "Tư vấn" ? (
           <section className="consulting-view">
             <label className="customer-search consulting-search">
               <span>⌕</span>
