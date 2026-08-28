@@ -1125,7 +1125,11 @@ function uploadWorkflowFile_(payload) {
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
-const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh"];
+const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
+
+function workNotesCacheKey_(details) {
+  return "gmcrm-work-notes-" + details.year + "-" + details.month + "-" + details.projectId;
+}
 
 function workNotesFolder_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
@@ -1145,19 +1149,28 @@ function workNoteText_(value, maximum) {
   return String(value === null || value === undefined ? "" : value).trim().slice(0, maximum);
 }
 
+function normalizeWorkNoteDate_(value) {
+  const text = workNoteText_(value, 10);
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (iso) return iso[3] + "/" + iso[2] + "/" + iso[1];
+  return /^\d{2}\/\d{2}\/\d{4}$/.test(text) ? text : "";
+}
+
 function normalizeWorkNotes_(notes) {
   return (Array.isArray(notes) ? notes : []).slice(0, 500).map(function(note, index) {
     const priority = workNoteText_(note && note.priority, 30);
     const workType = workNoteText_(note && note.workType, 50);
     const status = workNoteText_(note && note.status, 20);
-    const dueDate = workNoteText_(note && note.dueDate, 10);
+    const dueDate = normalizeWorkNoteDate_(note && note.dueDate);
+    const actualDate = normalizeWorkNoteDate_(note && note.actualDate);
     return {
       id: workNoteText_(note && note.id, 100) || "work-note-" + index + "-" + new Date().getTime(),
       priority: WORK_NOTE_PRIORITIES.indexOf(priority) >= 0 ? priority : "Bình thường",
       workType: WORK_NOTE_TYPES.indexOf(workType) >= 0 ? workType : "Tư vấn",
       assignee: workNoteText_(note && note.assignee, 160),
       content: workNoteText_(note && note.content, 4000),
-      dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : "",
+      dueDate: dueDate,
+      actualDate: actualDate,
       status: WORK_NOTE_STATUSES.indexOf(status) >= 0 ? status : "Cam",
     };
   });
@@ -1165,12 +1178,17 @@ function normalizeWorkNotes_(notes) {
 
 function loadWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
+  const cacheKey = workNotesCacheKey_(details);
+  const cached = readCachedJson_(cacheKey);
+  if (cached) return { ok: true, notes: normalizeWorkNotes_(cached), source: "cache" };
   const folder = workNotesFolder_(details.year, details.month, details.projectId, false);
   if (!folder) return { ok: true, notes: [] };
   const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
   if (!file) return { ok: true, notes: [] };
   try {
-    return { ok: true, notes: normalizeWorkNotes_(JSON.parse(file.getBlob().getDataAsString() || "[]")) };
+    const notes = normalizeWorkNotes_(JSON.parse(file.getBlob().getDataAsString() || "[]"));
+    cacheJson_(cacheKey, notes, 21600);
+    return { ok: true, notes: notes, source: "drive" };
   } catch (error) {
     throw new Error("Không thể đọc dữ liệu ghi chú công việc.");
   }
@@ -1180,6 +1198,7 @@ function syncWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
   const folder = workNotesFolder_(details.year, details.month, details.projectId, true);
   const notes = normalizeWorkNotes_(payload.notes);
+  cacheJson_(workNotesCacheKey_(details), notes, 21600);
   const content = JSON.stringify(notes);
   const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
   if (file) file.setContent(content);

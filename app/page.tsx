@@ -243,7 +243,7 @@ type PersonnelMember = {
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
 
 type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
-type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh";
+type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen";
 
 type WorkNote = {
   id: string;
@@ -252,6 +252,7 @@ type WorkNote = {
   assignee: string;
   content: string;
   dueDate: string;
+  actualDate: string;
   status: WorkNoteStatus;
 };
 
@@ -475,7 +476,7 @@ const syncedDriveFolders: DriveFolder[] = [
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
 const workNoteTypes = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"] as const;
-const workNoteStatuses: WorkNoteStatus[] = ["Đỏ", "Cam", "Xanh"];
+const workNoteStatuses: WorkNoteStatus[] = ["Đỏ", "Cam", "Xanh", "Đen"];
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
 
 
@@ -1049,6 +1050,15 @@ function getVietnamDate() {
   return { day: value("day"), month: value("month"), year: value("year") };
 }
 
+function formatWorkNoteDate(date = new Date()) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+}
+
 function nameInitials(name: string) {
   const words = name
     .normalize("NFD")
@@ -1221,6 +1231,7 @@ export default function Home() {
   const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
   const [loadingWorkNotes, setLoadingWorkNotes] = useState(false);
   const [savingWorkNotes, setSavingWorkNotes] = useState(false);
+  const [pendingWorkNoteCompletionId, setPendingWorkNoteCompletionId] = useState<string | null>(null);
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
@@ -1650,7 +1661,7 @@ export default function Home() {
   };
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
-  const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
+  const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-v2:${location.year}-${location.month}-${location.record.projectId}` : "";
   const loadWorkNotes = async (refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const cacheKey = workNotesCacheKey();
@@ -1711,6 +1722,7 @@ export default function Home() {
       assignee: "",
       content: "",
       dueDate: "",
+      actualDate: "",
       status: "Cam",
     }]);
   };
@@ -1719,6 +1731,12 @@ export default function Home() {
   };
   const removeWorkNote = (id: string) => {
     persistWorkNotes(workNotes.filter((note) => note.id !== id));
+  };
+  const confirmWorkNoteCompletion = () => {
+    if (!pendingWorkNoteCompletionId) return;
+    const noteId = pendingWorkNoteCompletionId;
+    setPendingWorkNoteCompletionId(null);
+    updateWorkNote(noteId, "actualDate", formatWorkNoteDate());
   };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
@@ -2744,24 +2762,28 @@ export default function Home() {
   const renderWorkNotes = () => (
     <section className="work-notes" aria-label="Ghi chú công việc">
       <header className="work-notes__heading">
-        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>Giao việc, gắn nhân lực và theo dõi hạn hoàn thành của hồ sơ này.</p></div>
-        <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu"}</span><button type="button" onClick={addWorkNote}><b>＋</b> Ghi chú</button></div>
+        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>Giao việc, gắn nhân lực và theo dõi thời gian hoàn thành của hồ sơ này.</p></div>
+        <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang đồng bộ…" : "Đã đồng bộ"}</span><button type="button" onClick={addWorkNote}><b>＋</b> Ghi chú</button></div>
       </header>
-      <div className="work-notes__table-wrap">
-        <table className="work-notes__table">
-          <thead><tr><th>Ưu tiên</th><th>Công việc</th><th>Gắn nhân lực</th><th>Nội dung công việc</th><th>Thời gian hoàn thành</th><th>Trạng thái</th></tr></thead>
-          <tbody>{loadingWorkNotes ? <tr><td colSpan={6} className="work-notes__empty">Đang nạp ghi chú…</td></tr>
-            : workNotes.length ? workNotes.map((note) => (
-              <tr key={note.id}>
-                <td><select value={note.priority} onChange={(event) => updateWorkNote(note.id, "priority", event.target.value)} aria-label="Ưu tiên">{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></td>
-                <td><select value={note.workType} onChange={(event) => updateWorkNote(note.id, "workType", event.target.value)} aria-label="Công việc">{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></td>
-                <td><select value={note.assignee} onChange={(event) => updateWorkNote(note.id, "assignee", event.target.value)} aria-label="Gắn nhân lực"><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
-                <td><GrowingTextarea value={note.content} onChange={(event) => updateWorkNote(note.id, "content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" /></td>
-                <td><input type="date" value={note.dueDate} onChange={(event) => updateWorkNote(note.id, "dueDate", event.target.value)} aria-label="Thời gian hoàn thành" /></td>
-                <td><div className="work-notes__status"><select className={`work-notes__status-select work-notes__status-select--${note.status.toLowerCase()}`} value={note.status} onChange={(event) => updateWorkNote(note.id, "status", event.target.value)} aria-label="Trạng thái">{workNoteStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select><button type="button" onClick={() => removeWorkNote(note.id)} aria-label="Xóa ghi chú">×</button></div></td>
-              </tr>
-            )) : <tr><td colSpan={6} className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</td></tr>}</tbody>
-        </table>
+      <div className="work-notes__list">
+        {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
+          : workNotes.length ? workNotes.map((note) => (
+            <article className="work-note" key={note.id}>
+              <div className="work-note__line work-note__line--primary">
+                <label>Ưu tiên<select value={note.priority} onChange={(event) => updateWorkNote(note.id, "priority", event.target.value)} aria-label="Ưu tiên">{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
+                <label>Công việc<select value={note.workType} onChange={(event) => updateWorkNote(note.id, "workType", event.target.value)} aria-label="Công việc">{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
+                <label>Gắn nhân lực<select value={note.assignee} onChange={(event) => updateWorkNote(note.id, "assignee", event.target.value)} aria-label="Gắn nhân lực"><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+              </div>
+              <div className="work-note__line work-note__line--schedule">
+                <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => updateWorkNote(note.id, "dueDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" /></label>
+                <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
+                <button type="button" className={`work-note__complete ${note.actualDate ? "is-complete" : ""}`} disabled={Boolean(note.actualDate)} onClick={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}>✓</button>
+                <div className="work-note__status" role="group" aria-label="Trạng thái">{workNoteStatuses.map((status) => <button key={status} type="button" className={`work-note__status-dot work-note__status-dot--${status === "Đỏ" ? "red" : status === "Cam" ? "orange" : status === "Xanh" ? "green" : "black"} ${note.status === status ? "is-selected" : ""}`} onClick={() => updateWorkNote(note.id, "status", status)} aria-label={`Trạng thái ${status}`} aria-pressed={note.status === status}><span aria-hidden="true" /></button>)}</div>
+                <button type="button" className="work-note__delete" onClick={() => removeWorkNote(note.id)} aria-label="Xóa ghi chú">×</button>
+              </div>
+              <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => updateWorkNote(note.id, "content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" /></label>
+            </article>
+          )) : <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
       </div>
     </section>
   );
@@ -3220,6 +3242,18 @@ export default function Home() {
             <p className="eyebrow">GM-manager đã được cài</p><h2>Bật thông báo?</h2>
             <p>Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Bạn luôn có thể bật lại từ nút Thông báo.</p>
             <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>Bật thông báo</button></div>
+          </section>
+        </div>
+      )}
+
+      {pendingWorkNoteCompletionId && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setPendingWorkNoteCompletionId(null)}>
+          <section className="security-dialog" role="dialog" aria-modal="true" aria-label="Xác nhận hoàn thành công việc" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setPendingWorkNoteCompletionId(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Ghi chú công việc</p>
+            <h2>Xác nhận hoàn thành?</h2>
+            <p>Hệ thống sẽ ghi ngày hoàn thành thực tế là <b>{formatWorkNoteDate()}</b> và đồng bộ cho các thiết bị.</p>
+            <div className="dialog-actions"><button type="button" onClick={() => setPendingWorkNoteCompletionId(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmWorkNoteCompletion}>Có, hoàn thành</button></div>
           </section>
         </div>
       )}
