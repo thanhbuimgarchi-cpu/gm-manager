@@ -120,6 +120,7 @@ function doPost(event) {
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
+      if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
@@ -1123,6 +1124,7 @@ function uploadWorkflowFile_(payload) {
 }
 
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
+const COMPLETED_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_hoan_thanh.json";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
 const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
@@ -1163,6 +1165,7 @@ function normalizeWorkNotes_(notes) {
     const status = workNoteText_(note && note.status, 20);
     const dueDate = normalizeWorkNoteDate_(note && note.dueDate);
     const actualDate = normalizeWorkNoteDate_(note && note.actualDate);
+    const acceptedAt = workNoteText_(note && note.acceptedAt, 40);
     return {
       id: workNoteText_(note && note.id, 100) || "work-note-" + index + "-" + new Date().getTime(),
       priority: WORK_NOTE_PRIORITIES.indexOf(priority) >= 0 ? priority : "Bình thường",
@@ -1171,7 +1174,10 @@ function normalizeWorkNotes_(notes) {
       content: workNoteText_(note && note.content, 4000),
       dueDate: dueDate,
       actualDate: actualDate,
-      status: WORK_NOTE_STATUSES.indexOf(status) >= 0 ? status : "Cam",
+      acceptedAt: acceptedAt,
+      // A newly created note stays black until the future assignee-acceptance
+      // flow explicitly records acceptedAt.
+      status: acceptedAt && WORK_NOTE_STATUSES.indexOf(status) >= 0 && status !== "Đen" ? status : "Đen",
     };
   });
 }
@@ -1204,6 +1210,42 @@ function syncWorkNotes_(payload) {
   if (file) file.setContent(content);
   else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
   return { ok: true, savedCount: notes.length };
+}
+
+function completedWorkNotesFolder_(details) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const customers = getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const yearFolder = getOrCreateFolder_(customers, String(details.year));
+  return getOrCreateFolder_(yearFolder, "T" + details.month);
+}
+
+function completeWorkNote_(payload) {
+  const details = workNotesPayload_(payload);
+  const note = normalizeWorkNotes_([payload.note || {}])[0];
+  if (!note || !note.actualDate) throw new Error("Cần xác nhận ngày hoàn thành trước khi lưu công việc vào Drive.");
+
+  const folder = completedWorkNotesFolder_(details);
+  const file = findFileByName_(folder, COMPLETED_WORK_NOTES_FILE_NAME);
+  let records = [];
+  if (file) {
+    try {
+      const saved = JSON.parse(file.getBlob().getDataAsString() || "[]");
+      records = Array.isArray(saved) ? saved.slice(-1999) : [];
+    } catch (error) {
+      throw new Error("Không thể đọc kho ghi chú hoàn thành của tháng này.");
+    }
+  }
+  records = records.filter(function(record) { return String(record && record.id || "") !== note.id; });
+  records.push({
+    ...note,
+    projectId: details.projectId,
+    savedAt: Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
+  });
+  const content = JSON.stringify(records);
+  if (file) file.setContent(content);
+  else folder.createFile(COMPLETED_WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  CacheService.getScriptCache().remove(workNotesCacheKey_(details));
+  return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";
