@@ -164,6 +164,25 @@ test("admin receives the active work-note overview across every customer", () =>
   assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "an@company.com" }).notes.map((note) => note.id))), ["note-a"]);
 });
 
+test("employee credentials are stored as a hash and verified by the server", () => {
+  const values = new Map();
+  const context = loadContext({
+    Utilities: {
+      base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url"),
+      getUuid: () => "fixed-salt",
+      DigestAlgorithm: { SHA_256: "sha256" },
+      Charset: { UTF_8: "utf8" },
+      computeDigest: (_algorithm, value) => [...Buffer.from(value)],
+    },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => values.get(key) || null, setProperty: (key, value) => values.set(key, value), deleteProperty: (key) => values.delete(key) }) },
+  });
+  context.employeeRosterMember_ = (email) => email === "an@company.com" ? { email, status: "Có" } : null;
+  assert.equal(context.registerEmployeeAccount_({ email: "an@company.com", password: "matkhau" }).ok, true);
+  assert.equal(values.has("gmcrm-employee-account-YW5AY29tcGFueS5jb20"), true);
+  assert.equal(context.verifyEmployeeLogin_({ email: "an@company.com", password: "matkhau" }).valid, true);
+  assert.equal(context.verifyEmployeeLogin_({ email: "an@company.com", password: "sai-mat-khau" }).valid, false);
+});
+
 test("customer portal keeps a published token private and returns only project progress", () => {
   const context = loadContext();
   assert.equal(context.normalizeCustomerShareToken_("A".repeat(48)), "a".repeat(48));

@@ -112,6 +112,7 @@ function doPost(event) {
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
+    if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
     if (payload.action === "customer-portal-share") return json_(customerPortalShare_(payload));
 
@@ -121,6 +122,9 @@ function doPost(event) {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
+      if (payload.action === "register-employee-account") return json_(registerEmployeeAccount_(payload));
+      if (payload.action === "request-password-reset") return json_(requestEmployeePasswordReset_(payload));
+      if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
@@ -1062,6 +1066,10 @@ function getOrCreateFolder_(parent, name) {
   return primary;
 }
 
+function driveFileViewUrl_(fileId) {
+  return "https://drive.google.com/file/d/" + encodeURIComponent(fileId) + "/view";
+}
+
 function listWorkflowFiles_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
@@ -1096,6 +1104,7 @@ function listWorkflowFiles_(payload) {
         id: item.id,
         name: item.name,
         downloadUrl: isFolder ? (item.webViewLink || "https://drive.google.com/drive/folders/" + item.id) : (item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id)),
+        viewUrl: isFolder ? (item.webViewLink || "https://drive.google.com/drive/folders/" + item.id) : (item.webViewLink || driveFileViewUrl_(item.id)),
         updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
         mimeType: item.mimeType,
         isFolder: isFolder,
@@ -1110,7 +1119,7 @@ function listWorkflowFiles_(payload) {
       const folder = folders.next();
       if (folder.getName().indexOf("-") === 0) continue;
       const folderUpdated = folder.getLastUpdated();
-      files.push({ id: folder.getId(), name: folder.getName(), downloadUrl: folder.getUrl(), updatedAt: Utilities.formatDate(folderUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: "application/vnd.google-apps.folder", isFolder: true, updatedAtMillis: folderUpdated.getTime() });
+      files.push({ id: folder.getId(), name: folder.getName(), downloadUrl: folder.getUrl(), viewUrl: folder.getUrl(), updatedAt: Utilities.formatDate(folderUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: "application/vnd.google-apps.folder", isFolder: true, updatedAtMillis: folderUpdated.getTime() });
     }
     const iterator = workflowFolder.getFiles();
     while (iterator.hasNext()) {
@@ -1118,12 +1127,12 @@ function listWorkflowFiles_(payload) {
       if (file.getName() === WORK_NOTES_FILE_NAME) continue;
       if (isSpecialWorkflowWorkbook_(file.getName())) continue;
       const fileUpdated = file.getLastUpdated();
-      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(fileUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: fileUpdated.getTime() });
+      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(fileUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: fileUpdated.getTime() });
     }
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis; });
   const result = { ok: true, files: files.map(function(file) {
-    return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType, isFolder: Boolean(file.isFolder) };
+    return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, viewUrl: file.viewUrl, updatedAt: file.updatedAt, mimeType: file.mimeType, isFolder: Boolean(file.isFolder) };
   }) };
   cacheJson_(cacheKey, result, 300);
   return result;
@@ -1600,6 +1609,7 @@ function documentFileOutput_(file, meta) {
     id: file.getId(),
     name: file.getName(),
     downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()),
+    viewUrl: driveFileViewUrl_(file.getId()),
     updatedAt: Utilities.formatDate(updated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
     mimeType: file.getMimeType(),
     work: meta.work,
@@ -1648,6 +1658,7 @@ function listDocuments_(payload) {
           id: item.id,
           name: item.name,
           downloadUrl: item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id),
+          viewUrl: item.webViewLink || driveFileViewUrl_(item.id),
           updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
           mimeType: item.mimeType,
           work: meta.work,
@@ -1661,7 +1672,7 @@ function listDocuments_(payload) {
         if (isHiddenDocumentFile_(file.getName())) continue;
         const modified = file.getLastUpdated();
         const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
-        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, updatedAtMillis: modified.getTime() });
+        files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, updatedAtMillis: modified.getTime() });
       }
     }
   }
@@ -1680,6 +1691,7 @@ function listThreeDFolderFiles_(folder) {
         id: item.id,
         name: item.name,
         downloadUrl: item.webContentLink || "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(item.id),
+        viewUrl: item.webViewLink || driveFileViewUrl_(item.id),
         updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
         mimeType: item.mimeType,
         updatedAtMillis: modified.getTime(),
@@ -1691,11 +1703,11 @@ function listThreeDFolderFiles_(folder) {
       const file = iterator.next();
       if (isHiddenDocumentFile_(file.getName())) continue;
       const modified = file.getLastUpdated();
-      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: modified.getTime() });
+      files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: modified.getTime() });
     }
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis || a.name.localeCompare(b.name); });
-  return files.map(function(file) { return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, updatedAt: file.updatedAt, mimeType: file.mimeType }; });
+  return files.map(function(file) { return { id: file.id, name: file.name, downloadUrl: file.downloadUrl, viewUrl: file.viewUrl, updatedAt: file.updatedAt, mimeType: file.mimeType }; });
 }
 
 function list3DFiles_(payload) {
@@ -1904,6 +1916,103 @@ function syncPersonnelWorkbook_(personnel) {
   } finally {
     DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
   }
+}
+
+function employeeAccountEmail_(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Hãy nhập email nhân viên hợp lệ.");
+  return email;
+}
+
+function employeeRosterMember_(email) {
+  const personnel = loadPersonnel_().personnel || {};
+  const categories = Object.keys(personnel);
+  for (let categoryIndex = 0; categoryIndex < categories.length; categoryIndex += 1) {
+    const member = (personnel[categories[categoryIndex]] || []).find(function(item) {
+      return String(item.email || "").trim().toLowerCase() === email && String(item.status || "Có") === "Có";
+    });
+    if (member) return member;
+  }
+  return null;
+}
+
+function employeeAccountKey_(email) {
+  return "gmcrm-employee-account-" + Utilities.base64EncodeWebSafe(email).replace(/=+$/g, "");
+}
+
+function employeeResetKey_(email) {
+  return "gmcrm-employee-reset-" + Utilities.base64EncodeWebSafe(email).replace(/=+$/g, "");
+}
+
+function employeePasswordHash_(value, salt) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(salt) + "|" + String(value), Utilities.Charset.UTF_8).map(function(byte) {
+    return ((byte + 256) % 256).toString(16).padStart(2, "0");
+  }).join("");
+}
+
+function employeePassword_(value) {
+  const password = String(value || "");
+  if (password.length < 6) throw new Error("Mật khẩu cần tối thiểu 6 ký tự.");
+  return password;
+}
+
+function readEmployeeAccount_(email) {
+  const raw = PropertiesService.getScriptProperties().getProperty(employeeAccountKey_(email));
+  try { return raw ? JSON.parse(raw) : null; } catch (error) { return null; }
+}
+
+function saveEmployeeAccount_(email, password) {
+  const salt = Utilities.getUuid();
+  PropertiesService.getScriptProperties().setProperty(employeeAccountKey_(email), JSON.stringify({
+    salt: salt,
+    hash: employeePasswordHash_(password, salt),
+    updatedAt: new Date().toISOString(),
+  }));
+}
+
+function verifyEmployeeLogin_(payload) {
+  const email = employeeAccountEmail_(payload.email);
+  const account = readEmployeeAccount_(email);
+  if (!employeeRosterMember_(email) || !account || !account.salt || !account.hash) return { ok: true, valid: false };
+  return { ok: true, valid: employeePasswordHash_(String(payload.password || ""), account.salt) === account.hash };
+}
+
+function registerEmployeeAccount_(payload) {
+  const email = employeeAccountEmail_(payload.email);
+  if (!employeeRosterMember_(email)) throw new Error("Email này chưa có trong danh sách Nhân lực đang hoạt động.");
+  if (readEmployeeAccount_(email)) throw new Error("Email này đã có tài khoản. Hãy đăng nhập hoặc chọn Quên mật khẩu.");
+  saveEmployeeAccount_(email, employeePassword_(payload.password));
+  return { ok: true };
+}
+
+function requestEmployeePasswordReset_(payload) {
+  const email = employeeAccountEmail_(payload.email);
+  const genericResult = { ok: true, message: "Nếu email có tài khoản, mã xác nhận đã được gửi." };
+  if (!employeeRosterMember_(email) || !readEmployeeAccount_(email)) return genericResult;
+  const properties = PropertiesService.getScriptProperties();
+  const key = employeeResetKey_(email);
+  let existing = null;
+  try { existing = JSON.parse(properties.getProperty(key) || ""); } catch (error) { existing = null; }
+  if (existing && Number(existing.sentAt || 0) > Date.now() - 60 * 1000) return genericResult;
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const salt = Utilities.getUuid();
+  properties.setProperty(key, JSON.stringify({ salt: salt, hash: employeePasswordHash_(code, salt), sentAt: Date.now(), expiresAt: Date.now() + 15 * 60 * 1000 }));
+  GmailApp.sendEmail(email, "Mã đặt lại mật khẩu GM-CRM", "Mã xác nhận của bạn là: " + code + "\n\nMã có hiệu lực trong 15 phút. Không chia sẻ mã này cho người khác.");
+  return genericResult;
+}
+
+function resetEmployeePassword_(payload) {
+  const email = employeeAccountEmail_(payload.email);
+  const code = String(payload.code || "").replace(/\D/g, "");
+  const properties = PropertiesService.getScriptProperties();
+  const key = employeeResetKey_(email);
+  let reset = null;
+  try { reset = JSON.parse(properties.getProperty(key) || ""); } catch (error) { reset = null; }
+  if (!reset || !reset.salt || !reset.hash || Number(reset.expiresAt || 0) < Date.now() || employeePasswordHash_(code, reset.salt) !== reset.hash) throw new Error("Mã xác nhận không đúng hoặc đã hết hạn.");
+  if (!employeeRosterMember_(email)) throw new Error("Email này không còn là nhân viên hoạt động.");
+  saveEmployeeAccount_(email, employeePassword_(payload.password));
+  properties.deleteProperty(key);
+  return { ok: true };
 }
 
 function normalizePersonnelPhone_(value) {

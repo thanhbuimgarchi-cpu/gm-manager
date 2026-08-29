@@ -196,6 +196,7 @@ type WorkflowFile = {
   id: string;
   name: string;
   downloadUrl: string;
+  viewUrl?: string;
   updatedAt: string;
   mimeType: string;
   isFolder?: boolean;
@@ -205,6 +206,7 @@ type DocumentFile = {
   id: string;
   name: string;
   downloadUrl: string;
+  viewUrl?: string;
   updatedAt: string;
   mimeType: string;
   work: string;
@@ -244,6 +246,7 @@ type PersonnelMember = {
 };
 
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
+type EmployeeAuthMode = "login" | "register" | "reset-request" | "reset-confirm";
 
 type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
 type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen" | "Tím";
@@ -528,6 +531,8 @@ const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự t
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
 const workNoteTypes = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"] as const;
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
+const isPreviewableFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => file.mimeType.startsWith("image/") || file.mimeType === "application/pdf" || /\.pdf$/i.test(file.name);
+const filePreviewUrl = (file: Pick<WorkflowFile, "id" | "viewUrl" | "downloadUrl">) => file.viewUrl || `https://drive.google.com/file/d/${encodeURIComponent(file.id)}/view` || file.downloadUrl;
 
 
 const personnelCategories: PersonnelCategory[] = [
@@ -1291,6 +1296,9 @@ export default function Home() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [employeeLoginEmail, setEmployeeLoginEmail] = useState("");
   const [employeeLoginPassword, setEmployeeLoginPassword] = useState("");
+  const [employeeResetCode, setEmployeeResetCode] = useState("");
+  const [employeeAuthMode, setEmployeeAuthMode] = useState<EmployeeAuthMode>("login");
+  const [employeeAuthBusy, setEmployeeAuthBusy] = useState(false);
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
   const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
@@ -1649,7 +1657,7 @@ export default function Home() {
   const renderMobileAppActions = () => <>
     {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
-    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeResetCode(""); setEmployeeAuthMode("login"); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>◌ Bật thông báo</button>
   </>;
 
@@ -2945,7 +2953,19 @@ export default function Home() {
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.filter((member) => member.id !== memberId) });
     setPersonnelMenuId(null);
   };
-  const loginEmployee = (event: FormEvent<HTMLFormElement>) => {
+  const finishEmployeeLogin = (member: PersonnelMember, account: string) => {
+    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* The session remains open in this browser tab. */ }
+    setLoggedInEmployeeEmail(account);
+    setEmployeeLoginPassword("");
+    setEmployeeResetCode("");
+    setEmployeeLoginError("");
+    setEmployeeAuthMode("login");
+    setLoginOpen(false);
+    const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
+    if (allowedFolders.length) setActiveFolder(allowedFolders[0]);
+    setNotice(`Đã đăng nhập ${member.name}.`);
+  };
+  const loginEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const account = employeeLoginEmail.trim().toLowerCase();
     const isBuiltInAdmin = account === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword;
@@ -2954,14 +2974,80 @@ export default function Home() {
       setEmployeeLoginError(account === builtInAdminAccount ? "Mật khẩu quản trị không đúng." : "Email này chưa có tài khoản hoạt động trong danh sách Nhân lực.");
       return;
     }
-    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* The session remains open in this browser tab. */ }
-    setLoggedInEmployeeEmail(account);
-    setEmployeeLoginPassword("");
+    if (isBuiltInAdmin) { finishEmployeeLogin(member, account); return; }
+    if (!employeeLoginPassword) { setEmployeeLoginError("Hãy nhập mật khẩu."); return; }
+    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script trước khi đăng nhập nhân viên."); return; }
+    setEmployeeAuthBusy(true);
     setEmployeeLoginError("");
-    setLoginOpen(false);
-    const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
-    if (allowedFolders.length) setActiveFolder(allowedFolders[0]);
-    setNotice(`Đã đăng nhập ${member.name}.`);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; valid?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "verify-employee-login", email: account, password: employeeLoginPassword });
+      if (!response.ok || !result.ok || !result.valid) throw new Error("Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy chọn Tạo tài khoản.");
+      finishEmployeeLogin(member, account);
+    } catch (error) {
+      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể xác thực tài khoản.");
+    } finally {
+      setEmployeeAuthBusy(false);
+    }
+  };
+  const registerEmployeeAccount = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const email = employeeLoginEmail.trim().toLowerCase();
+    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script trước khi tạo tài khoản."); return; }
+    if (email === builtInAdminAccount) { setEmployeeLoginError("Tài khoản admin không thể đăng ký lại."); return; }
+    if (employeeLoginPassword.length < 6) { setEmployeeLoginError("Mật khẩu cần tối thiểu 6 ký tự."); return; }
+    setEmployeeAuthBusy(true);
+    setEmployeeLoginError("");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "register-employee-account", email, password: employeeLoginPassword });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo tài khoản.");
+      setEmployeeLoginPassword("");
+      setEmployeeAuthMode("login");
+      setNotice("Đã tạo tài khoản. Bạn có thể đăng nhập bằng email và mật khẩu vừa đặt.");
+    } catch (error) {
+      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể tạo tài khoản.");
+    } finally {
+      setEmployeeAuthBusy(false);
+    }
+  };
+  const requestEmployeePasswordReset = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const email = employeeLoginEmail.trim().toLowerCase();
+    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script để gửi mã qua email."); return; }
+    setEmployeeAuthBusy(true);
+    setEmployeeLoginError("");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; message?: string; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "request-password-reset", email });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể gửi mã xác nhận.");
+      setEmployeeResetCode("");
+      setEmployeeLoginPassword("");
+      setEmployeeAuthMode("reset-confirm");
+      setNotice(result.message || "Mã xác nhận đã được gửi về email nếu tài khoản tồn tại.");
+    } catch (error) {
+      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể gửi mã xác nhận.");
+    } finally {
+      setEmployeeAuthBusy(false);
+    }
+  };
+  const resetEmployeePassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const email = employeeLoginEmail.trim().toLowerCase();
+    if (employeeResetCode.replace(/\D/g, "").length !== 6) { setEmployeeLoginError("Hãy nhập mã gồm 6 chữ số trong email."); return; }
+    if (employeeLoginPassword.length < 6) { setEmployeeLoginError("Mật khẩu mới cần tối thiểu 6 ký tự."); return; }
+    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script để đặt lại mật khẩu."); return; }
+    setEmployeeAuthBusy(true);
+    setEmployeeLoginError("");
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "reset-employee-password", email, code: employeeResetCode, password: employeeLoginPassword });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đặt lại mật khẩu.");
+      setEmployeeLoginPassword("");
+      setEmployeeResetCode("");
+      setEmployeeAuthMode("login");
+      setNotice("Đã đặt lại mật khẩu. Bạn có thể đăng nhập ngay.");
+    } catch (error) {
+      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể đặt lại mật khẩu.");
+    } finally {
+      setEmployeeAuthBusy(false);
+    }
   };
   const logoutEmployee = () => {
     try { window.localStorage.removeItem(personnelSessionEmailKey); } catch { /* Optional device session cleanup. */ }
@@ -3072,9 +3158,9 @@ export default function Home() {
         {loadingWorkflowFiles && !currentWorkflowFiles.length ? <p className="workflow-files__empty">Đang lấy danh sách tệp…</p>
           : workflowFilesError ? <p className="workflow-files__empty">Chưa thể nạp tệp: {workflowFilesError}</p>
           : currentWorkflowFiles.length ? currentWorkflowFiles.map((file) => (
-            <a key={file.id} className="workflow-file" href={file.downloadUrl} {...(file.isFolder ? { target: "_blank", rel: "noreferrer" } : { download: file.name })} aria-label={`${file.isFolder ? "Mở thư mục" : "Tải tệp"} ${file.name}`}>
+            <a key={file.id} className="workflow-file" href={file.isFolder || isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(file.isFolder || isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })} aria-label={`${file.isFolder ? "Mở thư mục" : isPreviewableFile(file) ? "Xem tệp" : "Tải tệp"} ${file.name}`}>
               <span className="workflow-file__icon">{file.isFolder ? "▰" : file.mimeType.startsWith("image/") ? "▧" : file.name.toLowerCase().endsWith(".pdf") ? "▤" : "▱"}</span>
-              <span><b>{file.name}</b><small>{file.isFolder ? "Thư mục" : "Chỉnh sửa"}: {file.updatedAt}</small></span><em>{file.isFolder ? "↗" : "↓"}</em>
+              <span><b>{file.name}</b><small>{file.isFolder ? "Thư mục" : isPreviewableFile(file) ? "Xem" : "Chỉnh sửa"}: {file.updatedAt}</small></span><em>{file.isFolder || isPreviewableFile(file) ? "↗" : "↓"}</em>
             </a>
           )) : null}
       </div>
@@ -3173,7 +3259,7 @@ export default function Home() {
               {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={file.downloadUrl} download={file.name}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
@@ -3185,7 +3271,7 @@ export default function Home() {
     <div className="three-d-library__grid">
       {(threeDLibrary.folders.length ? threeDLibrary.folders : ([{ key: "architecture", name: "Kiến trúc", folderUrl: "", files: [] }, { key: "interior", name: "Nội thất", folderUrl: "", files: [] }] as ThreeDLibraryFolder[])).map((folder) => <section className="three-d-library__folder" key={folder.key}>
         <header><span>▧</span><h2>{folder.name}</h2>{folder.folderUrl && <a href={folder.folderUrl} target="_blank" rel="noreferrer" aria-label={`Mở thư mục 3D ${folder.name}`} title="Mở thư mục trên Drive">↗</a>}</header>
-        {loadingThreeDLibrary && !threeDLibrary.folders.length ? <p>Đang chuẩn bị thư mục…</p> : folder.files.length ? <ul>{folder.files.map((file) => <li key={file.id}><a href={file.downloadUrl} download={file.name}>{file.name}</a><small>{file.updatedAt}</small></li>)}</ul> : <p>Chưa có tệp.</p>}
+        {loadingThreeDLibrary && !threeDLibrary.folders.length ? <p>Đang chuẩn bị thư mục…</p> : folder.files.length ? <ul>{folder.files.map((file) => <li key={file.id}><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a><small>{file.updatedAt}</small></li>)}</ul> : <p>Chưa có tệp.</p>}
       </section>)}
     </div>
   </section>;
@@ -3573,14 +3659,16 @@ export default function Home() {
 
       {loginOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}>
-          <form className="add-dialog login-dialog" onSubmit={loginEmployee} onMouseDown={(event) => event.stopPropagation()}>
+          <form className="add-dialog login-dialog" onSubmit={employeeAuthMode === "login" ? loginEmployee : employeeAuthMode === "register" ? registerEmployeeAccount : employeeAuthMode === "reset-request" ? requestEmployeePasswordReset : resetEmployeePassword} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setLoginOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Tài khoản nhân viên</p><h2>Đăng nhập</h2>
-            <p>Quản trị dùng tài khoản <b>admin</b> và mật khẩu <b>1</b>. Nhân viên có thể đăng nhập bằng email đã ghi trong danh sách Nhân lực.</p>
+            <p className="eyebrow">Tài khoản nhân viên</p><h2>{employeeAuthMode === "login" ? "Đăng nhập" : employeeAuthMode === "register" ? "Tạo tài khoản" : employeeAuthMode === "reset-request" ? "Quên mật khẩu" : "Đặt lại mật khẩu"}</h2>
+            <p>{employeeAuthMode === "login" ? <>Quản trị dùng tài khoản <b>admin</b> và mật khẩu <b>1</b>. Nhân viên đăng nhập bằng email đã có trong danh sách Nhân lực.</> : employeeAuthMode === "register" ? "Chỉ email nhân viên đang hoạt động trong danh sách Nhân lực mới tạo được tài khoản." : employeeAuthMode === "reset-request" ? "GM-CRM sẽ gửi mã gồm 6 số đến email tài khoản để bạn đặt lại mật khẩu." : "Nhập mã gồm 6 số đã nhận qua email và mật khẩu mới."}</p>
             <label>Tài khoản / Email<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="admin hoặc ten@congty.com" onChange={(event) => setEmployeeLoginEmail(event.target.value.trim().toLowerCase())} autoFocus required /></label>
-            <label>Mật khẩu<input type="password" value={employeeLoginPassword} autoComplete="current-password" placeholder="Nhập mật khẩu quản trị" onChange={(event) => setEmployeeLoginPassword(event.target.value)} /></label>
+            {employeeAuthMode === "reset-confirm" && <label>Mã xác nhận<input value={employeeResetCode} maxLength={6} inputMode="numeric" autoComplete="one-time-code" placeholder="6 chữ số" onChange={(event) => setEmployeeResetCode(event.target.value.replace(/\D/g, ""))} required /></label>}
+            {employeeAuthMode !== "reset-request" && <label>{employeeAuthMode === "reset-confirm" ? "Mật khẩu mới" : "Mật khẩu"}<input type="password" value={employeeLoginPassword} autoComplete={employeeAuthMode === "register" ? "new-password" : employeeAuthMode === "reset-confirm" ? "new-password" : "current-password"} minLength={employeeAuthMode === "login" ? undefined : 6} placeholder={employeeAuthMode === "login" ? "Nhập mật khẩu" : "Tối thiểu 6 ký tự"} onChange={(event) => setEmployeeLoginPassword(event.target.value)} required /></label>}
             {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
-            <div className="login-dialog__actions"><button className="add-button" type="submit">Đăng nhập</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
+            <div className="login-dialog__actions"><button className="add-button" type="submit" disabled={employeeAuthBusy}>{employeeAuthBusy ? "Đang xử lý…" : employeeAuthMode === "login" ? "Đăng nhập" : employeeAuthMode === "register" ? "Tạo tài khoản" : employeeAuthMode === "reset-request" ? "Gửi mã" : "Đặt lại mật khẩu"}</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
+            <div className="login-dialog__links">{employeeAuthMode === "login" ? <><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeAuthMode("register"); }}>Tạo tài khoản</button><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeAuthMode("reset-request"); }}>Quên mật khẩu?</button></> : employeeAuthMode === "reset-confirm" ? <><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeAuthMode("reset-request"); }}>Gửi lại mã</button><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeAuthMode("login"); }}>Quay lại đăng nhập</button></> : <button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeResetCode(""); setEmployeeAuthMode("login"); }}>Quay lại đăng nhập</button>}</div>
           </form>
         </div>
       )}
