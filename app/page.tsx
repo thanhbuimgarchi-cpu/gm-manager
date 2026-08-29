@@ -3645,9 +3645,11 @@ export default function Home() {
               </section>
             </div>
           ) : (
-            <div className={`customer-gateway__overview ${canViewNotesSummary ? "" : "customer-gateway__overview--no-notes"}`}>
-              {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
-              {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
+            <div className={`customer-gateway__overview ${canViewNotesSummary || canViewDesignSummary ? "" : "customer-gateway__overview--no-notes"}`}>
+              <div className="customer-gateway__summaries">
+                {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
+                {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
+              </div>
               <div className="customer-gateway__body">
               <div className="personnel-entry customer-entry">
                 <span className="personnel-entry__icon customer-entry__icon">▰</span>
