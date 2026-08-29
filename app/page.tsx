@@ -2724,7 +2724,7 @@ export default function Home() {
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
-  const canViewNotesSummary = !loggedInEmployee || employeePermissions.includes("Ghi chú");
+  const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
     if (typeof window === "undefined") return [];
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
@@ -2944,7 +2944,7 @@ export default function Home() {
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
           {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote}>Phát hành</button></div>
             : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
-              : <button type="button" className={`work-note__complete ${note.actualDate ? "is-complete" : ""}`} disabled={Boolean(note.actualDate)} onClick={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}>✓</button>}
+              : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={Boolean(note.actualDate)} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
           <label className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`}><select value={selectedStatus} onChange={(event) => update("status", event.target.value)} aria-label={`Trạng thái ${selectedStatus}`} disabled={!canEdit}>{availableStatuses.map((status) => <option key={status} value={status} title={status}>●</option>)}</select></label>
           {!isNew && !isEditing && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
         </div>
@@ -3132,6 +3132,20 @@ export default function Home() {
     <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
   </section>;
 
+  const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
+    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
+      <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+    </button>
+    {sidebarNotesOpen && <div className="sidebar-notes__list">
+      {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
+        const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green" } as Record<WorkNoteStatus, string>)[note.status] ?? "sidebar-notes__dot--black";
+        return <button type="button" className="sidebar-note" key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
+          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+        </button>;
+      }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
+    </div>}
+  </section> : null;
+
   return (
     <main className="crm-shell">
       {!selectedCustomerProjectId && (
@@ -3188,6 +3202,7 @@ export default function Home() {
                 <span className="personnel-entry__icon customer-entry__icon">▰</span>
                 <span><b>Khách hàng</b></span>
               </div>
+              {renderOutstandingNotesSummary("gateway-notes")}
               <button className="add-button customer-gateway__add" onClick={openAddDialog}><span>＋</span> Thêm khách hàng</button>
               <label className="customer-search">
                 <span>⌕</span>
@@ -3234,19 +3249,7 @@ export default function Home() {
             </button>
           ))}
         </nav>
-        {canViewNotesSummary && <section className={`sidebar-notes ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
-          <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
-            <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
-          </button>
-          {sidebarNotesOpen && <div className="sidebar-notes__list">
-            {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
-              const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green" } as Record<WorkNoteStatus, string>)[note.status] ?? "sidebar-notes__dot--black";
-              return <button type="button" className="sidebar-note" key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
-                <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
-              </button>;
-            }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
-          </div>}
-        </section>}
+        {renderOutstandingNotesSummary()}
       </aside>
 
       <section className="workspace">
