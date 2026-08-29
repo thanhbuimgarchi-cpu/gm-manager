@@ -12,10 +12,11 @@
     "appId": "com.mgarchi.gmcrm",
     "productName": "GM-CRM",
     "artifactName": "GM-CRM-Setup.exe",
+    "extraResources": [{ "from": "../public/gm-logo-512.png", "to": "gm-logo-512.png" }],
     "asar": true,
     "files": ["main.cjs", "preload.cjs", "package.json"],
     "directories": { "output": "release" },
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "win": { "icon": "../public/gm-logo-512.png", "target": [{ "target": "nsis", "arch": ["x64"] }] },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

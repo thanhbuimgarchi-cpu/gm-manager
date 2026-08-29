@@ -1,8 +1,11 @@
 const { app, BrowserWindow, Notification, ipcMain, shell, session } = require("electron");
 const path = require("node:path");
+const fs = require("node:fs/promises");
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
+const DRIVE_ROOT = "G:\\My Drive";
+const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 
 function isTrustedUrl(value) {
   try {
@@ -19,6 +22,7 @@ function createWindow() {
     minWidth: 1040,
     minHeight: 700,
     title: "GM-CRM",
+    icon: APP_ICON,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -38,6 +42,34 @@ function createWindow() {
   });
 }
 
+async function findProjectDocumentsFolder(projectId) {
+  const queue = [DRIVE_ROOT];
+  const visited = new Set();
+  while (queue.length) {
+    const folder = queue.shift();
+    if (!folder || visited.has(folder)) continue;
+    visited.add(folder);
+    let entries;
+    try {
+      entries = await fs.readdir(folder, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const child = path.join(folder, entry.name);
+      if (entry.name === projectId) {
+        const documentsFolder = path.join(child, "Tài liệu");
+        try {
+          if ((await fs.stat(documentsFolder)).isDirectory()) return documentsFolder;
+        } catch { /* Keep looking: the same project ID can exist in an old archive. */ }
+      }
+      queue.push(child);
+    }
+  }
+  return "";
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId("com.mgarchi.gmcrm");
   const trustedNotificationRequest = (webContents) => isTrustedUrl(webContents.getURL());
@@ -53,9 +85,12 @@ app.whenReady().then(() => {
     new Notification({ title, body }).show();
     return true;
   });
-  // This is deliberately a fixed local path: the renderer cannot request an
-  // arbitrary program or path through the desktop bridge.
-  ipcMain.handle("gmcrm:open-drive", () => shell.openPath("G:\\"));
+  ipcMain.handle("gmcrm:open-drive", async (_event, payload = {}) => {
+    const projectId = String(payload.projectId || "").trim();
+    if (!/^[A-Za-z0-9_-]+$/.test(projectId)) return "Mã dự án không hợp lệ.";
+    const documentsFolder = await findProjectDocumentsFolder(projectId);
+    return documentsFolder ? shell.openPath(documentsFolder) : "Không tìm thấy thư mục Tài liệu của dự án trên ổ G.";
+  });
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

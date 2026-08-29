@@ -264,7 +264,7 @@ type DriveSyncConfig = {
 type DesktopNotificationBridge = {
   isWindows: boolean;
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
-  openDrive?: () => Promise<string>;
+  openDrive?: (payload: { projectId: string; year: number; month: number }) => Promise<string>;
 };
 
 type InstallPromptEvent = Event & {
@@ -1483,11 +1483,15 @@ export default function Home() {
     window.location.reload();
   };
 
-  const openDesktopDrive = async () => {
+  const openDesktopDocuments = async () => {
     const desktop = desktopBridge();
-    if (!desktop?.isWindows || !desktop.openDrive) return;
-    const error = await desktop.openDrive();
-    if (error) setNotice("Không thể mở ổ G trên máy tính này.");
+    if (!desktop?.isWindows || !desktop.openDrive || !selectedCustomerLocation) return;
+    const error = await desktop.openDrive({
+      projectId: selectedCustomerLocation.record.projectId,
+      year: selectedCustomerLocation.year,
+      month: selectedCustomerLocation.month,
+    });
+    if (error) setNotice(error);
   };
 
   const sendTestNotification = async () => {
@@ -2863,7 +2867,7 @@ export default function Home() {
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
         <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
-        <div className="document-library__actions"><button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
+        <div className="document-library__actions">{desktopBridge()?.isWindows && desktopBridge()?.openDrive && <button type="button" className="document-library__refresh" onClick={() => void openDesktopDocuments()}>▰ Mở Drive</button>}<button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
@@ -3097,7 +3101,6 @@ export default function Home() {
             </button>
           ))}
         </nav>
-        {desktopBridge()?.isWindows && desktopBridge()?.openDrive && <button type="button" className="desktop-drive-button" onClick={() => void openDesktopDrive()}>▰ Mở Drive</button>}
       </aside>
 
       <section className="workspace">
