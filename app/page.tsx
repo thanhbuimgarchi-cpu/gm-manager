@@ -2801,7 +2801,7 @@ export default function Home() {
     void loadWorkflowFiles(activeFolder, true);
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
 
-  const customerPortalLink = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer`;
+  const customerPortalLink = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
   const copyCustomerPortalLink = async () => {
     try {
       await navigator.clipboard.writeText(customerPortalLink);
