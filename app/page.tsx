@@ -768,6 +768,14 @@ const parseDesignDate = (value: string) => {
   return { date, dayNumber: Math.floor(date.getTime() / 86_400_000) };
 };
 
+const isPastVietnamDate = (value: string) => {
+  const parsed = parseDesignDate(value);
+  if (!parsed) return false;
+  const today = getVietnamDate();
+  const todayDayNumber = Math.floor(Date.UTC(today.year, today.month - 1, today.day) / 86_400_000);
+  return parsed.dayNumber < todayDayNumber;
+};
+
 const hasSequentialDesignDates = (rows: DesignProgressRow[], key: DesignDateKey) => {
   let previousDay: number | null = null;
   for (const row of rows) {
@@ -1832,6 +1840,7 @@ export default function Home() {
   const publishNewWorkNote = async () => {
     if (!newWorkNote) return;
     if (!newWorkNote.assigneeEmail) { setNotice("Hãy gắn nhân lực trước khi phát hành ghi chú."); return; }
+    if (!parseDesignDate(newWorkNote.dueDate) || isPastVietnamDate(newWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
     const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
     persistWorkNotes(next);
     setNewWorkNote(null);
@@ -1849,6 +1858,7 @@ export default function Home() {
   };
   const saveEditingWorkNote = async () => {
     if (!editingWorkNote) return;
+    if (!parseDesignDate(editingWorkNote.dueDate) || isPastVietnamDate(editingWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
     const next = workNotes.map((note) => note.id === editingWorkNote.id ? { ...editingWorkNote, status: workNoteStatus(editingWorkNote) } : note);
     persistWorkNotes(next);
     setEditingWorkNote(null);
@@ -3041,7 +3051,7 @@ export default function Home() {
           <label>Gắn nhân lực<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Gắn nhân lực" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
-          <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => update("dueDate", formatDesignDateInput(event.target.value))} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
+          <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
           {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote}>Phát hành</button></div>
             : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
@@ -3177,8 +3187,8 @@ export default function Home() {
                   {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
                 </span>
               </div></td>
-              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
+              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
               <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
@@ -3221,8 +3231,8 @@ export default function Home() {
                 {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteWarrantyProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
               </span>
             </div></td>
-            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
-            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="11/11/1999" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
+            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
+            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
             <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
             <td><GrowingTextarea value={row.note} onChange={(event) => updateWarrantyProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
           </tr>
@@ -3286,7 +3296,7 @@ export default function Home() {
                     <label>Hoạt động<select value={personnelDraft.status} onChange={(event) => setPersonnelDraft({ ...personnelDraft, status: event.target.value as PersonnelStatus })}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
                     <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
                     <label>Email<input type="email" value={personnelDraft.email} onChange={(event) => setPersonnelDraft({ ...personnelDraft, email: event.target.value.trim().toLowerCase() })} placeholder="ten@congty.com" required /></label>
-                    <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="11/11/1999" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
+                    <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="dd/mm/yyyy" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
                     <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
                     <label>Chức vụ<select value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} required><option value="">Chọn chức vụ</option>{personnelRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
                     <fieldset className="personnel-permissions"><legend>Quyền truy cập</legend><div>{personnelPermissionOptions.map((permission) => <label key={permission}><input type="checkbox" checked={personnelDraft.permissions.includes(permission)} onChange={(event) => setPersonnelDraft({ ...personnelDraft, permissions: event.target.checked ? [...personnelDraft.permissions, permission] : personnelDraft.permissions.filter((item) => item !== permission) })} />{permission}</label>)}</div></fieldset>
@@ -3399,7 +3409,7 @@ export default function Home() {
                     <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
                     {section.fields.map((field) => <tr key={field.code}>
                       <td>{field.label} <span className="field-code">({field.code})</span></td>
-                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="11/11/1999" /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="dd/mm/yyyy" /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                         <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
                       </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                     </tr>)}
@@ -3598,7 +3608,7 @@ export default function Home() {
                         <tr key={field.code}>
                           <td>{field.label} <span className="field-code">({field.code})</span></td>
                           <td>{dateDetailCodes.has(field.code) ? (
-                            <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="11/11/1999" />
+                            <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="dd/mm/yyyy" />
                           ) : field.options ? (
                             <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                               <option value="">Chọn giá trị</option>
