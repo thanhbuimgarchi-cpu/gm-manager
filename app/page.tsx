@@ -264,6 +264,7 @@ type DriveSyncConfig = {
 type DesktopNotificationBridge = {
   isWindows: boolean;
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
+  openDrive?: () => Promise<string>;
 };
 
 type InstallPromptEvent = Event & {
@@ -1482,6 +1483,13 @@ export default function Home() {
     window.location.reload();
   };
 
+  const openDesktopDrive = async () => {
+    const desktop = desktopBridge();
+    if (!desktop?.isWindows || !desktop.openDrive) return;
+    const error = await desktop.openDrive();
+    if (error) setNotice("Không thể mở ổ G trên máy tính này.");
+  };
+
   const sendTestNotification = async () => {
     const desktop = desktopBridge();
     if (desktop) {
@@ -1858,8 +1866,10 @@ export default function Home() {
 
   // v14 intentionally starts with a clean document index. Earlier versions
   // could retain a deleted day in local cache after a background refresh.
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v14:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
-  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v2:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
+  // A clean generation prevents an obsolete “Chưa gắn” override from an older
+  // device from replacing the assignment that the user has just selected.
+  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v15:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
+  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v3:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
   const mergeDocumentMetadataOverrides = (files: DocumentFile[], snapshotId: string, location = selectedCustomerLocation) => {
     const cacheKey = documentMetadataOverrideKey(snapshotId, location);
     const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
@@ -2012,6 +2022,7 @@ export default function Home() {
       writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
     } catch (error) {
       setDocumentFiles(before);
+      setDocumentFilesBySnapshotId((current) => ({ ...current, [selectedDocumentSnapshotId]: before }));
       setNotice(error instanceof Error ? error.message : "Không thể cập nhật phân loại tệp.");
     }
   };
@@ -3086,6 +3097,7 @@ export default function Home() {
             </button>
           ))}
         </nav>
+        {desktopBridge()?.isWindows && desktopBridge()?.openDrive && <button type="button" className="desktop-drive-button" onClick={() => void openDesktopDrive()}>▰ Mở Drive</button>}
       </aside>
 
       <section className="workspace">

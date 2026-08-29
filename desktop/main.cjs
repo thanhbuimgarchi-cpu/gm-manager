@@ -53,6 +53,9 @@ app.whenReady().then(() => {
     new Notification({ title, body }).show();
     return true;
   });
+  // This is deliberately a fixed local path: the renderer cannot request an
+  // arbitrary program or path through the desktop bridge.
+  ipcMain.handle("gmcrm:open-drive", () => shell.openPath("G:\\"));
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
