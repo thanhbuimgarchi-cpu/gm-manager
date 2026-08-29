@@ -1231,6 +1231,8 @@ export default function Home() {
   const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
   const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
+  const [editingWorkNote, setEditingWorkNote] = useState<WorkNote | null>(null);
+  const [workNoteMenuId, setWorkNoteMenuId] = useState<string | null>(null);
   const [loadingWorkNotes, setLoadingWorkNotes] = useState(false);
   const [savingWorkNotes, setSavingWorkNotes] = useState(false);
   const [pendingWorkNoteCompletionId, setPendingWorkNoteCompletionId] = useState<string | null>(null);
@@ -1666,6 +1668,8 @@ export default function Home() {
   const loadWorkNotes = () => {
     if (!selectedCustomerLocation) return;
     setNewWorkNote(null);
+    setEditingWorkNote(null);
+    setWorkNoteMenuId(null);
     const cacheKey = workNotesCacheKey();
     const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
     setWorkNotes(cachedNotes ?? []);
@@ -1727,8 +1731,23 @@ export default function Home() {
   const updateWorkNote = (id: string, field: Exclude<keyof WorkNote, "id">, value: string) => {
     persistWorkNotes(workNotes.map((note) => note.id === id ? { ...note, [field]: value } as WorkNote : note));
   };
+  const updateEditingWorkNote = (field: Exclude<keyof WorkNote, "id">, value: string) => {
+    setEditingWorkNote((note) => note ? { ...note, [field]: value } as WorkNote : note);
+  };
+  const startEditingWorkNote = (note: WorkNote) => {
+    setWorkNoteMenuId(null);
+    setEditingWorkNote({ ...note });
+  };
+  const saveEditingWorkNote = () => {
+    if (!editingWorkNote) return;
+    persistWorkNotes(workNotes.map((note) => note.id === editingWorkNote.id ? editingWorkNote : note));
+    setEditingWorkNote(null);
+    setNotice("Đã lưu thay đổi ghi chú vào cache của thiết bị.");
+  };
   const removeWorkNote = (id: string) => {
     persistWorkNotes(workNotes.filter((note) => note.id !== id));
+    if (editingWorkNote?.id === id) setEditingWorkNote(null);
+    setWorkNoteMenuId(null);
   };
   const confirmWorkNoteCompletion = () => {
     if (!pendingWorkNoteCompletionId) return;
@@ -2762,26 +2781,28 @@ export default function Home() {
     </section>
   );
   const renderWorkNotes = () => {
-    const renderWorkNote = (note: WorkNote, isNew = false) => {
+    const renderWorkNote = (note: WorkNote, isNew = false, isEditing = false) => {
       const availableStatuses: WorkNoteStatus[] = note.acceptedAt ? workNoteStatuses : ["Đen"];
       const selectedStatus = availableStatuses.includes(note.status) ? note.status : "Đen";
       const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green" } as Record<WorkNoteStatus, string>)[selectedStatus];
-      const update = isNew ? updateNewWorkNote : (field: Exclude<keyof WorkNote, "id">, value: string) => updateWorkNote(note.id, field, value);
+      const canEdit = isNew || isEditing;
+      const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (field: Exclude<keyof WorkNote, "id">, value: string) => updateWorkNote(note.id, field, value);
       return <article className={`work-note ${isNew ? "work-note--new" : ""}`} key={note.id}>
         <div className="work-note__line work-note__line--primary">
-          <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên">{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
-          <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc">{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
-          <label>Gắn nhân lực<select value={note.assignee} onChange={(event) => update("assignee", event.target.value)} aria-label="Gắn nhân lực"><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+          <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên" disabled={!canEdit}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
+          <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc" disabled={!canEdit}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
+          <label>Gắn nhân lực<select value={note.assignee} onChange={(event) => update("assignee", event.target.value)} aria-label="Gắn nhân lực" disabled={!canEdit}><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
-          <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => update("dueDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" /></label>
+          <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => update("dueDate", formatDesignDateInput(event.target.value))} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
           {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote}>Phát hành</button></div>
-            : <button type="button" className={`work-note__complete ${note.actualDate ? "is-complete" : ""}`} disabled={Boolean(note.actualDate)} onClick={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}>✓</button>}
-          <label className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`}><select value={selectedStatus} onChange={(event) => update("status", event.target.value)} aria-label={`Trạng thái ${selectedStatus}`}>{availableStatuses.map((status) => <option key={status} value={status} title={status}>●</option>)}</select></label>
-          {!isNew && <button type="button" className="work-note__delete" onClick={() => removeWorkNote(note.id)} aria-label="Xóa ghi chú">×</button>}
+            : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
+              : <button type="button" className={`work-note__complete ${note.actualDate ? "is-complete" : ""}`} disabled={Boolean(note.actualDate)} onClick={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}>✓</button>}
+          <label className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`}><select value={selectedStatus} onChange={(event) => update("status", event.target.value)} aria-label={`Trạng thái ${selectedStatus}`} disabled={!canEdit}>{availableStatuses.map((status) => <option key={status} value={status} title={status}>●</option>)}</select></label>
+          {!isNew && !isEditing && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
         </div>
-        <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" /></label>
+        <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" readOnly={!canEdit} /></label>
       </article>;
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
@@ -2792,7 +2813,7 @@ export default function Home() {
       <div className="work-notes__list">
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
-          : workNotes.length ? workNotes.map((note) => renderWorkNote(note)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
+          : workNotes.length ? workNotes.map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
       </div>
     </section>;
   };
