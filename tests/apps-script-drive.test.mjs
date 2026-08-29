@@ -153,15 +153,15 @@ test("work notes stay black until an assignee accepts the work", () => {
   ]);
 });
 
-test("customer portal uses the house code and normalized phone number, then returns only project progress", () => {
+test("customer portal keeps a published token private and returns only project progress", () => {
   const context = loadContext();
-  assert.equal(context.normalizeCustomerPortalHouseId_(" bt - 08 "), "BT-08");
-  assert.equal(context.normalizeCustomerPortalPhone_("+84 901-234-567"), "0901234567");
+  assert.equal(context.normalizeCustomerShareToken_("A".repeat(48)), "a".repeat(48));
+  assert.equal(context.normalizeCustomerShareToken_("not-a-token"), "");
   const portalRecord = context.customerPortalRecord_({
     projectId: "GM20092001A",
     name: "Khách hàng thử",
     houseId: "BT-08",
-    details: { NS: "20/09/2001", SDT: "0900000000" },
+    customerShareToken: "a".repeat(48),
     designProgress: [{ content: "Duyệt mặt bằng", plannedDate: "20/09/2026", actualDate: "" }],
     interiorDesignProgress: [],
     warrantyProgress: [{ content: "Kiểm tra", reportedDate: "21/09/2026", completedDate: "22/09/2026" }],

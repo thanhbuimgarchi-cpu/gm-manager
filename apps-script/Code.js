@@ -112,7 +112,7 @@ function doPost(event) {
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
-    if (payload.action === "customer-portal-login") return json_(customerPortalLogin_(payload));
+    if (payload.action === "customer-portal-share") return json_(customerPortalShare_(payload));
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
@@ -348,35 +348,24 @@ function loadConsultingWorkspace_(payload) {
   return result;
 }
 
-// The customer portal never receives the owner's phone number. It submits the
-// value only for this server-side comparison, then receives a small, read-only
-// project summary.
-function customerPortalLogin_(payload) {
-  const houseId = normalizeCustomerPortalHouseId_(payload.houseId);
-  const phonePassword = normalizeCustomerPortalPhone_(payload.phonePassword);
-  if (!houseId || phonePassword.length < 9) throw new Error("Mã nhà hoặc số điện thoại không đúng.");
-
+// A random token in the published link selects one read-only project snapshot.
+function customerPortalShare_(payload) {
+  const shareToken = normalizeCustomerShareToken_(payload.shareToken);
+  if (!shareToken) throw new Error("Link xem dự án không hợp lệ.");
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
-  const match = customers && findCustomerPortalMatch_(customers, houseId, phonePassword);
-  if (!match) throw new Error("Mã nhà hoặc số điện thoại không đúng.");
-
+  const match = customers && findCustomerPortalShare_(customers, shareToken);
+  if (!match) throw new Error("Link xem dự án đã hết hạn hoặc không hợp lệ.");
   const record = recordFromWorkbook_(match.workbook, match.projectId, match.customerFolder, true);
   return { ok: true, record: customerPortalRecord_(record) };
 }
 
-function normalizeCustomerPortalHouseId_(value) {
-  return String(value || "").trim().replace(/\s+/g, "").toUpperCase();
+function normalizeCustomerShareToken_(value) {
+  const token = String(value || "").trim().toLowerCase();
+  return /^[a-f0-9]{48}$/.test(token) ? token : "";
 }
 
-function normalizeCustomerPortalPhone_(value) {
-  let digits = String(value || "").replace(/\D/g, "").slice(0, 12);
-  if (/^84\d{9}$/.test(digits)) digits = "0" + digits.slice(2);
-  if (/^[2-9]\d{8}$/.test(digits)) digits = "0" + digits;
-  return digits;
-}
-
-function findCustomerPortalMatch_(customers, houseId, phonePassword) {
+function findCustomerPortalShare_(customers, shareToken) {
   const years = customers.getFolders();
   while (years.hasNext()) {
     const yearFolder = years.next();
@@ -394,15 +383,7 @@ function findCustomerPortalMatch_(customers, houseId, phonePassword) {
         if (!workbook) continue;
         const sheets = readXlsxSheets_(workbook);
         const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
-        if (normalizeCustomerPortalHouseId_(metadata.houseId) !== houseId) continue;
-        const ownerRows = sheets["1. Chủ đầu tư"] || [];
-        let phoneNumber = "";
-        ownerRows.slice(1).some(function(row) {
-          if (String(row[0] || "").trim() !== "SDT") return false;
-          phoneNumber = String(row[2] || "");
-          return true;
-        });
-        if (normalizeCustomerPortalPhone_(phoneNumber) === phonePassword) return { customerFolder: customerFolder, projectId: projectId, workbook: workbook };
+        if (normalizeCustomerShareToken_(metadata.customerShareToken) === shareToken) return { customerFolder: customerFolder, projectId: projectId, workbook: workbook };
       }
     }
   }
@@ -714,6 +695,7 @@ function recordFromWorkbook_(file, projectId, customerFolder, includeProgress) {
     id: "drive-" + projectId,
     name: metadata.name || details.HVT || projectId,
     houseId: metadata.houseId || "",
+    customerShareToken: metadata.customerShareToken || "",
     projectId: metadata.projectId || projectId,
     createdAt: createdAt,
     details: details,
@@ -1010,10 +992,11 @@ function writeWorkbook_(spreadsheet, record) {
 
     if (name === "0. GM-CRM") {
       const note = record.audioNote || {};
-      sheet.getRange(2, 1, 9, 2).setValues([
+      sheet.getRange(2, 1, 10, 2).setValues([
         ["projectId", record.projectId || ""], ["name", record.name || ""], ["houseId", record.houseId || ""], ["createdAt", record.createdAt || ""],
         ["audioLanguage", note.language || ""], ["audioFileName", note.fileName || ""], ["audioTotalChunks", note.totalChunks || ""],
         ["audioCompletedChunks", note.completedChunks || ""], ["audioStatus", note.status || ""],
+        ["customerShareToken", record.customerShareToken || ""],
       ]);
     } else if (name === "4. C\u00f4ng n\u0103ng") {
       const rows = [];

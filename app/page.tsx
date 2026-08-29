@@ -122,6 +122,7 @@ type WorkRecord = {
   id: string;
   name: string;
   houseId?: string;
+  customerShareToken?: string;
   projectId: string;
   createdAt: string;
   details: Record<string, string>;
@@ -445,7 +446,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -468,6 +469,12 @@ function bytesToBase64(bytes: Uint8Array) {
   const blockSize = 0x8000;
   for (let offset = 0; offset < bytes.length; offset += blockSize) binary += String.fromCharCode(...bytes.subarray(offset, offset + blockSize));
   return btoa(binary);
+}
+
+function createCustomerShareToken() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function browserAudioMimeType(file: File) {
@@ -1225,8 +1232,6 @@ export default function Home() {
   const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
-  const [customerPortalHouseId, setCustomerPortalHouseId] = useState("");
-  const [customerPortalPhone, setCustomerPortalPhone] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
   const [customerPortalLoading, setCustomerPortalLoading] = useState(false);
@@ -1272,9 +1277,6 @@ export default function Home() {
   const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
-  const driveSyncTimer = useRef<number | null>(null);
-  const designSyncTimers = useRef<Partial<Record<DesignProgressKind, number>>>({});
-  const warrantySyncTimer = useRef<number | null>(null);
   const customerSearchTimer = useRef<number | null>(null);
   const driveRequestsInFlight = useRef(new Set<string>());
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
@@ -2194,7 +2196,6 @@ export default function Home() {
       months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
     });
     persist(nextYears);
-    void syncRecordToDrive(record, modalYear, modalMonth);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
     setSelectedCustomerProjectId(projectId);
@@ -2231,14 +2232,12 @@ export default function Home() {
     const field = designProgressDefinitions[kind].field;
     const updatedRecord = { ...activeCustomerRecord, [field]: nextRows };
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
-    queueDesignProgressSync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month, kind);
   };
 
   const commitWarrantyProgressRows = (nextRows: WarrantyProgressRow[]) => {
     if (!activeCustomerRecord || !selectedCustomerLocation) return;
     const updatedRecord = { ...activeCustomerRecord, warrantyProgress: nextRows };
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
-    queueWarrantySync(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
@@ -2342,7 +2341,6 @@ export default function Home() {
       }),
     });
     persist(nextYears);
-    queueDriveSync(updatedRecord);
     setProtectedAction(null);
     setNotice("Đã đổi tên hồ sơ");
   };
@@ -2363,9 +2361,6 @@ export default function Home() {
       }),
     });
     persist(nextYears);
-    queueDriveSync(updatedRecord);
-    if (nextValue && key === "NCT-KT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "architecture");
-    if (nextValue && key === "NCT-NT") queueDesignProgressSync(updatedRecord, selectedYear, selectedMonth, "interior");
   };
 
   const updateRecordName = (value: string) => {
@@ -2379,7 +2374,6 @@ export default function Home() {
       }),
     });
     persist(nextYears);
-    queueDriveSync(updatedRecord);
   };
 
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
@@ -2554,7 +2548,6 @@ export default function Home() {
       }),
     });
     persist(nextYears);
-    queueDriveSync(updatedRecord);
   };
 
   const updateFunctionalFloor = (floorId: string, value: string) => {
@@ -2598,10 +2591,6 @@ export default function Home() {
     setDriveConfigOpen(false);
     setNotice("Đã kết nối Google Apps Script trên thiết bị này");
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth });
-    if (selectedRecord) void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth, config);
-    if (activeCustomerRecord && isDemandSelected("NCT-KT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
-    if (activeCustomerRecord && isDemandSelected("NCT-NT")) void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, config, "interior");
-    if (activeCustomerRecord) void syncWarrantyToDrive(activeCustomerRecord, selectedYear, selectedMonth, config);
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
@@ -2674,40 +2663,7 @@ export default function Home() {
     }
   };
 
-  const queueDriveSync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
-    if (!isDriveConnected) return;
-    if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
-    driveSyncTimer.current = window.setTimeout(() => {
-      driveSyncTimer.current = null;
-      void syncRecordToDrive(record, year, month);
-    }, 900);
-  };
-
-  const queueDesignProgressSync = (record: WorkRecord, year = selectedYear, month = selectedMonth, kind: DesignProgressKind = "architecture") => {
-    if (!isDriveConnected) return;
-    const timer = designSyncTimers.current[kind];
-    if (timer) window.clearTimeout(timer);
-    designSyncTimers.current[kind] = window.setTimeout(() => {
-      delete designSyncTimers.current[kind];
-      void syncDesignProgressToDrive(record, year, month, undefined, kind);
-    }, 900);
-  };
-
-  const queueWarrantySync = (record: WorkRecord, year = selectedYear, month = selectedMonth) => {
-    if (!isDriveConnected) return;
-    if (warrantySyncTimer.current) window.clearTimeout(warrantySyncTimer.current);
-    warrantySyncTimer.current = window.setTimeout(() => {
-      warrantySyncTimer.current = null;
-      void syncWarrantyToDrive(record, year, month);
-    }, 900);
-  };
-
   useEffect(() => () => {
-    if (driveSyncTimer.current) window.clearTimeout(driveSyncTimer.current);
-    Object.values(designSyncTimers.current).forEach((timer) => {
-      if (timer) window.clearTimeout(timer);
-    });
-    if (warrantySyncTimer.current) window.clearTimeout(warrantySyncTimer.current);
     if (customerSearchTimer.current) window.clearTimeout(customerSearchTimer.current);
   }, []);
 
@@ -2801,27 +2757,13 @@ export default function Home() {
     void loadWorkflowFiles(activeFolder, true);
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
 
-  const customerPortalLink = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
-  const copyCustomerPortalLink = async () => {
-    try {
-      await navigator.clipboard.writeText(customerPortalLink);
-      setNotice("Đã sao chép link gửi khách hàng.");
-    } catch {
-      setNotice("Không thể sao chép link. Hãy sao chép từ thanh địa chỉ.");
-    }
-  };
+  const customerPortalShareToken = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("share")?.trim() ?? "";
+  const customerPortalLink = (shareToken: string) => typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
   const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
-    const portalHouseId = record.houseId.trim();
-    const portalPhone = String(record.details?.SDT ?? "").replace(/\D/g, "");
-    if (!portalHouseId) {
+    if (!record.houseId?.trim()) {
       setNotice("Chưa có mã nhà cho hồ sơ này. Hãy bổ sung mã nhà trước khi phát hành link khách.");
       return;
     }
-    if (portalPhone.length < 9) {
-      setNotice("Chưa có số điện thoại chủ đầu tư hợp lệ. Hãy nhập ở mục Tư vấn (SDT) trước khi phát hành link khách.");
-      return;
-    }
-
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
       setDriveConfigOpen(true);
@@ -2830,42 +2772,44 @@ export default function Home() {
 
     setSyncingRecordId(record.id);
     try {
+      const publishedRecord = { ...record, customerShareToken: record.customerShareToken || createCustomerShareToken() };
+      persistRecord(publishedRecord, location.year, location.month);
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
         action: "sync-customer",
         year: location.year,
         month: location.month,
-        record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
+        record: { ...publishedRecord, details: publishedRecord.details ?? {}, functionalFloors: normalizeFunctionalFloors(publishedRecord) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ hồ sơ khách hàng.");
-      await navigator.clipboard.writeText(customerPortalLink);
-      setNotice("Đã đồng bộ mã nhà và số điện thoại lên Drive, rồi sao chép link gửi khách.");
+      await navigator.clipboard.writeText(customerPortalLink(publishedRecord.customerShareToken));
+      setNotice("Đã phát hành bản chỉ xem và sao chép link gửi khách.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể phát hành link khách.");
     } finally {
       setSyncingRecordId(null);
     }
   };
-  const submitCustomerPortalLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const houseId = customerPortalHouseId.trim();
-    const phonePassword = customerPortalPhone.replace(/\D/g, "").slice(0, 12);
-    if (!houseId || phonePassword.length < 9) {
-      setCustomerPortalError("Nhập mã nhà và số điện thoại hợp lệ.");
+  useEffect(() => {
+    if (!isCustomerPortal) return;
+    if (!customerPortalShareToken) {
+      setCustomerPortalError("Link xem dự án không hợp lệ.");
       return;
     }
+    let cancelled = false;
     setCustomerPortalLoading(true);
     setCustomerPortalError("");
-    try {
-      const { result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: CustomerPortalRecord }>({ scriptUrl: defaultDriveSyncConfig.scriptUrl }, { action: "customer-portal-login", houseId, phonePassword });
-      if (!result.ok || !result.record) throw new Error(result.error || "Không thể mở hồ sơ dự án.");
-      setCustomerPortalRecord(result.record);
-      setCustomerPortalPhone("");
-    } catch (error) {
-      setCustomerPortalError(error instanceof Error ? error.message : "Không thể đăng nhập. Hãy thử lại.");
-    } finally {
-      setCustomerPortalLoading(false);
-    }
-  };
+    void postToAppsScript<{ ok?: boolean; error?: string; record?: CustomerPortalRecord }>({ scriptUrl: defaultDriveSyncConfig.scriptUrl }, { action: "customer-portal-share", shareToken: customerPortalShareToken })
+      .then(({ result }) => {
+        if (cancelled) return;
+        if (!result.ok || !result.record) throw new Error(result.error || "Không thể mở hồ sơ dự án.");
+        setCustomerPortalRecord(result.record);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setCustomerPortalError(error instanceof Error ? error.message : "Không thể mở dự án.");
+      })
+      .finally(() => { if (!cancelled) setCustomerPortalLoading(false); });
+    return () => { cancelled = true; };
+  }, [isCustomerPortal, customerPortalShareToken]);
   if (isCustomerPortal) {
     const renderCustomerProgress = (title: string, rows: CustomerPortalProgressRow[]) => <section className="customer-portal__progress">
       <h2>{title}</h2>
@@ -2875,16 +2819,10 @@ export default function Home() {
       <header className="customer-portal__brand"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><span><b>GM Manager</b><small>Tra cứu dự án</small></span></header>
       {!customerPortalRecord ? <section className="customer-portal__login" aria-labelledby="customer-login-title">
         <p className="eyebrow">Dành cho khách hàng</p>
-        <h1 id="customer-login-title">Tra cứu dự án</h1>
-        <p>Nhập đúng mã nhà và số điện thoại chủ đầu tư để xem tiến độ dự án.</p>
-        <form onSubmit={submitCustomerPortalLogin}>
-          <label>Mã nhà <small>Dòng nằm dưới mã dự án GM...</small><input value={customerPortalHouseId} onChange={(event) => setCustomerPortalHouseId(event.target.value)} autoComplete="username" placeholder="Ví dụ: HP-587" autoFocus /></label>
-          <label>Số điện thoại<input value={customerPortalPhone} onChange={(event) => setCustomerPortalPhone(event.target.value.replace(/\D/g, "").slice(0, 12))} inputMode="tel" autoComplete="current-password" type="password" placeholder="0901234567" maxLength={12} /></label>
-          {customerPortalError && <p className="customer-portal__error" role="alert">{customerPortalError}</p>}
-          <button className="add-button" type="submit" disabled={customerPortalLoading}>{customerPortalLoading ? "Đang kiểm tra…" : "Xem dự án"}</button>
-        </form>
+        <h1 id="customer-login-title">Dự án của bạn</h1>
+        <p>{customerPortalLoading ? "Đang mở thông tin dự án…" : customerPortalError || "Không thể mở thông tin dự án."}</p>
       </section> : <section className="customer-portal__project">
-        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p><button type="button" onClick={() => { setCustomerPortalRecord(null); setCustomerPortalHouseId(""); setCustomerPortalPhone(""); }}>Đăng xuất</button></header>
+        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p></header>
         {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
         {renderCustomerProgress("Bảo hành", customerPortalRecord.warrantyProgress)}
@@ -3042,7 +2980,7 @@ export default function Home() {
     return <section className="design-schedule">
       <header className="design-schedule__heading">
         <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
-        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Dữ liệu đã lưu"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
+        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
       </header>
       <div className="design-progress-table-wrap">
         <table className="design-progress-table">
@@ -3086,7 +3024,7 @@ export default function Home() {
   const renderWarrantySchedule = () => <section className="design-schedule warranty-schedule">
     <header className="design-schedule__heading">
       <div><p className="eyebrow">Bảo hành</p><h2>Phiếu thông tin bảo hành</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
-      <div className="export-actions"><div className="design-progress-view__status"><i className={syncingWarrantyId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingWarrantyId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Dữ liệu đã lưu"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncWarrantyToDrive(activeCustomerRecord, selectedYear, selectedMonth)} disabled={!activeCustomerRecord || syncingWarrantyId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
+      <div className="export-actions"><div className="design-progress-view__status"><i className={syncingWarrantyId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingWarrantyId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncWarrantyToDrive(activeCustomerRecord, selectedYear, selectedMonth)} disabled={!activeCustomerRecord || syncingWarrantyId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
     </header>
     <div className="design-progress-table-wrap">
       <table className="design-progress-table warranty-progress-table">
@@ -3124,7 +3062,6 @@ export default function Home() {
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
-              {!personnelView && <button className="customer-link" type="button" onClick={() => void copyCustomerPortalLink()}>↗ Link khách</button>}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
               <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
             </div>
@@ -3241,7 +3178,7 @@ export default function Home() {
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
-                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Dữ liệu đã lưu"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button><button type="button" className="customer-link" onClick={() => selectedCustomerLocation && void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành link khách</button></div>
+                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button><button type="button" className="customer-link" onClick={() => selectedCustomerLocation && void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành</button></div>
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
@@ -3567,7 +3504,7 @@ export default function Home() {
                 )}
               </section>
             </div>
-            <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel vào Drive…" : isDriveConnected ? "Tự động đồng bộ Excel sau mỗi thay đổi" : "Kết nối Drive để tự động đồng bộ Excel"}</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
+            <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang cập nhật Excel vào Drive…" : "Đã lưu trên thiết bị · Export Excel khi cần"}</span><button className="add-button" onClick={() => setSelectedRecordId(null)}>Hoàn tất</button></footer>
           </section>
         </div>
       )}
