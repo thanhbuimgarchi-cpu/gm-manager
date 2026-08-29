@@ -1323,6 +1323,7 @@ export default function Home() {
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
   const [editingWorkNote, setEditingWorkNote] = useState<WorkNote | null>(null);
+  const [highlightWorkNoteId, setHighlightWorkNoteId] = useState("");
   const [workNoteMenuId, setWorkNoteMenuId] = useState<string | null>(null);
   const [loadingWorkNotes, setLoadingWorkNotes] = useState(false);
   const [savingWorkNotes, setSavingWorkNotes] = useState(false);
@@ -1521,6 +1522,22 @@ export default function Home() {
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const projectId = url.searchParams.get("gmcrmProject");
+    const noteId = url.searchParams.get("gmcrmNote");
+    if (!projectId || !noteId) return;
+    const location = customerLocations.find(({ record }) => record.projectId === projectId);
+    if (!location) return;
+    setHighlightWorkNoteId(noteId);
+    setActiveFolder("Ghi chú");
+    selectCustomerForWorkflow(location);
+    url.searchParams.delete("gmcrmProject");
+    url.searchParams.delete("gmcrmNote");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [customerLocations]);
+
   const returnToCustomerSearch = () => {
     const currentDate = getVietnamDate();
     setSelectedCustomerProjectId(null);
@@ -1570,6 +1587,13 @@ export default function Home() {
       return;
     }
     window.location.reload();
+  };
+
+  const workNoteNotificationUrl = (note: AssignedWorkNote) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("gmcrmProject", note.projectId);
+    url.searchParams.set("gmcrmNote", note.id);
+    return url.toString();
   };
 
   const openDesktopDocuments = async () => {
@@ -2826,12 +2850,18 @@ export default function Home() {
           const key = `gm-manager-assignment-alert:${loggedInEmployeeEmail}:${note.id}`;
           const previous = Number(window.localStorage.getItem(key) ?? 0);
           if (now - previous < 15 * 60 * 1000) continue;
-          const body = `${note.customerName || note.projectId} · ${note.content || note.workType}`;
+          const body = [
+            `Khách hàng: ${note.customerName || note.projectId}`,
+            `Công việc: ${note.workType} · Ưu tiên: ${note.priority}`,
+            note.dueDate ? `Hoàn thành dự kiến: ${note.dueDate}` : "Hoàn thành dự kiến: Chưa có",
+            `Nội dung: ${note.content.trim() || "(Chưa có nội dung)"}`,
+          ].join("\n");
+          const url = workNoteNotificationUrl(note);
           const desktop = desktopBridge();
           let shown = false;
-          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url: `${window.location.origin}${window.location.pathname}` });
+          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url });
           else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
-            await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url: `${window.location.origin}${window.location.pathname}` } });
+            await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url } });
             shown = true;
           }
           if (shown) window.localStorage.setItem(key, String(now));
@@ -3063,7 +3093,7 @@ export default function Home() {
         if (isNew) setNewWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
         else if (isEditing) setEditingWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
       };
-      return <article className={`work-note ${isNew ? "work-note--new" : ""} ${isAssignee && !note.acceptedAt ? "work-note--assignment-pending" : ""}`} key={note.id}>
+      return <article className={`work-note ${isNew ? "work-note--new" : ""} ${isAssignee && !note.acceptedAt ? "work-note--assignment-pending" : ""} ${highlightWorkNoteId === note.id ? "work-note--highlighted" : ""}`} key={note.id}>
         <div className="work-note__line work-note__line--primary">
           <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên" disabled={!canEdit}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
           <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc" disabled={!canEdit}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
@@ -3072,7 +3102,7 @@ export default function Home() {
         <div className="work-note__line work-note__line--schedule">
           <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
-          {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote}>Phát hành</button></div>
+          {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote} disabled={!note.assigneeEmail || !parseDesignDate(note.dueDate) || isPastVietnamDate(note.dueDate)}>Phát hành</button></div>
             : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
               : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
           <span className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`} aria-label={`Trạng thái ${selectedStatus}`}>●</span>
@@ -3270,7 +3300,7 @@ export default function Home() {
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
         return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
     </div>}

@@ -6,6 +6,7 @@ const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
 const DRIVE_ROOT = "G:\\My Drive";
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
+let mainWindow = null;
 
 function isTrustedUrl(value) {
   try {
@@ -40,6 +41,20 @@ function createWindow() {
     event.preventDefault();
     void shell.openExternal(url);
   });
+  mainWindow = window;
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  return window;
+}
+
+function openNotificationTarget(target) {
+  const targetUrl = isTrustedUrl(target) ? target : APP_URL;
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  if (window.webContents.getURL() !== targetUrl) void window.loadURL(targetUrl);
 }
 
 async function findProjectDocumentsFolder(projectId) {
@@ -81,8 +96,10 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("gmcrm:notify", (_event, payload = {}) => {
     const title = String(payload.title || "GM-CRM").slice(0, 120);
-    const body = String(payload.body || "").slice(0, 240);
-    new Notification({ title, body }).show();
+    const body = String(payload.body || "").slice(0, 700);
+    const notification = new Notification({ title, body, icon: APP_ICON });
+    notification.on("click", () => openNotificationTarget(String(payload.url || APP_URL)));
+    notification.show();
     return true;
   });
   ipcMain.handle("gmcrm:open-drive", async (_event, payload = {}) => {
