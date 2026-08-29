@@ -152,3 +152,26 @@ test("work notes stay black until an assignee accepts the work", () => {
     { id: "note-2", priority: "Bình thường", workType: "Tư vấn", assignee: "", content: "", dueDate: "31/08/2026", actualDate: "", acceptedAt: "", status: "Đen" },
   ]);
 });
+
+test("customer portal uses normalized credentials and returns only project progress", () => {
+  const context = loadContext();
+  assert.equal(context.normalizeCustomerPortalHouseId_(" bt - 08 "), "BT-08");
+  assert.equal(context.normalizeCustomerPortalBirthPassword_("20/09/2001"), "20092001");
+  const portalRecord = context.customerPortalRecord_({
+    projectId: "GM20092001A",
+    name: "Khách hàng thử",
+    houseId: "BT-08",
+    details: { NS: "20/09/2001", SDT: "0900000000" },
+    designProgress: [{ content: "Duyệt mặt bằng", plannedDate: "20/09/2026", actualDate: "" }],
+    interiorDesignProgress: [],
+    warrantyProgress: [{ content: "Kiểm tra", reportedDate: "21/09/2026", completedDate: "22/09/2026" }],
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(portalRecord)), {
+    projectId: "GM20092001A",
+    name: "Khách hàng thử",
+    houseId: "BT-08",
+    designProgress: [{ content: "Duyệt mặt bằng", plannedDate: "20/09/2026", actualDate: "" }],
+    interiorDesignProgress: [],
+    warrantyProgress: [{ content: "Kiểm tra", plannedDate: "21/09/2026", actualDate: "22/09/2026" }],
+  });
+});

@@ -257,6 +257,21 @@ type WorkNote = {
   status: WorkNoteStatus;
 };
 
+type CustomerPortalProgressRow = {
+  content: string;
+  plannedDate: string;
+  actualDate: string;
+};
+
+type CustomerPortalRecord = {
+  projectId: string;
+  name: string;
+  houseId: string;
+  designProgress: CustomerPortalProgressRow[];
+  interiorDesignProgress: CustomerPortalProgressRow[];
+  warrantyProgress: CustomerPortalProgressRow[];
+};
+
 type DriveSyncConfig = {
   scriptUrl: string;
 };
@@ -1184,6 +1199,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
 
 export default function Home() {
   const now = getVietnamDate();
+  const isCustomerPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "customer";
   const appVersionLabel = APP_VERSION === "development" ? "dev" : APP_VERSION.slice(0, 7);
   const [activeFolder, setActiveFolder] = useState("Tư vấn");
   const [years, setYears] = useState<YearFolder[]>(initialYears);
@@ -1209,6 +1225,11 @@ export default function Home() {
   const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
+  const [customerPortalHouseId, setCustomerPortalHouseId] = useState("");
+  const [customerPortalPassword, setCustomerPortalPassword] = useState("");
+  const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
+  const [customerPortalError, setCustomerPortalError] = useState("");
+  const [customerPortalLoading, setCustomerPortalLoading] = useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -1270,6 +1291,7 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (isCustomerPortal) return;
     const currentDate = getVietnamDate();
     setSelectedYear(currentDate.year);
     setSelectedMonth(currentDate.month);
@@ -1596,6 +1618,7 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (isCustomerPortal) return;
     const currentDate = getVietnamDate();
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) return;
@@ -1607,7 +1630,7 @@ export default function Home() {
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
     const refreshTimer = window.setInterval(() => refreshWorkspace(true), DRIVE_INDEX_CACHE_MS);
     return () => window.clearInterval(refreshTimer);
-  }, [driveScriptUrl]);
+  }, [driveScriptUrl, isCustomerPortal]);
 
   const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
     const config = { scriptUrl: driveScriptUrl.trim() };
@@ -2777,6 +2800,62 @@ export default function Home() {
     if (!selectedCustomerProjectId || activeFolder === "Ghi chú" || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
     void loadWorkflowFiles(activeFolder, true);
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
+
+  const customerPortalLink = typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer`;
+  const copyCustomerPortalLink = async () => {
+    try {
+      await navigator.clipboard.writeText(customerPortalLink);
+      setNotice("Đã sao chép link gửi khách hàng.");
+    } catch {
+      setNotice("Không thể sao chép link. Hãy sao chép từ thanh địa chỉ.");
+    }
+  };
+  const submitCustomerPortalLogin = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const houseId = customerPortalHouseId.trim();
+    const birthPassword = customerPortalPassword.replace(/\D/g, "").slice(0, 8);
+    if (!houseId || birthPassword.length !== 8) {
+      setCustomerPortalError("Nhập mã nhà và đủ 8 số ngày sinh (ddmmyyyy).");
+      return;
+    }
+    setCustomerPortalLoading(true);
+    setCustomerPortalError("");
+    try {
+      const { result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: CustomerPortalRecord }>({ scriptUrl: defaultDriveSyncConfig.scriptUrl }, { action: "customer-portal-login", houseId, birthPassword });
+      if (!result.ok || !result.record) throw new Error(result.error || "Không thể mở hồ sơ dự án.");
+      setCustomerPortalRecord(result.record);
+      setCustomerPortalPassword("");
+    } catch (error) {
+      setCustomerPortalError(error instanceof Error ? error.message : "Không thể đăng nhập. Hãy thử lại.");
+    } finally {
+      setCustomerPortalLoading(false);
+    }
+  };
+  if (isCustomerPortal) {
+    const renderCustomerProgress = (title: string, rows: CustomerPortalProgressRow[]) => <section className="customer-portal__progress">
+      <h2>{title}</h2>
+      {rows.length ? <div className="customer-portal__table-wrap"><table><thead><tr><th>Công việc</th><th>Dự kiến</th><th>Hoàn thành</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.content}-${index}`}><td>{row.content || "—"}</td><td>{row.plannedDate || "—"}</td><td>{row.actualDate || "—"}</td></tr>)}</tbody></table></div> : <p>Chưa có tiến độ được cập nhật.</p>}
+    </section>;
+    return <main className="customer-portal">
+      <header className="customer-portal__brand"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><span><b>GM Manager</b><small>Tra cứu dự án</small></span></header>
+      {!customerPortalRecord ? <section className="customer-portal__login" aria-labelledby="customer-login-title">
+        <p className="eyebrow">Dành cho khách hàng</p>
+        <h1 id="customer-login-title">Tra cứu dự án</h1>
+        <p>Nhập mã nhà và ngày tháng năm sinh của chủ đầu tư để xem tiến độ.</p>
+        <form onSubmit={submitCustomerPortalLogin}>
+          <label>Mã nhà<input value={customerPortalHouseId} onChange={(event) => setCustomerPortalHouseId(event.target.value)} autoComplete="username" placeholder="Ví dụ: BT-08" autoFocus /></label>
+          <label>Mật khẩu <small>Ngày sinh, ddmmyyyy</small><input value={customerPortalPassword} onChange={(event) => setCustomerPortalPassword(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" autoComplete="current-password" type="password" placeholder="20092001" maxLength={8} /></label>
+          {customerPortalError && <p className="customer-portal__error" role="alert">{customerPortalError}</p>}
+          <button className="add-button" type="submit" disabled={customerPortalLoading}>{customerPortalLoading ? "Đang kiểm tra…" : "Xem dự án"}</button>
+        </form>
+      </section> : <section className="customer-portal__project">
+        <header><p className="eyebrow">Dự án của bạn</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p><button type="button" onClick={() => { setCustomerPortalRecord(null); setCustomerPortalHouseId(""); }}>Đăng xuất</button></header>
+        {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
+        {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
+        {renderCustomerProgress("Bảo hành", customerPortalRecord.warrantyProgress)}
+      </section>}
+    </main>;
+  }
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
   const renderWorkflowFiles = () => (
     <section className="workflow-files" aria-label={`Tệp trong thư mục ${activeFolder}`}>
@@ -3010,6 +3089,7 @@ export default function Home() {
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
+              {!personnelView && <button className="customer-link" type="button" onClick={() => void copyCustomerPortalLink()}>↗ Link khách</button>}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
               <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
             </div>

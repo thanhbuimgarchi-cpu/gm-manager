@@ -112,6 +112,7 @@ function doPost(event) {
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
+    if (payload.action === "customer-portal-login") return json_(customerPortalLogin_(payload));
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
@@ -345,6 +346,87 @@ function loadConsultingWorkspace_(payload) {
   const result = { ok: true, years: loadMonthCustomerIndex_(customers, year, month) };
   cacheJson_(cacheKey, result, 300);
   return result;
+}
+
+// The customer portal never receives the owner's date of birth. It submits the
+// value only for this server-side comparison, then receives a small, read-only
+// project summary.
+function customerPortalLogin_(payload) {
+  const houseId = normalizeCustomerPortalHouseId_(payload.houseId);
+  const birthPassword = normalizeCustomerPortalBirthPassword_(payload.birthPassword);
+  if (!houseId || birthPassword.length !== 8) throw new Error("Mã nhà hoặc mật khẩu không đúng.");
+
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const match = customers && findCustomerPortalMatch_(customers, houseId, birthPassword);
+  if (!match) throw new Error("Mã nhà hoặc mật khẩu không đúng.");
+
+  const record = recordFromWorkbook_(match.workbook, match.projectId, match.customerFolder, true);
+  return { ok: true, record: customerPortalRecord_(record) };
+}
+
+function normalizeCustomerPortalHouseId_(value) {
+  return String(value || "").trim().replace(/\s+/g, "").toUpperCase();
+}
+
+function normalizeCustomerPortalBirthPassword_(value) {
+  return String(value || "").replace(/\D/g, "").slice(0, 8);
+}
+
+function findCustomerPortalMatch_(customers, houseId, birthPassword) {
+  const years = customers.getFolders();
+  while (years.hasNext()) {
+    const yearFolder = years.next();
+    if (!/^\d{4}$/.test(yearFolder.getName())) continue;
+    const months = yearFolder.getFolders();
+    while (months.hasNext()) {
+      const monthFolder = months.next();
+      if (!/^T(?:1[0-2]|[1-9])$/.test(monthFolder.getName())) continue;
+      const projects = monthFolder.getFolders();
+      while (projects.hasNext()) {
+        const customerFolder = projects.next();
+        const projectId = customerFolder.getName();
+        if (projectId.indexOf("-") === 0) continue;
+        const workbook = latestCustomerWorkbook_(customerFolder, projectId);
+        if (!workbook) continue;
+        const sheets = readXlsxSheets_(workbook);
+        const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
+        if (normalizeCustomerPortalHouseId_(metadata.houseId) !== houseId) continue;
+        const ownerRows = sheets["1. Chủ đầu tư"] || [];
+        let birthDate = "";
+        ownerRows.slice(1).some(function(row) {
+          if (String(row[0] || "").trim() !== "NS") return false;
+          birthDate = normalizeExcelDate_(row[2]);
+          return true;
+        });
+        if (normalizeCustomerPortalBirthPassword_(birthDate) === birthPassword) return { customerFolder: customerFolder, projectId: projectId, workbook: workbook };
+      }
+    }
+  }
+  return null;
+}
+
+function customerPortalProgressRows_(rows) {
+  return (rows || []).filter(function(row) {
+    return row && (row.content || row.plannedDate || row.actualDate || row.reportedDate || row.completedDate);
+  }).map(function(row) {
+    return {
+      content: String(row.content || ""),
+      plannedDate: String(row.plannedDate || row.reportedDate || ""),
+      actualDate: String(row.actualDate || row.completedDate || ""),
+    };
+  });
+}
+
+function customerPortalRecord_(record) {
+  return {
+    projectId: String(record.projectId || ""),
+    name: String(record.name || ""),
+    houseId: String(record.houseId || ""),
+    designProgress: customerPortalProgressRows_(record.designProgress),
+    interiorDesignProgress: customerPortalProgressRows_(record.interiorDesignProgress),
+    warrantyProgress: customerPortalProgressRows_(record.warrantyProgress),
+  };
 }
 
 function monthResult_(year, month, records) {
