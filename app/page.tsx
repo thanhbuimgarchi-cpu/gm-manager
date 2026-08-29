@@ -2813,9 +2813,13 @@ export default function Home() {
           if (now - previous < 15 * 60 * 1000) continue;
           const body = `${note.customerName || note.projectId} · ${note.content || note.workType}`;
           const desktop = desktopBridge();
-          if (desktop?.isWindows) await desktop.showNotification({ title: "GM-CRM · Có việc được giao", body, url: `${window.location.origin}${window.location.pathname}` });
-          else if (Notification.permission === "granted" && serviceWorkerRegistration.current) await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url: `${window.location.origin}${window.location.pathname}` } });
-          window.localStorage.setItem(key, String(now));
+          let shown = false;
+          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url: `${window.location.origin}${window.location.pathname}` });
+          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
+            await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url: `${window.location.origin}${window.location.pathname}` } });
+            shown = true;
+          }
+          if (shown) window.localStorage.setItem(key, String(now));
         }
       } catch { /* The next poll retries while the app remains usable offline. */ }
     };
