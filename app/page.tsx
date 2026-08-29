@@ -3327,7 +3327,7 @@ export default function Home() {
               </section>
             </div>
           ) : (
-            <div className="customer-gateway__overview">
+            <div className={`customer-gateway__overview ${canViewNotesSummary ? "" : "customer-gateway__overview--no-notes"}`}>
               {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
               <div className="customer-gateway__body">
               <div className="personnel-entry customer-entry">
