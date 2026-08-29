@@ -1386,6 +1386,7 @@ export default function Home() {
   const [loadingWorkNotes, setLoadingWorkNotes] = useState(false);
   const [savingWorkNotes, setSavingWorkNotes] = useState(false);
   const [pendingWorkNoteCompletionId, setPendingWorkNoteCompletionId] = useState<string | null>(null);
+  const [pendingDesignTaskCompletion, setPendingDesignTaskCompletion] = useState<{ kind: DesignProgressKind; rowId: string } | null>(null);
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
@@ -2534,6 +2535,13 @@ export default function Home() {
     try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã ghi nhận hoàn thành hạng mục."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ hoàn thành."); }
   };
 
+  const confirmDesignTaskCompletion = () => {
+    if (!pendingDesignTaskCompletion) return;
+    const task = pendingDesignTaskCompletion;
+    setPendingDesignTaskCompletion(null);
+    void completeDesignTask(task.kind, task.rowId);
+  };
+
   const addDesignProgressRow = (kind: DesignProgressKind) => commitDesignProgressRows(kind, [...progressRowsFor(kind), createCustomDesignRow(kind)]);
 
   const deleteDesignProgressRow = (kind: DesignProgressKind, rowIndex: number) => {
@@ -3499,7 +3507,7 @@ export default function Home() {
                 </span>
               </div></td>
               <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><div className="design-task-completion"><input value={row.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label={`Ngày hoàn thành ${row.content}`} />{row.publishedAt && row.assigneeEmail === loggedInEmployeeEmail && !row.actualDate && <button type="button" className="work-note__complete" disabled={!row.acceptedAt} onClick={() => void completeDesignTask(kind, row.id)} title={row.acceptedAt ? "Xác nhận hoàn thành" : "Hãy xác nhận nhận việc trước"}>✓</button>}</div></td>
+              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small><label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={Boolean(row.actualDate) || !row.publishedAt || row.assigneeEmail !== loggedInEmployeeEmail || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
               <td><select className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></td>
               <td><span className={`sidebar-notes__dot--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`} />{row.publishedAt && row.assigneeEmail === loggedInEmployeeEmail && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)}>Xác nhận nhận việc</button>}</td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
@@ -3913,6 +3921,18 @@ export default function Home() {
             <h2>Xác nhận hoàn thành?</h2>
             <p>Hệ thống sẽ ghi ngày hoàn thành thực tế là <b>{formatWorkNoteDate()}</b> và đồng bộ cho các thiết bị.</p>
             <div className="dialog-actions"><button type="button" onClick={() => setPendingWorkNoteCompletionId(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmWorkNoteCompletion}>Có, hoàn thành</button></div>
+          </section>
+        </div>
+      )}
+
+      {pendingDesignTaskCompletion && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setPendingDesignTaskCompletion(null)}>
+          <section className="security-dialog" role="dialog" aria-modal="true" aria-label="Xác nhận hoàn thành hạng mục thiết kế" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setPendingDesignTaskCompletion(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Tiến độ thiết kế</p>
+            <h2>Xác nhận hoàn thành?</h2>
+            <p>Hệ thống sẽ ghi ngày hoàn thành thực tế là <b>{formatWorkNoteDate()}</b> và đồng bộ cho các thiết bị.</p>
+            <div className="dialog-actions"><button type="button" onClick={() => setPendingDesignTaskCompletion(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDesignTaskCompletion}>Có, hoàn thành</button></div>
           </section>
         </div>
       )}
