@@ -1118,7 +1118,7 @@ function workNoteStatus(note: Pick<WorkNote, "acceptedAt" | "dueDate">): WorkNot
   const days = Math.floor((due.getTime() - today.getTime()) / 86_400_000);
   if (days < 0) return "Tím";
   if (days <= 3) return "Đỏ";
-  if (days <= 6) return "Cam";
+  if (days <= 7) return "Cam";
   return "Xanh";
 }
 
