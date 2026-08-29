@@ -2725,7 +2725,10 @@ export default function Home() {
     loadWorkNotes();
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear]);
   useEffect(() => {
-    if (!selectedCustomerProjectId || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
+    // Ghi chú is intentionally a device-only draft area. Loading its generic
+    // project-files panel here used DriveApp as soon as the tab opened, which
+    // produced a Drive error even though the note itself had not been saved.
+    if (!selectedCustomerProjectId || activeFolder === "Ghi chú" || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
     void loadWorkflowFiles(activeFolder, true);
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
   const currentWorkflowFiles = workflowFilesByFolder[workflowFilesCacheKey(activeFolder)] ?? [];
@@ -3167,7 +3170,7 @@ export default function Home() {
             </section>
           </section>
         )}
-        {activeFolder !== "Tài liệu" && activeFolder !== "3D" && selectedCustomerLocation && renderWorkflowFiles()}
+        {activeFolder !== "Ghi chú" && activeFolder !== "Tài liệu" && activeFolder !== "3D" && selectedCustomerLocation && renderWorkflowFiles()}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       </section>
 
