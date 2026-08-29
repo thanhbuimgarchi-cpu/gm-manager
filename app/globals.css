@@ -148,6 +148,8 @@
 .brand__mark { display: grid; justify-items: center; gap: 2px; }
 .brand--with-logo img { width: 32px; height: 32px; aspect-ratio: 1; object-fit: contain; }
 .brand__version { display: block; color: #99958e; font-size: 7px; font-weight: 500; letter-spacing: .15px; line-height: 1; }
+
+.personnel-permissions { grid-column: 1 / -1; margin: 0; padding: 10px 12px 12px; border: 1px solid #dedbd5; border-radius: 7px; }.personnel-permissions legend { padding: 0 4px; color: #615d56; font-size: 10px; font-weight: 700; }.personnel-permissions > div { display: flex; flex-wrap: wrap; gap: 8px 14px; }.personnel-permissions label { display: inline-flex; align-items: center; gap: 5px; color: #4e4a44; font-size: 10px; }.personnel-permissions input { width: 13px; height: 13px; accent-color: #725943; }
 .customer-gateway__brand { transform: translateY(9px); }
 @media (max-width: 620px) {
   .brand--with-logo { min-width: 24px; min-height: 24px; }

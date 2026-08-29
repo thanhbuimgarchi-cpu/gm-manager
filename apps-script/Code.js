@@ -1773,6 +1773,8 @@ function loadPersonnel_() {
   const roleColumn = column("Chức vụ", 5);
   const addressColumn = column("Địa chỉ", 6);
   const idColumn = column("_ID", 7);
+  const emailColumn = headers.indexOf("Email");
+  const permissionsColumn = headers.indexOf("Quyền");
   rows.slice(1).forEach(function(row, index) {
     const category = String(row[categoryColumn] || "").trim();
     const name = String(row[nameColumn] || "").trim();
@@ -1782,9 +1784,11 @@ function loadPersonnel_() {
       id: String(row[idColumn] || ("drive-person-" + category + "-" + index)),
       status: statusColumn >= 0 && ["Có", "Không", "Ngưng"].indexOf(String(row[statusColumn] || "")) >= 0 ? String(row[statusColumn]) : "Có",
       name: name,
+      email: emailColumn >= 0 ? String(row[emailColumn] || "").trim().toLowerCase() : "",
       birthDate: normalizeExcelDate_(row[birthDateColumn]),
       phone: normalizePersonnelPhone_(row[phoneColumn]),
       role: String(row[roleColumn] || ""),
+      permissions: permissionsColumn >= 0 ? String(row[permissionsColumn] || "").split("|").map(function(value) { return value.trim(); }).filter(Boolean) : [],
       address: String(row[addressColumn] || ""),
     });
   });
@@ -1797,26 +1801,28 @@ function syncPersonnelWorkbook_(personnel) {
     coordination: "Điều phối", management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
     construction: "Nhân công xây dựng", workshop: "Nhân công xưởng", partner: "Đối tác",
   };
-  const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Ngày sinh", "Số điện thoại", "Chức vụ", "Địa chỉ", "_ID"]];
+  const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Email", "Ngày sinh", "Số điện thoại", "Chức vụ", "Quyền", "Địa chỉ", "_ID"]];
   Object.keys(personnel || {}).forEach(function(category) {
     const members = Array.isArray(personnel[category]) ? personnel[category] : [];
     members.forEach(function(member) {
       if (!member || !String(member.name || "").trim()) return;
       const status = ["Có", "Không", "Ngưng"].indexOf(String(member.status || "")) >= 0 ? String(member.status) : "Có";
-      rows.push([category, categoryLabels[category] || category, status, String(member.name || ""), String(member.birthDate || ""), normalizePersonnelPhone_(member.phone), String(member.role || ""), String(member.address || ""), String(member.id || "")]);
+      const email = String(member.email || "").trim().toLowerCase();
+      const permissions = Array.isArray(member.permissions) ? member.permissions.map(function(value) { return String(value || "").trim(); }).filter(Boolean).join("|") : "";
+      rows.push([category, categoryLabels[category] || category, status, String(member.name || ""), email, String(member.birthDate || ""), normalizePersonnelPhone_(member.phone), String(member.role || ""), permissions, String(member.address || ""), String(member.id || "")]);
     });
   });
   const spreadsheet = SpreadsheetApp.create("GM-CRM nhân lực temporary");
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Nhân lực");
-    sheet.getRange(1, 1, rows.length, 9).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
-    sheet.getRange(1, 1, 1, 9).setFontWeight("bold").setBackground("#eee9e2");
-    if (rows.length > 1) sheet.getRange(2, 6, rows.length - 1, 1).setNumberFormat("@");
+    sheet.getRange(1, 1, rows.length, 11).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
+    sheet.getRange(1, 1, 1, 11).setFontWeight("bold").setBackground("#eee9e2");
+    if (rows.length > 1) sheet.getRange(2, 7, rows.length - 1, 1).setNumberFormat("@");
     sheet.setFrozenRows(1);
-    [115, 180, 100, 180, 110, 135, 160, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
+    [115, 180, 100, 180, 220, 110, 135, 160, 260, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
     sheet.hideColumns(1, 2);
-    sheet.hideColumns(9, 1);
+    sheet.hideColumns(11, 1);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const fileName = "Danh sách nhân lực.xlsx";
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);

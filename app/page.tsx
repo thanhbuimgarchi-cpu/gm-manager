@@ -235,9 +235,11 @@ type PersonnelMember = {
   id: string;
   status: PersonnelStatus;
   name: string;
+  email: string;
   birthDate: string;
   phone: string;
   role: string;
+  permissions: string[];
   address: string;
 };
 
@@ -315,6 +317,7 @@ const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
 const personnelStorageKey = "gm-manager-personnel-v1";
+const personnelSessionEmailKey = "gm-manager-personnel-session-email";
 const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
 const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // The currently deployed Apps Script still verifies its historical token. It is
@@ -496,6 +499,9 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "3D", icon: "▧" },
   { label: "Nhân lực", icon: "♙" },
 ].filter((folder) => !folder.label.startsWith("-"));
+
+const personnelRoles = ["Nhân viên kỹ thuật", "Quản lý chung", "Nhân viên văn phòng", "Marketing", "Giám sát", "Thợ xưởng", "Thợ công trình", "Kế toán", "Nhân viên thiết kế"] as const;
+const personnelPermissionOptions = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Tài liệu", "3D"] as const;
 
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
@@ -1118,7 +1124,10 @@ function normalizePersonnelMap(value: Record<string, PersonnelMember[]>) {
   return Object.fromEntries(Object.entries(value ?? {}).map(([category, members]) => [category, (Array.isArray(members) ? members : []).map((member) => ({
     ...member,
     status: personnelStatuses.includes(member.status) ? member.status : "Có",
+    email: String(member.email ?? "").trim().toLowerCase(),
     phone: normalizePersonnelPhone(member.phone),
+    role: personnelRoles.includes(member.role as typeof personnelRoles[number]) ? member.role : "",
+    permissions: Array.from(new Set((Array.isArray(member.permissions) ? member.permissions : []).filter((permission): permission is typeof personnelPermissionOptions[number] => personnelPermissionOptions.includes(permission as typeof personnelPermissionOptions[number])))),
   }))]));
 }
 
@@ -1220,7 +1229,7 @@ export default function Home() {
   const [editingPersonnelId, setEditingPersonnelId] = useState<string | null>(null);
   const [personnelMenuId, setPersonnelMenuId] = useState<string | null>(null);
   const [loadingPersonnel, setLoadingPersonnel] = useState(false);
-  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
+  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -1232,6 +1241,9 @@ export default function Home() {
   const [houseId, setHouseId] = useState("");
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
+  const [employeeLoginEmail, setEmployeeLoginEmail] = useState("");
+  const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
+  const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
   const [customerPortalLoading, setCustomerPortalLoading] = useState(false);
@@ -1319,6 +1331,7 @@ export default function Home() {
     try {
       const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
       if (savedPersonnel) setPersonnelByCategory(normalizePersonnelMap(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>));
+      setLoggedInEmployeeEmail(String(window.localStorage.getItem(personnelSessionEmailKey) ?? "").trim().toLowerCase());
     } catch {
       window.localStorage.removeItem(personnelStorageKey);
     }
@@ -1560,7 +1573,7 @@ export default function Home() {
   const renderMobileAppActions = () => <>
     {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
-    <button type="button" className="pwa-action pwa-action--login" onClick={() => setLoginOpen(true)}>◉ Đăng nhập</button>
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
   </>;
 
@@ -2691,8 +2704,14 @@ export default function Home() {
   const hasConsultingSearchResults = visibleDetailSections.length > 0 || visibleSystemFields.length > 0 || consultingSearchMatchesFunctional || consultingSearchMatchesAudio;
   const selectedPersonnelCategory = personnelCategories.find((category) => category.id === selectedPersonnelCategoryId) ?? personnelCategories[0] ?? null;
   const selectedPersonnel = selectedPersonnelCategory ? personnelByCategory[selectedPersonnelCategory.id] ?? [] : [];
-  const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.phone} ${member.role} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
+  const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.email} ${member.phone} ${member.role} ${member.permissions.join(" ")} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
   const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
+  const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
+  const loggedInEmployee = allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
+  const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
+  const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
+  const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
+  const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const syncPersonnelToDrive = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
@@ -2713,14 +2732,14 @@ export default function Home() {
     const member: PersonnelMember = { id: editingPersonnelId ?? `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate), phone: normalizePersonnelPhone(personnelDraft.phone) };
     const nextMembers = editingPersonnelId ? selectedPersonnel.map((item) => item.id === editingPersonnelId ? member : item) : [...selectedPersonnel, member];
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: nextMembers });
-    setPersonnelDraft({ status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
+    setPersonnelDraft({ status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
     setEditingPersonnelId(null);
     setPersonnelAddOpen(false);
     setNotice(editingPersonnelId ? `Đã cập nhật ${member.name}.` : `Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
   };
   const openPersonnelEditor = (member?: PersonnelMember) => {
     setEditingPersonnelId(member?.id ?? null);
-    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, address: member.address } : { status: "Có", name: "", birthDate: "", phone: "", role: "", address: "" });
+    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, email: member.email ?? "", birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, permissions: member.permissions ?? [], address: member.address } : { status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
     setPersonnelMenuId(null);
     setPersonnelAddOpen(true);
   };
@@ -2733,8 +2752,34 @@ export default function Home() {
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.filter((member) => member.id !== memberId) });
     setPersonnelMenuId(null);
   };
+  const loginEmployee = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const email = employeeLoginEmail.trim().toLowerCase();
+    const member = allPersonnel.find((personnel) => personnel.status === "Có" && personnel.email === email);
+    if (!member) {
+      setEmployeeLoginError("Email này chưa có tài khoản hoạt động trong danh sách Nhân lực.");
+      return;
+    }
+    try { window.localStorage.setItem(personnelSessionEmailKey, email); } catch { /* The session remains open in this browser tab. */ }
+    setLoggedInEmployeeEmail(email);
+    setEmployeeLoginError("");
+    setLoginOpen(false);
+    const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
+    if (allowedFolders.length) setActiveFolder(allowedFolders[0]);
+    setNotice(`Đã đăng nhập ${member.name}.`);
+  };
+  const logoutEmployee = () => {
+    try { window.localStorage.removeItem(personnelSessionEmailKey); } catch { /* Optional device session cleanup. */ }
+    setLoggedInEmployeeEmail("");
+    setEmployeeLoginEmail("");
+    setNotice("Đã đăng xuất tài khoản nhân viên.");
+  };
   useEffect(() => {
-    if ((!personnelView && activeFolder !== "Ghi chú") || !driveScriptUrl.trim()) return;
+    if (!loggedInEmployee || !visibleWorkspaceFolders.length) return;
+    if (!visibleWorkspaceFolders.some((folder) => folder.label === activeFolder)) setActiveFolder(visibleWorkspaceFolders[0].label);
+  }, [activeFolder, loggedInEmployee?.id, visibleWorkspaceFolders]);
+  useEffect(() => {
+    if ((!personnelView && activeFolder !== "Ghi chú" && !loginOpen) || !driveScriptUrl.trim()) return;
     let cancelled = false;
     setLoadingPersonnel(true);
     void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
@@ -2744,19 +2789,11 @@ export default function Home() {
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
     return () => { cancelled = true; };
-  }, [personnelView, activeFolder, driveScriptUrl]);
+  }, [personnelView, activeFolder, driveScriptUrl, loginOpen]);
   useEffect(() => {
     if (activeFolder !== "Ghi chú" || !selectedCustomerLocation) return;
     loadWorkNotes();
   }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear]);
-  useEffect(() => {
-    // Ghi chú is intentionally a device-only draft area. Loading its generic
-    // project-files panel here used DriveApp as soon as the tab opened, which
-    // produced a Drive error even though the note itself had not been saved.
-    if (!selectedCustomerProjectId || activeFolder === "Ghi chú" || activeFolder === "Tài liệu" || activeFolder === "3D" || !driveScriptUrl.trim()) return;
-    void loadWorkflowFiles(activeFolder, true);
-  }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear, driveScriptUrl]);
-
   const customerPortalShareToken = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("share")?.trim() ?? "";
   const customerPortalLink = (shareToken: string) => typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
   const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
@@ -3091,13 +3128,15 @@ export default function Home() {
                   {personnelAddOpen && <form className="personnel-add-form" onSubmit={savePersonnel}>
                     <label>Hoạt động<select value={personnelDraft.status} onChange={(event) => setPersonnelDraft({ ...personnelDraft, status: event.target.value as PersonnelStatus })}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
                     <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
+                    <label>Email<input type="email" value={personnelDraft.email} onChange={(event) => setPersonnelDraft({ ...personnelDraft, email: event.target.value.trim().toLowerCase() })} placeholder="ten@congty.com" required /></label>
                     <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="11/11/1999" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
                     <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
-                    <label>Chức vụ<input value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} /></label>
+                    <label>Chức vụ<select value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} required><option value="">Chọn chức vụ</option>{personnelRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
+                    <fieldset className="personnel-permissions"><legend>Quyền truy cập</legend><div>{personnelPermissionOptions.map((permission) => <label key={permission}><input type="checkbox" checked={personnelDraft.permissions.includes(permission)} onChange={(event) => setPersonnelDraft({ ...personnelDraft, permissions: event.target.checked ? [...personnelDraft.permissions, permission] : personnelDraft.permissions.filter((item) => item !== permission) })} />{permission}</label>)}</div></fieldset>
                     <label>Địa chỉ<input value={personnelDraft.address} onChange={(event) => setPersonnelDraft({ ...personnelDraft, address: event.target.value })} /></label>
                     <div><button type="button" className="personnel-back" onClick={() => { setPersonnelAddOpen(false); setEditingPersonnelId(null); }}>Hủy</button><button className="add-button" type="submit">{editingPersonnelId ? "Lưu thay đổi" : "Lưu nhân lực"}</button></div>
                   </form>}
-                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Hoạt động</th><th>Họ và tên</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><div className={`personnel-status personnel-status--${member.status === "Có" ? "active" : member.status === "Không" ? "inactive" : "paused"}`}><span className="personnel-status__figure" aria-hidden="true" /><select value={member.status ?? "Có"} onChange={(event) => updatePersonnelStatus(member.id, event.target.value as PersonnelStatus)} aria-label={`Hoạt động của ${member.name}`}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div></td><td><b>{member.name}</b></td><td>{member.birthDate || "—"}</td><td>{normalizePersonnelPhone(member.phone) || "—"}</td><td>{member.role || "—"}</td><td>{member.address || "—"}</td><td className="personnel-row-actions"><button type="button" className="personnel-more" onClick={() => setPersonnelMenuId(personnelMenuId === member.id ? null : member.id)} aria-label={`Tùy chọn ${member.name}`}>…</button>{personnelMenuId === member.id && <div className="personnel-row-menu"><button type="button" onClick={() => openPersonnelEditor(member)}>Thay đổi</button><button type="button" className="personnel-row-menu__delete" onClick={() => removePersonnel(member.id)}>Xóa</button></div>}</td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
+                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Hoạt động</th><th>Họ và tên</th><th>Email</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Quyền</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><div className={`personnel-status personnel-status--${member.status === "Có" ? "active" : member.status === "Không" ? "inactive" : "paused"}`}><span className="personnel-status__figure" aria-hidden="true" /><select value={member.status ?? "Có"} onChange={(event) => updatePersonnelStatus(member.id, event.target.value as PersonnelStatus)} aria-label={`Hoạt động của ${member.name}`}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div></td><td><b>{member.name}</b></td><td>{member.email || "—"}</td><td>{member.birthDate || "—"}</td><td>{normalizePersonnelPhone(member.phone) || "—"}</td><td>{member.role || "—"}</td><td>{member.permissions.length ? member.permissions.join(", ") : "—"}</td><td>{member.address || "—"}</td><td className="personnel-row-actions"><button type="button" className="personnel-more" onClick={() => setPersonnelMenuId(personnelMenuId === member.id ? null : member.id)} aria-label={`Tùy chọn ${member.name}`}>…</button>{personnelMenuId === member.id && <div className="personnel-row-menu"><button type="button" onClick={() => openPersonnelEditor(member)}>Thay đổi</button><button type="button" className="personnel-row-menu__delete" onClick={() => removePersonnel(member.id)}>Xóa</button></div>}</td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
                 </div>
               </section>
             </div>
@@ -3132,10 +3171,10 @@ export default function Home() {
                 )}
               </div>
 
-              <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
+              {canManagePersonnel && <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
                 <span className="personnel-entry__icon">♙</span>
                 <span><b>Nhân lực</b></span>
-              </button>
+              </button>}
             </div>
           )}
           {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
@@ -3146,7 +3185,7 @@ export default function Home() {
         <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM-manager">
-          {syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực").map((folder) => (
+          {visibleWorkspaceFolders.map((folder) => (
             <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
               <span>{folder.label}</span>
@@ -3161,7 +3200,9 @@ export default function Home() {
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
-        {activeFolder === "Ghi chú" ? (
+        {!hasActiveFolderAccess ? (
+          <section className="coming-soon"><span>⌑</span><p className="eyebrow">GM-manager</p><h1>Chưa được cấp quyền</h1><p>Tài khoản <b>{loggedInEmployee?.email}</b> không có quyền truy cập mục <b>{activeFolder}</b>.</p></section>
+        ) : activeFolder === "Ghi chú" ? (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
             {selectedCustomerLocation && renderWorkNotes()}
@@ -3276,7 +3317,6 @@ export default function Home() {
             </section>
           </section>
         )}
-        {activeFolder !== "Ghi chú" && activeFolder !== "Tài liệu" && activeFolder !== "3D" && selectedCustomerLocation && renderWorkflowFiles()}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       </section>
 
@@ -3310,12 +3350,13 @@ export default function Home() {
 
       {loginOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}>
-          <form className="add-dialog login-dialog" onSubmit={(event) => { event.preventDefault(); setNotice("Đăng nhập tài khoản sẽ được bật sau khi thiết lập máy chủ xác thực."); }} onMouseDown={(event) => event.stopPropagation()}>
+          <form className="add-dialog login-dialog" onSubmit={loginEmployee} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setLoginOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Tài khoản</p><h2>Đăng nhập GM-manager</h2>
-            <label>Tài khoản<input name="username" autoComplete="username" placeholder="Email hoặc tên tài khoản" autoFocus required /></label>
-            <label>Mật khẩu<input name="password" type="password" autoComplete="current-password" placeholder="Nhập mật khẩu" required /></label>
-            <div className="login-dialog__actions"><button className="add-button" type="submit">Đăng nhập</button><button className="login-google" type="button" onClick={() => setNotice("Đăng nhập Google sẽ được bật sau khi cấu hình Google OAuth.")}><span aria-hidden="true">G</span> Đăng nhập với Google</button></div>
+            <p className="eyebrow">Tài khoản nhân viên</p><h2>Đăng nhập bằng email</h2>
+            <p>Email phải trùng với email đã ghi trong danh sách Nhân lực. Quyền hiển thị sẽ áp dụng ngay sau khi đăng nhập.</p>
+            <label>Email<input type="email" value={employeeLoginEmail} autoComplete="email" placeholder="ten@congty.com" onChange={(event) => setEmployeeLoginEmail(event.target.value.trim().toLowerCase())} autoFocus required /></label>
+            {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
+            <div className="login-dialog__actions"><button className="add-button" type="submit">Đăng nhập</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
           </form>
         </div>
       )}
