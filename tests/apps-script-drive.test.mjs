@@ -148,8 +148,8 @@ test("work notes stay black until an assignee accepts the work", () => {
     { id: "note-2", priority: "Không hợp lệ", workType: "Khác", dueDate: "31/08/2026", actualDate: "2026/08/31", status: "Tím" },
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(notes)), [
-    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", content: "Duyệt bản vẽ", dueDate: "31/08/2026", actualDate: "31/08/2026", acceptedAt: "28/08/2026", status: "Đỏ" },
-    { id: "note-2", priority: "Bình thường", workType: "Tư vấn", assignee: "", content: "", dueDate: "31/08/2026", actualDate: "", acceptedAt: "", status: "Đen" },
+    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", assigneeEmail: "", creatorEmail: "", creatorName: "", acceptedBy: "", content: "Duyệt bản vẽ", dueDate: "31/08/2026", actualDate: "31/08/2026", acceptedAt: "28/08/2026", status: "Đỏ" },
+    { id: "note-2", priority: "Bình thường", workType: "Tư vấn", assignee: "", assigneeEmail: "", creatorEmail: "", creatorName: "", acceptedBy: "", content: "", dueDate: "31/08/2026", actualDate: "", acceptedAt: "", status: "Đen" },
   ]);
 });
 

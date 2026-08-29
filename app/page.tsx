@@ -246,7 +246,7 @@ type PersonnelMember = {
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
 
 type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
-type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen";
+type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen" | "Tím";
 
 type WorkNote = {
   id: string;
@@ -257,7 +257,19 @@ type WorkNote = {
   dueDate: string;
   actualDate: string;
   acceptedAt?: string;
+  acceptedBy?: string;
+  creatorEmail: string;
+  creatorName: string;
+  assigneeEmail: string;
   status: WorkNoteStatus;
+};
+
+type AssignedWorkNote = WorkNote & {
+  year: number;
+  month: number;
+  projectId: string;
+  customerName?: string;
+  houseId?: string;
 };
 
 type OutstandingWorkNote = {
@@ -514,7 +526,6 @@ const builtInAdminPersonnel: PersonnelMember = { id: "built-in-admin", status: "
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
 const workNoteTypes = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"] as const;
-const workNoteStatuses: WorkNoteStatus[] = ["Đỏ", "Cam", "Xanh"];
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
 
 
@@ -1097,6 +1108,20 @@ function formatWorkNoteDate(date = new Date()) {
   }).format(date);
 }
 
+function workNoteStatus(note: Pick<WorkNote, "acceptedAt" | "dueDate">): WorkNoteStatus {
+  if (!note.acceptedAt) return "Đen";
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(note.dueDate || "");
+  if (!match) return "Xanh";
+  const due = new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
+  due.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Math.floor((due.getTime() - today.getTime()) / 86_400_000);
+  if (days < 0) return "Tím";
+  if (days <= 3) return "Đỏ";
+  if (days <= 6) return "Cam";
+  return "Xanh";
+}
+
 function nameInitials(name: string) {
   const words = name
     .normalize("NFD")
@@ -1278,6 +1303,7 @@ export default function Home() {
   const [workflowFilesError, setWorkflowFilesError] = useState("");
   const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
   const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
+  const [assignedWorkNotes, setAssignedWorkNotes] = useState<AssignedWorkNote[]>([]);
   const [workNotesCacheRevision, setWorkNotesCacheRevision] = useState(0);
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
@@ -1726,7 +1752,12 @@ export default function Home() {
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
-  const loadWorkNotes = () => {
+  const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
+    if (!location || !driveScriptUrl.trim()) return;
+    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes });
+    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ghi chú được giao.");
+  };
+  const loadWorkNotes = async () => {
     if (!selectedCustomerLocation) return;
     setNewWorkNote(null);
     setEditingWorkNote(null);
@@ -1735,6 +1766,15 @@ export default function Home() {
     const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
     setWorkNotes(cachedNotes ?? []);
     setLoadingWorkNotes(false);
+    if (!driveScriptUrl.trim()) return;
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId });
+      if (response.ok && result.ok && Array.isArray(result.notes)) {
+        setWorkNotes(result.notes);
+        writeDriveCache(cacheKey, result.notes);
+        setWorkNotesCacheRevision((revision) => revision + 1);
+      }
+    } catch { /* Keep the local cache available while offline. */ }
   };
   const saveCompletedWorkNoteToDrive = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!location || !driveScriptUrl.trim()) {
@@ -1749,6 +1789,7 @@ export default function Home() {
         year: location.year,
         month: location.month,
         projectId: location.record.projectId,
+        actorEmail: loggedInEmployeeEmail,
         note,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu công việc hoàn thành vào Drive.");
@@ -1769,6 +1810,7 @@ export default function Home() {
     setWorkNotesCacheRevision((revision) => revision + 1);
   };
   const addWorkNote = () => {
+    if (!loggedInEmployee) { setNotice("Hãy đăng nhập trước khi tạo và giao việc."); setLoginOpen(true); return; }
     if (newWorkNote) return;
     setNewWorkNote({
       id: `work-note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1778,17 +1820,22 @@ export default function Home() {
       content: "",
       dueDate: "",
       actualDate: "",
+      creatorEmail: loggedInEmployee.email,
+      creatorName: loggedInEmployee.name,
+      assigneeEmail: "",
       status: "Đen",
     });
   };
   const updateNewWorkNote = (field: Exclude<keyof WorkNote, "id">, value: string) => {
     setNewWorkNote((note) => note ? { ...note, [field]: value } as WorkNote : note);
   };
-  const publishNewWorkNote = () => {
+  const publishNewWorkNote = async () => {
     if (!newWorkNote) return;
-    persistWorkNotes([...workNotes, newWorkNote]);
+    if (!newWorkNote.assigneeEmail) { setNotice("Hãy gắn nhân lực trước khi phát hành ghi chú."); return; }
+    const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
+    persistWorkNotes(next);
     setNewWorkNote(null);
-    setNotice("Đã phát hành ghi chú vào cache của thiết bị.");
+    try { await syncWorkNotesToSharedStore(next); setNotice("Đã giao việc và đồng bộ cho người được gắn."); } catch (error) { setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc."); }
   };
   const updateWorkNote = (id: string, field: Exclude<keyof WorkNote, "id">, value: string) => {
     persistWorkNotes(workNotes.map((note) => note.id === id ? { ...note, [field]: value } as WorkNote : note));
@@ -1800,11 +1847,12 @@ export default function Home() {
     setWorkNoteMenuId(null);
     setEditingWorkNote({ ...note });
   };
-  const saveEditingWorkNote = () => {
+  const saveEditingWorkNote = async () => {
     if (!editingWorkNote) return;
-    persistWorkNotes(workNotes.map((note) => note.id === editingWorkNote.id ? editingWorkNote : note));
+    const next = workNotes.map((note) => note.id === editingWorkNote.id ? { ...editingWorkNote, status: workNoteStatus(editingWorkNote) } : note);
+    persistWorkNotes(next);
     setEditingWorkNote(null);
-    setNotice("Đã lưu thay đổi ghi chú vào cache của thiết bị.");
+    try { await syncWorkNotesToSharedStore(next); setNotice("Đã lưu thay đổi và đồng bộ người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ thay đổi."); }
   };
   const removeWorkNote = (id: string) => {
     persistWorkNotes(workNotes.filter((note) => note.id !== id));
@@ -1816,7 +1864,15 @@ export default function Home() {
     const noteId = pendingWorkNoteCompletionId;
     setPendingWorkNoteCompletionId(null);
     const note = workNotes.find((item) => item.id === noteId);
+    if (!note || note.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người được giao việc mới có thể xác nhận hoàn thành."); return; }
     if (note) void saveCompletedWorkNoteToDrive({ ...note, actualDate: formatWorkNoteDate() });
+  };
+  const acceptAssignedWorkNote = async (note: WorkNote, location = selectedCustomerLocation) => {
+    if (!location || note.assigneeEmail !== loggedInEmployeeEmail) return;
+    const accepted = { ...note, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail, status: workNoteStatus({ ...note, acceptedAt: new Date().toISOString() }) };
+    const next = workNotes.map((item) => item.id === note.id ? accepted : item);
+    persistWorkNotes(next);
+    try { await syncWorkNotesToSharedStore(next, location); setNotice("Đã xác nhận nhận việc."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận nhận việc."); }
   };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
@@ -2719,12 +2775,40 @@ export default function Home() {
   const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.email} ${member.phone} ${member.role} ${member.permissions.join(" ")} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
   const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
+  const assignablePersonnel = useMemo(() => allPersonnel.filter((member) => member.status === "Có" && member.email).sort((left, right) => left.name.localeCompare(right.name, "vi")), [allPersonnel]);
   const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
+  useEffect(() => {
+    if (!canViewNotesSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedWorkNotes([]); return; }
+    let cancelled = false;
+    const loadAssignments = async () => {
+      try {
+        const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", email: loggedInEmployeeEmail });
+        if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
+        const notes = result.notes.map((note) => ({ ...note, status: workNoteStatus(note) }));
+        setAssignedWorkNotes(notes);
+        const pending = notes.filter((note) => !note.acceptedAt);
+        const now = Date.now();
+        for (const note of pending) {
+          const key = `gm-manager-assignment-alert:${loggedInEmployeeEmail}:${note.id}`;
+          const previous = Number(window.localStorage.getItem(key) ?? 0);
+          if (now - previous < 15 * 60 * 1000) continue;
+          const body = `${note.customerName || note.projectId} · ${note.content || note.workType}`;
+          const desktop = desktopBridge();
+          if (desktop?.isWindows) await desktop.showNotification({ title: "GM-CRM · Có việc được giao", body, url: `${window.location.origin}${window.location.pathname}` });
+          else if (Notification.permission === "granted" && serviceWorkerRegistration.current) await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url: `${window.location.origin}${window.location.pathname}` } });
+          window.localStorage.setItem(key, String(now));
+        }
+      } catch { /* The next poll retries while the app remains usable offline. */ }
+    };
+    void loadAssignments();
+    const timer = window.setInterval(() => { void loadAssignments(); }, 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail]);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
     if (typeof window === "undefined") return [];
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
@@ -2749,8 +2833,15 @@ export default function Home() {
       const [day = "99", month = "99", year = "9999"] = value.split("/");
       return `${year.padStart(4, "9")}${month.padStart(2, "9")}${day.padStart(2, "9")}`;
     };
+    assignedWorkNotes.forEach((note) => {
+      const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`);
+      if (!location || note.actualDate) return;
+      const existing = outstanding.findIndex((item) => item.note.id === note.id);
+      if (existing >= 0) outstanding[existing] = { note, location };
+      else outstanding.push({ note, location });
+    });
     return outstanding.sort((left, right) => dateValue(left.note.dueDate).localeCompare(dateValue(right.note.dueDate)) || priorityOrder[left.note.priority] - priorityOrder[right.note.priority]);
-  }, [customerLocations, workNotesCacheRevision]);
+  }, [assignedWorkNotes, customerLocations, workNotesCacheRevision]);
   const syncPersonnelToDrive = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
@@ -2928,25 +3019,31 @@ export default function Home() {
   );
   const renderWorkNotes = () => {
     const renderWorkNote = (note: WorkNote, isNew = false, isEditing = false) => {
-      const availableStatuses: WorkNoteStatus[] = note.acceptedAt ? workNoteStatuses : ["Đen"];
-      const selectedStatus = availableStatuses.includes(note.status) ? note.status : "Đen";
-      const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green" } as Record<WorkNoteStatus, string>)[selectedStatus];
-      const canEdit = isNew || isEditing;
+      const selectedStatus = workNoteStatus(note);
+      const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green", "Tím": "work-note__status--purple" } as Record<WorkNoteStatus, string>)[selectedStatus];
+      const isCreator = Boolean(loggedInEmployeeEmail && note.creatorEmail === loggedInEmployeeEmail);
+      const isAssignee = Boolean(loggedInEmployeeEmail && note.assigneeEmail === loggedInEmployeeEmail);
+      const canEdit = isNew || (isEditing && isCreator);
       const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (field: Exclude<keyof WorkNote, "id">, value: string) => updateWorkNote(note.id, field, value);
-      return <article className={`work-note ${isNew ? "work-note--new" : ""}`} key={note.id}>
+      const chooseAssignee = (email: string) => {
+        const member = assignablePersonnel.find((personnel) => personnel.email === email);
+        if (isNew) setNewWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
+        else if (isEditing) setEditingWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
+      };
+      return <article className={`work-note ${isNew ? "work-note--new" : ""} ${isAssignee && !note.acceptedAt ? "work-note--assignment-pending" : ""}`} key={note.id}>
         <div className="work-note__line work-note__line--primary">
           <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên" disabled={!canEdit}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
           <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc" disabled={!canEdit}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
-          <label>Gắn nhân lực<select value={note.assignee} onChange={(event) => update("assignee", event.target.value)} aria-label="Gắn nhân lực" disabled={!canEdit}><option value="">Chọn nhân lực</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+          <label>Gắn nhân lực<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Gắn nhân lực" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
           <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => update("dueDate", formatDesignDateInput(event.target.value))} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
           {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote}>Phát hành</button></div>
             : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
-              : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={Boolean(note.actualDate)} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
-          <label className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`}><select value={selectedStatus} onChange={(event) => update("status", event.target.value)} aria-label={`Trạng thái ${selectedStatus}`} disabled={!canEdit}>{availableStatuses.map((status) => <option key={status} value={status} title={status}>●</option>)}</select></label>
-          {!isNew && !isEditing && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
+              : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
+          <span className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`} aria-label={`Trạng thái ${selectedStatus}`}>●</span>
+          {!isNew && !isEditing && isCreator && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
         </div>
         <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" readOnly={!canEdit} /></label>
       </article>;
@@ -2959,7 +3056,7 @@ export default function Home() {
       <div className="work-notes__list">
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
-          : workNotes.length ? workNotes.map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
+          : workNotes.length ? [...workNotes].sort((left, right) => ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
       </div>
     </section>;
   };
@@ -3138,8 +3235,8 @@ export default function Home() {
     </button>
     {sidebarNotesOpen && <div className="sidebar-notes__list">
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
-        const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green" } as Record<WorkNoteStatus, string>)[note.status] ?? "sidebar-notes__dot--black";
-        return <button type="button" className="sidebar-note" key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
+        const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
+        return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
           <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}

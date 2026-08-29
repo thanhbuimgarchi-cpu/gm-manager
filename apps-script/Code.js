@@ -109,6 +109,7 @@ function doPost(event) {
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
+    if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
@@ -1193,6 +1194,7 @@ function uploadWorkflowFile_(payload) {
 
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
 const COMPLETED_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_hoan_thanh.json";
+const ACTIVE_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_dang_giao.json";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
 const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
@@ -1239,15 +1241,56 @@ function normalizeWorkNotes_(notes) {
       priority: WORK_NOTE_PRIORITIES.indexOf(priority) >= 0 ? priority : "Bình thường",
       workType: WORK_NOTE_TYPES.indexOf(workType) >= 0 ? workType : "Tư vấn",
       assignee: workNoteText_(note && note.assignee, 160),
+      assigneeEmail: workNoteText_(note && note.assigneeEmail, 240).toLowerCase(),
+      creatorEmail: workNoteText_(note && note.creatorEmail, 240).toLowerCase(),
+      creatorName: workNoteText_(note && note.creatorName, 160),
+      acceptedBy: workNoteText_(note && note.acceptedBy, 240).toLowerCase(),
       content: workNoteText_(note && note.content, 4000),
       dueDate: dueDate,
       actualDate: actualDate,
       acceptedAt: acceptedAt,
       // A newly created note stays black until the future assignee-acceptance
       // flow explicitly records acceptedAt.
-      status: acceptedAt && WORK_NOTE_STATUSES.indexOf(status) >= 0 && status !== "Đen" ? status : "Đen",
+      status: workNoteStatus_(acceptedAt, dueDate),
     };
   });
+}
+
+function workNoteStatus_(acceptedAt, dueDate) {
+  if (!acceptedAt) return "Đen";
+  const matched = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dueDate || "");
+  if (!matched) return "Xanh";
+  const due = new Date(Number(matched[3]), Number(matched[2]) - 1, Number(matched[1]));
+  const now = new Date(); now.setHours(0, 0, 0, 0);
+  const days = Math.floor((due.getTime() - now.getTime()) / 86400000);
+  if (days < 0) return "Tím";
+  if (days <= 3) return "Đỏ";
+  if (days <= 6) return "Cam";
+  return "Xanh";
+}
+
+function activeWorkNotesFile_() {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const file = findFileByName_(root, ACTIVE_WORK_NOTES_FILE_NAME);
+  return file || root.createFile(ACTIVE_WORK_NOTES_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
+}
+
+function readActiveWorkNotes_() {
+  try { const value = JSON.parse(activeWorkNotesFile_().getBlob().getDataAsString() || "[]"); return Array.isArray(value) ? value : []; } catch (error) { return []; }
+}
+
+function saveActiveWorkNotes_(records) { activeWorkNotesFile_().setContent(JSON.stringify(records.slice(-3000))); }
+
+function syncActiveWorkNotes_(details, notes, payload) {
+  const previous = readActiveWorkNotes_().filter(function(item) { return !(Number(item.year) === details.year && Number(item.month) === details.month && String(item.projectId) === details.projectId); });
+  const active = notes.filter(function(note) { return !note.actualDate && note.assigneeEmail; }).map(function(note) { return { ...note, year: details.year, month: details.month, projectId: details.projectId, customerName: workNoteText_(payload.customerName, 240), houseId: workNoteText_(payload.houseId, 120), updatedAt: new Date().toISOString() }; });
+  saveActiveWorkNotes_(previous.concat(active));
+}
+
+function loadAssignedWorkNotes_(payload) {
+  const email = workNoteText_(payload.email, 240).toLowerCase();
+  if (!email) throw new Error("Thiếu email nhân viên.");
+  return { ok: true, notes: readActiveWorkNotes_().filter(function(note) { return String(note.assigneeEmail || "").toLowerCase() === email && !note.actualDate; }) };
 }
 
 function loadWorkNotes_(payload) {
@@ -1277,6 +1320,7 @@ function syncWorkNotes_(payload) {
   const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
   if (file) file.setContent(content);
   else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  syncActiveWorkNotes_(details, notes, payload);
   return { ok: true, savedCount: notes.length };
 }
 
@@ -1291,6 +1335,8 @@ function completeWorkNote_(payload) {
   const details = workNotesPayload_(payload);
   const note = normalizeWorkNotes_([payload.note || {}])[0];
   if (!note || !note.actualDate) throw new Error("Cần xác nhận ngày hoàn thành trước khi lưu công việc vào Drive.");
+  const actorEmail = workNoteText_(payload.actorEmail, 240).toLowerCase();
+  if (!note.assigneeEmail || actorEmail !== note.assigneeEmail) throw new Error("Chỉ người được giao việc mới có thể xác nhận hoàn thành.");
 
   const folder = completedWorkNotesFolder_(details);
   const file = findFileByName_(folder, COMPLETED_WORK_NOTES_FILE_NAME);
@@ -1312,6 +1358,7 @@ function completeWorkNote_(payload) {
   const content = JSON.stringify(records);
   if (file) file.setContent(content);
   else folder.createFile(COMPLETED_WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
   CacheService.getScriptCache().remove(workNotesCacheKey_(details));
   return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
 }
