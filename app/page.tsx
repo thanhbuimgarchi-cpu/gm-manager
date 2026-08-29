@@ -131,6 +131,7 @@ type WorkRecord = {
   progressHydrated?: boolean;
   designProgress?: DesignProgressRow[];
   interiorDesignProgress?: DesignProgressRow[];
+  acceptanceDesignProgress?: DesignProgressRow[];
   warrantyProgress?: WarrantyProgressRow[];
   functionalFloors?: FunctionalFloor[];
   functionalRows?: LegacyFunctionalRow[];
@@ -143,6 +144,10 @@ type DesignProgressRow = {
   plannedDate: string;
   actualDate: string;
   assignee: string;
+  assigneeEmail?: string;
+  acceptedAt?: string;
+  acceptedBy?: string;
+  publishedAt?: string;
   note: string;
 };
 
@@ -276,6 +281,16 @@ type AssignedWorkNote = WorkNote & {
   houseId?: string;
 };
 
+type AssignedDesignTask = DesignProgressRow & {
+  kind: DesignProgressKind;
+  title: string;
+  year: number;
+  month: number;
+  projectId: string;
+  customerName?: string;
+  houseId?: string;
+};
+
 type OutstandingWorkNote = {
   note: WorkNote;
   location: CustomerLocation;
@@ -293,6 +308,7 @@ type CustomerPortalRecord = {
   houseId: string;
   designProgress: CustomerPortalProgressRow[];
   interiorDesignProgress: CustomerPortalProgressRow[];
+  acceptanceDesignProgress: CustomerPortalProgressRow[];
   warrantyProgress: CustomerPortalProgressRow[];
 };
 
@@ -480,7 +496,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -583,6 +599,7 @@ const detailSections: Array<{ title: string; fields: DetailField[] }> = [
     fields: [
       { code: "NCT-KT", label: "Nhu cầu thiết kế kiến trúc" },
       { code: "NCT-NT", label: "Nhu cầu thiết kế nội thất" },
+      { code: "NCT-NTU", label: "Nhu cầu thiết kế nghiệm thu" },
       { code: "NCC-KT", label: "Nhu cầu thi công kiến trúc" },
       { code: "NCC-NT", label: "Nhu cầu thi công nội thất" },
       { code: "PC-KT", label: "Phong cách kiến trúc" },
@@ -603,7 +620,7 @@ const detailSections: Array<{ title: string; fields: DetailField[] }> = [
   },
 ];
 
-const demandCheckboxCodes = new Set(["NCT-KT", "NCT-NT", "NCC-KT", "NCC-NT"]);
+const demandCheckboxCodes = new Set(["NCT-KT", "NCT-NT", "NCT-NTU", "NCC-KT", "NCC-NT"]);
 const dateDetailCodes = new Set(["NS"]);
 
 const systemFields: DetailField[] = [
@@ -619,20 +636,16 @@ const roomOptions = ["Phòng khách", "Phòng ngủ", "Phòng bếp", "Gara", "S
 const architectureDesignProgressContents = [
   "Tư vấn concept",
   "Mặt bằng công năng",
-  "3D lần 1",
-  "3D lần 2",
-  "3D lần 3",
-  "Hồ sơ bổ kỹ thuật",
+  "Phối cảnh 3D",
+  "Hồ sơ kỹ thuật",
   "Nghiệm thu và bàn giao",
 ] as const;
 
 const interiorDesignProgressContents = [
   "Kiểm tra và khớp MBCN",
   "Tư vấn concept nội thất",
-  "3D lần 1",
-  "3D lần 2",
-  "3D lần 3",
-  "Hồ sơ bổ kỹ thuật nội thất",
+  "Phối cảnh 3D nội thất",
+  "Hồ sơ kỹ thuật nội thất",
   "Nghiệm thu và bàn giao",
 ] as const;
 
@@ -644,15 +657,15 @@ const warrantyProgressContents = [
   "Chi phí bảo hành lần 2",
 ] as const;
 
-type DesignProgressKind = "architecture" | "interior";
+type DesignProgressKind = "architecture" | "interior" | "acceptance";
 
 const designProgressDefinitions: Record<DesignProgressKind, {
-  field: "designProgress" | "interiorDesignProgress";
+  field: "designProgress" | "interiorDesignProgress" | "acceptanceDesignProgress";
   fixedContents: readonly string[];
   idPrefix: string;
   title: string;
   shortTitle: string;
-  demandCode: "NCT-KT" | "NCT-NT";
+  demandCode: "NCT-KT" | "NCT-NT" | "NCT-NTU";
 }> = {
   architecture: {
     field: "designProgress",
@@ -670,6 +683,14 @@ const designProgressDefinitions: Record<DesignProgressKind, {
     shortTitle: "Nội thất",
     demandCode: "NCT-NT",
   },
+  acceptance: {
+    field: "acceptanceDesignProgress",
+    fixedContents: architectureDesignProgressContents,
+    idPrefix: "acceptance-design",
+    title: "Tiến độ thiết kế nghiệm thu",
+    shortTitle: "Nghiệm thu",
+    demandCode: "NCT-NTU",
+  },
 };
 
 type DesignDateKey = "plannedDate" | "actualDate";
@@ -683,6 +704,10 @@ const createFixedDesignRow = (content: string, index: number, kind: DesignProgre
   plannedDate: "",
   actualDate: "",
   assignee: "",
+  assigneeEmail: "",
+  acceptedAt: "",
+  acceptedBy: "",
+  publishedAt: "",
   note: "",
 });
 const createCustomDesignRow = (kind: DesignProgressKind): DesignProgressRow => ({
@@ -692,6 +717,10 @@ const createCustomDesignRow = (kind: DesignProgressKind): DesignProgressRow => (
   plannedDate: "",
   actualDate: "",
   assignee: "",
+  assigneeEmail: "",
+  acceptedAt: "",
+  acceptedBy: "",
+  publishedAt: "",
   note: "",
 });
 const createDesignProgress = (kind: DesignProgressKind = "architecture"): DesignProgressRow[] => designProgressDefinitions[kind].fixedContents.map((content, index) => createFixedDesignRow(content, index, kind));
@@ -709,6 +738,10 @@ const normalizeDesignProgress = (record?: WorkRecord | null, kind: DesignProgres
       plannedDate: normalizeImportedDate(row.plannedDate ?? ""),
       actualDate: normalizeImportedDate(row.actualDate ?? ""),
       assignee: row.assignee ?? "",
+      assigneeEmail: row.assigneeEmail ?? "",
+      acceptedAt: row.acceptedAt ?? "",
+      acceptedBy: row.acceptedBy ?? "",
+      publishedAt: row.publishedAt ?? "",
       note: row.note ?? "",
     };
   });
@@ -1146,6 +1179,10 @@ function workNoteStatus(note: Pick<WorkNote, "acceptedAt" | "dueDate">): WorkNot
   return "Xanh";
 }
 
+function designTaskStatus(task: Pick<DesignProgressRow, "acceptedAt" | "plannedDate">): WorkNoteStatus {
+  return workNoteStatus({ acceptedAt: task.acceptedAt, dueDate: task.plannedDate });
+}
+
 function shouldKeepWorkNote(note: WorkNote, now = Date.now()) {
   if (!note.actualDate || !note.completedAt) return true;
   const completedAt = new Date(note.completedAt).getTime();
@@ -1267,6 +1304,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             isHydrated: record.isHydrated ?? localRecord?.isHydrated ?? false,
             designProgress: record.isHydrated ? record.designProgress ?? createDesignProgress() : localRecord?.designProgress ?? record.designProgress ?? createDesignProgress(),
             interiorDesignProgress: record.isHydrated ? record.interiorDesignProgress ?? createDesignProgress("interior") : localRecord?.interiorDesignProgress ?? record.interiorDesignProgress ?? createDesignProgress("interior"),
+            acceptanceDesignProgress: record.isHydrated ? record.acceptanceDesignProgress ?? createDesignProgress("acceptance") : localRecord?.acceptanceDesignProgress ?? record.acceptanceDesignProgress ?? createDesignProgress("acceptance"),
             warrantyProgress: record.isHydrated ? record.warrantyProgress ?? createWarrantyProgress() : localRecord?.warrantyProgress ?? record.warrantyProgress ?? createWarrantyProgress(),
           };
         }),
@@ -1338,6 +1376,7 @@ export default function Home() {
   const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
   const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
   const [assignedWorkNotes, setAssignedWorkNotes] = useState<AssignedWorkNote[]>([]);
+  const [assignedDesignTasks, setAssignedDesignTasks] = useState<AssignedDesignTask[]>([]);
   const [workNotesCacheRevision, setWorkNotesCacheRevision] = useState(0);
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
@@ -1622,6 +1661,13 @@ export default function Home() {
     return url.toString();
   };
 
+  const designTaskNotificationUrl = (task: AssignedDesignTask) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("gmcrmProject", task.projectId);
+    url.searchParams.set("gmcrmDesignTask", task.id);
+    return url.toString();
+  };
+
   const openDesktopDocuments = async () => {
     const desktop = desktopBridge();
     if (!desktop?.isWindows || !desktop.openDrive || !selectedCustomerLocation) return;
@@ -1767,6 +1813,7 @@ export default function Home() {
         ...result.record,
         designProgress: result.record.designProgress ?? location.record.designProgress,
         interiorDesignProgress: result.record.interiorDesignProgress ?? location.record.interiorDesignProgress,
+        acceptanceDesignProgress: result.record.acceptanceDesignProgress ?? location.record.acceptanceDesignProgress,
         warrantyProgress: result.record.warrantyProgress ?? location.record.warrantyProgress,
         progressHydrated: result.record.progressHydrated ?? location.record.progressHydrated ?? false,
         isHydrated: true,
@@ -1784,7 +1831,7 @@ export default function Home() {
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl || location.record.progressHydrated) return;
     const cacheKey = `progress:${location.year}:${location.month}:${location.record.projectId}`;
-    const cached = readDriveCache<Pick<WorkRecord, "designProgress" | "interiorDesignProgress" | "warrantyProgress" | "progressHydrated">>(cacheKey, DRIVE_PROGRESS_CACHE_MS);
+    const cached = readDriveCache<Pick<WorkRecord, "designProgress" | "interiorDesignProgress" | "acceptanceDesignProgress" | "warrantyProgress" | "progressHydrated">>(cacheKey, DRIVE_PROGRESS_CACHE_MS);
     if (cached) {
       persistRecord({ ...location.record, ...cached, progressHydrated: true }, location.year, location.month);
       return;
@@ -1803,6 +1850,7 @@ export default function Home() {
       const progress = {
         designProgress: result.record.designProgress,
         interiorDesignProgress: result.record.interiorDesignProgress,
+        acceptanceDesignProgress: result.record.acceptanceDesignProgress,
         warrantyProgress: result.record.warrantyProgress,
         progressHydrated: true,
       };
@@ -1900,7 +1948,7 @@ export default function Home() {
   };
   const publishNewWorkNote = async () => {
     if (!newWorkNote) return;
-    if (!newWorkNote.assigneeEmail) { setNotice("Hãy gắn nhân lực trước khi phát hành ghi chú."); return; }
+    if (!newWorkNote.assigneeEmail) { setNotice("Hãy chọn Người phụ trách trước khi phát hành ghi chú."); return; }
     if (!parseDesignDate(newWorkNote.dueDate) || isPastVietnamDate(newWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
     const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
     persistWorkNotes(next);
@@ -2344,6 +2392,7 @@ export default function Home() {
       isHydrated: true,
       designProgress: createDesignProgress(),
       interiorDesignProgress: createDesignProgress("interior"),
+      acceptanceDesignProgress: createDesignProgress("acceptance"),
       warrantyProgress: createWarrantyProgress(),
       functionalFloors: [createFunctionalFloor()],
     };
@@ -2376,12 +2425,14 @@ export default function Home() {
   const selectedRecord = activeCustomerRecord;
   const architectureDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "architecture");
   const interiorDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "interior");
+  const acceptanceDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "acceptance");
   const warrantyProgressRows = normalizeWarrantyProgress(activeCustomerRecord);
   const designScheduleAnalysis = analyzeDesignProgress(architectureDesignProgressRows);
   const interiorDesignScheduleAnalysis = analyzeDesignProgress(interiorDesignProgressRows);
+  const acceptanceDesignScheduleAnalysis = analyzeDesignProgress(acceptanceDesignProgressRows);
   const isDemandSelected = (code: string) => Boolean(activeCustomerRecord?.details?.[code]?.trim());
-  const progressRowsFor = (kind: DesignProgressKind) => kind === "architecture" ? architectureDesignProgressRows : interiorDesignProgressRows;
-  const progressAnalysisFor = (kind: DesignProgressKind) => kind === "architecture" ? designScheduleAnalysis : interiorDesignScheduleAnalysis;
+  const progressRowsFor = (kind: DesignProgressKind) => kind === "architecture" ? architectureDesignProgressRows : kind === "interior" ? interiorDesignProgressRows : acceptanceDesignProgressRows;
+  const progressAnalysisFor = (kind: DesignProgressKind) => kind === "architecture" ? designScheduleAnalysis : kind === "interior" ? interiorDesignScheduleAnalysis : acceptanceDesignScheduleAnalysis;
 
   const commitDesignProgressRows = (kind: DesignProgressKind, nextRows: DesignProgressRow[]) => {
     if (!activeCustomerRecord || !selectedCustomerLocation) return;
@@ -2412,6 +2463,75 @@ export default function Home() {
       return;
     }
     commitDesignProgressRows(kind, nextRows);
+  };
+
+  const updateDesignAssignee = (kind: DesignProgressKind, rowIndex: number, email: string) => {
+    const member = assignablePersonnel.find((item) => item.email === email);
+    const nextRows = progressRowsFor(kind).map((row, index) => index === rowIndex ? {
+      ...row,
+      assignee: member?.name ?? "",
+      assigneeEmail: member?.email ?? "",
+      acceptedAt: "",
+      acceptedBy: "",
+      publishedAt: "",
+      actualDate: row.actualDate,
+    } : row);
+    commitDesignProgressRows(kind, nextRows);
+  };
+
+  const syncDesignTasksToSharedStore = async (kind: DesignProgressKind, rows: DesignProgressRow[], location = selectedCustomerLocation) => {
+    if (!location || !driveScriptUrl.trim()) return;
+    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+      action: "sync-design-tasks",
+      year: location.year,
+      month: location.month,
+      projectId: location.record.projectId,
+      customerName: location.record.name,
+      houseId: location.record.houseId,
+      kind,
+      title: designProgressDefinitions[kind].title,
+      rows,
+    });
+    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ tiến độ được giao.");
+  };
+
+  const publishDesignTasks = async (kind: DesignProgressKind) => {
+    const pendingRows = progressRowsFor(kind).filter((row) => row.content.trim() && !row.actualDate);
+    if (!pendingRows.length) { setNotice("Chưa có hạng mục chưa hoàn thành để phát hành."); return; }
+    if (pendingRows.some((row) => !row.assigneeEmail || !parseDesignDate(row.plannedDate) || isPastVietnamDate(row.plannedDate))) {
+      setNotice("Mỗi hạng mục chưa hoàn thành phải có Người phụ trách và ngày dự kiến hôm nay hoặc tương lai trước khi phát hành.");
+      return;
+    }
+    const publishedAt = new Date().toISOString();
+    const nextRows = progressRowsFor(kind).map((row) => !row.actualDate && row.content.trim() ? { ...row, publishedAt } : row);
+    commitDesignProgressRows(kind, nextRows);
+    try {
+      await syncDesignTasksToSharedStore(kind, nextRows);
+      setNotice(`Đã phát hành ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")} cho người phụ trách.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc.");
+    }
+  };
+
+  const acceptDesignTask = async (kind: DesignProgressKind, rowId: string) => {
+    const rows = progressRowsFor(kind);
+    const row = rows.find((item) => item.id === rowId);
+    if (!row || row.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ Người phụ trách mới có thể xác nhận nhận việc."); return; }
+    const nextRows = rows.map((item) => item.id === rowId ? { ...item, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail } : item);
+    commitDesignProgressRows(kind, nextRows);
+    try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã xác nhận nhận việc thiết kế."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận."); }
+  };
+
+  const completeDesignTask = async (kind: DesignProgressKind, rowId: string) => {
+    const rows = progressRowsFor(kind);
+    const row = rows.find((item) => item.id === rowId);
+    if (!row || row.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ Người phụ trách mới có thể hoàn thành hạng mục."); return; }
+    if (!row.acceptedAt) { setNotice("Hãy xác nhận nhận việc trước khi hoàn thành."); return; }
+    const today = getVietnamDate();
+    const actualDate = `${String(today.day).padStart(2, "0")}/${String(today.month).padStart(2, "0")}/${today.year}`;
+    const nextRows = rows.map((item) => item.id === rowId ? { ...item, actualDate } : item);
+    commitDesignProgressRows(kind, nextRows);
+    try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã ghi nhận hoàn thành hạng mục."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ hoàn thành."); }
   };
 
   const addDesignProgressRow = (kind: DesignProgressKind) => commitDesignProgressRows(kind, [...progressRowsFor(kind), createCustomDesignRow(kind)]);
@@ -2862,6 +2982,7 @@ export default function Home() {
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
+  const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
   useEffect(() => {
     if (!canViewNotesSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedWorkNotes([]); return; }
     let cancelled = false;
@@ -2903,6 +3024,37 @@ export default function Home() {
     const timer = window.setInterval(() => { void loadAssignments(); }, 10 * 1000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeFolder, canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerLocation]);
+  useEffect(() => {
+    if (!canViewDesignSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedDesignTasks([]); return; }
+    let cancelled = false;
+    const loadDesignAssignments = async () => {
+      try {
+        const { response, result } = await postToAppsScript<{ ok?: boolean; tasks?: AssignedDesignTask[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-design-tasks", email: loggedInEmployeeEmail });
+        if (!response.ok || !result.ok || !Array.isArray(result.tasks) || cancelled) return;
+        const tasks = result.tasks.filter((task) => !task.actualDate);
+        setAssignedDesignTasks(tasks);
+        const pending = tasks.filter((task) => task.assigneeEmail === loggedInEmployeeEmail && !task.acceptedAt);
+        const now = Date.now();
+        for (const task of pending) {
+          const key = `gm-manager-design-assignment-alert:${loggedInEmployeeEmail}:${task.kind}:${task.id}`;
+          if (now - Number(window.localStorage.getItem(key) ?? 0) < 15 * 60 * 1000) continue;
+          const body = [`Khách hàng: ${task.customerName || task.projectId}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`].join("\n");
+          const url = designTaskNotificationUrl(task);
+          const desktop = desktopBridge();
+          let shown = false;
+          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM Manager · Có hạng mục thiết kế mới", body, url });
+          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
+            await serviceWorkerRegistration.current.showNotification("GM Manager · Có hạng mục thiết kế mới", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-design-${task.kind}-${task.id}`, data: { url } });
+            shown = true;
+          }
+          if (shown) window.localStorage.setItem(key, String(now));
+        }
+      } catch { /* Retry on the next poll without blocking the design page. */ }
+    };
+    void loadDesignAssignments();
+    const timer = window.setInterval(() => { void loadDesignAssignments(); }, 10 * 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [canViewDesignSummary, driveScriptUrl, loggedInEmployeeEmail]);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
     if (typeof window === "undefined") return [];
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
@@ -3167,6 +3319,7 @@ export default function Home() {
         <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p></header>
         {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
+        {renderCustomerProgress("Tiến độ thiết kế nghiệm thu", customerPortalRecord.acceptanceDesignProgress)}
         {renderCustomerProgress("Bảo hành", customerPortalRecord.warrantyProgress)}
       </section>}
     </main>;
@@ -3206,7 +3359,7 @@ export default function Home() {
         <div className="work-note__line work-note__line--primary">
           <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên" disabled={!canEdit}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
           <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc" disabled={!canEdit}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
-          <label>Gắn nhân lực<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Gắn nhân lực" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></label>
+          <label>Người phụ trách<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Người phụ trách" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
           <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
@@ -3328,11 +3481,11 @@ export default function Home() {
     return <section className="design-schedule">
       <header className="design-schedule__heading">
         <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
-        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
+        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={!rows.some((row) => row.content.trim() && !row.actualDate)}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
       </header>
       <div className="design-progress-table-wrap">
         <table className="design-progress-table">
-          <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Ngày thực tế</th><th>Người phụ trách</th><th>Ghi chú</th></tr></thead>
+          <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Hoàn thành</th><th>Người phụ trách</th><th>Trạng thái</th><th>Ghi chú</th></tr></thead>
           <tbody>{rows.map((row, index) => (
             <tr key={row.id}>
               <td><div className="design-progress-content">
@@ -3346,8 +3499,9 @@ export default function Home() {
                 </span>
               </div></td>
               <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><input value={row.actualDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "actualDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày thực tế ${row.content}`} /></td>
-              <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateDesignProgress(kind, index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
+              <td><div className="design-task-completion"><input value={row.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label={`Ngày hoàn thành ${row.content}`} />{row.publishedAt && row.assigneeEmail === loggedInEmployeeEmail && !row.actualDate && <button type="button" className="work-note__complete" disabled={!row.acceptedAt} onClick={() => void completeDesignTask(kind, row.id)} title={row.acceptedAt ? "Xác nhận hoàn thành" : "Hãy xác nhận nhận việc trước"}>✓</button>}</div></td>
+              <td><select className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></td>
+              <td><span className={`sidebar-notes__dot--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`} />{row.publishedAt && row.assigneeEmail === loggedInEmployeeEmail && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)}>Xác nhận nhận việc</button>}</td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
@@ -3415,6 +3569,31 @@ export default function Home() {
     </div>}
   </section> : null;
 
+  const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế chưa hoàn thiện">
+    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
+      <span><b>Thiết kế chưa hoàn thiện</b><small>{assignedDesignTasks.length} hạng mục · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+    </button>
+    {sidebarNotesOpen && <div className="sidebar-notes__list">
+      {assignedDesignTasks.length ? assignedDesignTasks.slice().sort((left, right) => left.plannedDate.localeCompare(right.plannedDate)).map((task) => {
+        const status = designTaskStatus(task);
+        const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[status];
+        return <button type="button" className={`sidebar-note ${task.assigneeEmail === loggedInEmployeeEmail && !task.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${task.year}-${task.month}-${task.projectId}-${task.kind}-${task.id}`} onClick={() => {
+          const location = customerLocations.find((item) => item.year === task.year && item.month === task.month && item.record.projectId === task.projectId);
+          if (!location) { setNotice("Đang nạp hồ sơ dự án. Hãy thử lại sau vài giây."); return; }
+          const field = designProgressDefinitions[task.kind].field;
+          const currentRows = normalizeDesignProgress(location.record, task.kind);
+          const index = currentRows.findIndex((item) => item.id === task.id);
+          const mergedRows = index >= 0 ? currentRows.map((item) => item.id === task.id ? { ...item, ...task } : item) : [...currentRows, task];
+          persistRecord({ ...location.record, [field]: mergedRows, progressHydrated: true }, location.year, location.month);
+          setActiveFolder("Thiết kế");
+          selectCustomerForWorkflow(location);
+        }}>
+          <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.projectId} · Dự kiến {task.plannedDate || "—"}</small></span>
+        </button>;
+      }) : <p className="sidebar-notes__empty">Không có hạng mục thiết kế đang chờ.</p>}
+    </div>}
+  </section> : null;
+
   return (
     <main className="crm-shell">
       {!selectedCustomerProjectId && (
@@ -3468,6 +3647,7 @@ export default function Home() {
           ) : (
             <div className={`customer-gateway__overview ${canViewNotesSummary ? "" : "customer-gateway__overview--no-notes"}`}>
               {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
+              {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
               <div className="customer-gateway__body">
               <div className="personnel-entry customer-entry">
                 <span className="personnel-entry__icon customer-entry__icon">▰</span>
@@ -3521,6 +3701,7 @@ export default function Home() {
           ))}
         </nav>
         {renderOutstandingNotesSummary()}
+        {renderOutstandingDesignSummary()}
       </aside>
 
       <section className="workspace">
@@ -3622,6 +3803,7 @@ export default function Home() {
               <div className="design-schedules">
                 {renderDesignSchedule("architecture")}
                 {renderDesignSchedule("interior")}
+                {renderDesignSchedule("acceptance")}
               </div>
             </section>
           </section>

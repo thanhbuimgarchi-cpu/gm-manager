@@ -110,6 +110,7 @@ function doPost(event) {
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
+    if (payload.action === "load-assigned-design-tasks") return json_(loadAssignedDesignTasks_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
@@ -127,6 +128,7 @@ function doPost(event) {
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
+      if (payload.action === "sync-design-tasks") return json_(syncDesignTasks_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
@@ -414,6 +416,7 @@ function customerPortalRecord_(record) {
     houseId: String(record.houseId || ""),
     designProgress: customerPortalProgressRows_(record.designProgress),
     interiorDesignProgress: customerPortalProgressRows_(record.interiorDesignProgress),
+    acceptanceDesignProgress: customerPortalProgressRows_(record.acceptanceDesignProgress),
     warrantyProgress: customerPortalProgressRows_(record.warrantyProgress),
   };
 }
@@ -490,6 +493,7 @@ function loadCustomerProgress_(customers, payload) {
       projectId: projectId,
       designProgress: readDesignProgress_(customerFolder, projectId, "architecture"),
       interiorDesignProgress: readDesignProgress_(customerFolder, projectId, "interior"),
+      acceptanceDesignProgress: readDesignProgress_(customerFolder, projectId, "acceptance"),
       warrantyProgress: readWarrantyProgress_(customerFolder, projectId),
       progressHydrated: true,
     },
@@ -616,7 +620,9 @@ function latestDesignProgressWorkbook_(customerFolder, progressKind) {
   if (!designFolder) return null;
   const filePattern = progressKind === "interior"
     ? /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t.*\.xlsx$/i
-    : /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac.*\.xlsx$/i;
+    : progressKind === "acceptance"
+      ? /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf nghi\u1ec7m thu.*\.xlsx$/i
+      : /^Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac.*\.xlsx$/i;
   const files = designFolder.getFiles();
   let latest = null;
   while (files.hasNext()) {
@@ -709,6 +715,7 @@ function recordFromWorkbook_(file, projectId, customerFolder, includeProgress) {
   if (includeProgress !== false) {
     record.designProgress = readDesignProgress_(customerFolder, projectId, "architecture");
     record.interiorDesignProgress = readDesignProgress_(customerFolder, projectId, "interior");
+    record.acceptanceDesignProgress = readDesignProgress_(customerFolder, projectId, "acceptance");
     record.warrantyProgress = readWarrantyProgress_(customerFolder, projectId);
     record.progressHydrated = true;
   } else {
@@ -740,9 +747,9 @@ function readDesignProgress_(customerFolder, projectId, progressKind) {
   const idColumn = hasAssignee ? 5 : 4;
   const customColumn = hasAssignee ? 6 : 5;
   const fixedContents = progressKind === "interior"
-    ? ["Ki\u1ec3m tra v\u00e0 kh\u1edbp MBCN", "T\u01b0 v\u1ea5n concept n\u1ed9i th\u1ea5t", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt n\u1ed9i th\u1ea5t", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"]
-    : ["T\u01b0 v\u1ea5n concept", "M\u1eb7t b\u1eb1ng c\u00f4ng n\u0103ng", "3D l\u1ea7n 1", "3D l\u1ea7n 2", "3D l\u1ea7n 3", "H\u1ed3 s\u01a1 b\u1ed5 k\u1ef9 thu\u1eadt", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"];
-  const prefix = progressKind === "interior" ? "interior-design" : "design";
+    ? ["Ki\u1ec3m tra v\u00e0 kh\u1edbp MBCN", "T\u01b0 v\u1ea5n concept n\u1ed9i th\u1ea5t", "Ph\u1ed1i c\u1ea3nh 3D n\u1ed9i th\u1ea5t", "H\u1ed3 s\u01a1 k\u1ef9 thu\u1eadt n\u1ed9i th\u1ea5t", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"]
+    : ["T\u01b0 v\u1ea5n concept", "M\u1eb7t b\u1eb1ng c\u00f4ng n\u0103ng", "Ph\u1ed1i c\u1ea3nh 3D", "H\u1ed3 s\u01a1 k\u1ef9 thu\u1eadt", "Nghi\u1ec7m thu v\u00e0 b\u00e0n giao"];
+  const prefix = progressKind === "interior" ? "interior-design" : progressKind === "acceptance" ? "acceptance-design" : "design";
   return rows.slice(1).filter(function(row) {
     return row.slice(0, customColumn + 1).some(function(value) { return String(value || "").trim(); });
   }).map(function(row, index) {
@@ -755,6 +762,10 @@ function readDesignProgress_(customerFolder, projectId, progressKind) {
       plannedDate: normalizeExcelDate_(row[1]),
       actualDate: normalizeExcelDate_(row[2]),
       assignee: hasAssignee ? String(row[3] || "") : "",
+      assigneeEmail: String(row[7] || "").trim().toLowerCase(),
+      acceptedAt: String(row[8] || ""),
+      acceptedBy: String(row[9] || "").trim().toLowerCase(),
+      publishedAt: String(row[10] || ""),
       note: String(row[noteColumn] || ""),
     };
   });
@@ -908,24 +919,27 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
   const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
   const designFolder = getOrCreateFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
   const isInterior = progressKind === "interior";
-  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + (isInterior ? "n\u1ed9i th\u1ea5t " : "ki\u1ebfn tr\u00fac ") + record.projectId + ".xlsx";
-  const spreadsheet = SpreadsheetApp.create("GM-CRM " + (isInterior ? "interior " : "architecture ") + "design progress temporary " + record.projectId);
+  const isAcceptance = progressKind === "acceptance";
+  const label = isInterior ? "n\u1ed9i th\u1ea5t" : isAcceptance ? "nghi\u1ec7m thu" : "ki\u1ebfn tr\u00fac";
+  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + label + " " + record.projectId + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM " + label + " design progress temporary " + record.projectId);
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Ti\u1ebfn \u0111\u1ed9");
-    const rows = (isInterior ? record.interiorDesignProgress || [] : record.designProgress || []).map(function(row) {
-      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.assignee || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false"];
+    const sourceRows = isInterior ? record.interiorDesignProgress || [] : isAcceptance ? record.acceptanceDesignProgress || [] : record.designProgress || [];
+    const rows = sourceRows.map(function(row) {
+      return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.assignee || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false", String(row.assigneeEmail || ""), String(row.acceptedAt || ""), String(row.acceptedBy || ""), String(row.publishedAt || "")];
     });
-    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh"]].concat(rows);
-    sheet.getRange(1, 1, values.length, 7).setValues(values).setVerticalAlignment("top").setWrap(true).setFontFamily("Roboto");
-    sheet.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
+    const values = [["N\u1ed9i dung", "Ng\u00e0y d\u1ef1 ki\u1ebfn", "Ng\u00e0y th\u1ef1c t\u1ebf", "Ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch", "Ghi ch\u00fa", "_ID", "_T\u00f9y ch\u1ec9nh", "_Email ng\u01b0\u1eddi ph\u1ee5 tr\u00e1ch", "_\u0110\u00e3 nh\u1eadn", "_Ng\u01b0\u1eddi nh\u1eadn", "_Ph\u00e1t h\u00e0nh"]].concat(rows);
+    sheet.getRange(1, 1, values.length, 11).setValues(values).setVerticalAlignment("top").setWrap(true).setFontFamily("Roboto");
+    sheet.getRange(1, 1, 1, 11).setFontWeight("bold").setBackground("#eeeae5").setFontColor("#4f4b45");
     sheet.setFrozenRows(1);
     sheet.setColumnWidth(1, 220);
     sheet.setColumnWidth(2, 125);
     sheet.setColumnWidth(3, 125);
     sheet.setColumnWidth(4, 160);
     sheet.setColumnWidth(5, 420);
-    sheet.hideColumns(6, 2);
+    sheet.hideColumns(6, 6);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     trashFilesByName_(designFolder, fileName);
@@ -974,7 +988,7 @@ function writeWorkbook_(spreadsheet, record) {
       ["HVT", "H\u1ecd v\u00e0 t\u00ean"], ["NS", "Ng\u00e0y th\u00e1ng n\u0103m sinh"], ["DC", "\u0110\u1ecba ch\u1ec9"], ["SDT", "S\u1ed1 \u0111i\u1ec7n tho\u1ea1i/Zalo"], ["EMA", "Email"],
     ]],
     ["2. Nhu c\u1ea7u", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
-      ["NCT-KT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac"], ["NCT-NT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t"], ["NCC-KT", "Nhu c\u1ea7u thi c\u00f4ng ki\u1ebfn tr\u00fac"], ["NCC-NT", "Nhu c\u1ea7u thi c\u00f4ng n\u1ed9i th\u1ea5t"], ["PC-KT", "Phong c\u00e1ch ki\u1ebfn tr\u00fac"], ["PC-NT", "Phong c\u00e1ch n\u1ed9i th\u1ea5t"], ["QCTC", "Quy c\u00e1ch thi c\u00f4ng"],
+      ["NCT-KT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac"], ["NCT-NT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t"], ["NCT-NTU", "Nhu c\u1ea7u thi\u1ebft k\u1ebf nghi\u1ec7m thu"], ["NCC-KT", "Nhu c\u1ea7u thi c\u00f4ng ki\u1ebfn tr\u00fac"], ["NCC-NT", "Nhu c\u1ea7u thi c\u00f4ng n\u1ed9i th\u1ea5t"], ["PC-KT", "Phong c\u00e1ch ki\u1ebfn tr\u00fac"], ["PC-NT", "Phong c\u00e1ch n\u1ed9i th\u1ea5t"], ["QCTC", "Quy c\u00e1ch thi c\u00f4ng"],
     ]],
     ["3. Th\u1eeda \u0111\u1ea5t", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["QM", "Quy m\u00f4"], ["VTR", "V\u1ecb tr\u00ed c\u00f4ng tr\u00ecnh"], ["HNH", "H\u01b0\u1edbng nh\u00e0"], ["DTD", "Di\u1ec7n t\u00edch \u0111\u1ea5t"], ["DTX", "Di\u1ec7n t\u00edch x\u00e2y d\u1ef1ng"], ["VTMD", "V\u1ecb tr\u00ed so v\u1edbi m\u1eb7t \u0111\u01b0\u1eddng"],
@@ -1395,6 +1409,80 @@ function completeWorkNote_(payload) {
   saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
   cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
   return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
+}
+
+// Published design rows live in one small registry at the root.  This is the
+// cross-device assignment queue; the Excel files remain optional exports.
+const ACTIVE_DESIGN_TASKS_FILE_NAME = "_gmcrm_thiet_ke_dang_giao.json";
+const DESIGN_TASK_KINDS = ["architecture", "interior", "acceptance"];
+
+function activeDesignTasksFile_() {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const file = findFileByName_(root, ACTIVE_DESIGN_TASKS_FILE_NAME);
+  return file || root.createFile(ACTIVE_DESIGN_TASKS_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
+}
+
+function readActiveDesignTasks_() {
+  try {
+    const value = JSON.parse(activeDesignTasksFile_().getBlob().getDataAsString() || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch (error) { return []; }
+}
+
+function saveActiveDesignTasks_(records) {
+  activeDesignTasksFile_().setContent(JSON.stringify(records.slice(-5000)));
+}
+
+function normalizeDesignTaskRows_(rows) {
+  return (Array.isArray(rows) ? rows : []).slice(0, 300).map(function(row, index) {
+    return {
+      id: workNoteText_(row && row.id, 140) || "design-task-" + index + "-" + new Date().getTime(),
+      isCustom: Boolean(row && row.isCustom),
+      content: workNoteText_(row && row.content, 800),
+      plannedDate: normalizeWorkNoteDate_(row && row.plannedDate),
+      actualDate: normalizeWorkNoteDate_(row && row.actualDate),
+      assignee: workNoteText_(row && row.assignee, 160),
+      assigneeEmail: workNoteText_(row && row.assigneeEmail, 240).toLowerCase(),
+      acceptedAt: workNoteText_(row && row.acceptedAt, 40),
+      acceptedBy: workNoteText_(row && row.acceptedBy, 240).toLowerCase(),
+      publishedAt: workNoteText_(row && row.publishedAt, 40),
+      note: workNoteText_(row && row.note, 4000),
+    };
+  });
+}
+
+function syncDesignTasks_(payload) {
+  const details = workNotesPayload_(payload);
+  const kind = workNoteText_(payload.kind, 40);
+  if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw new Error("Loại tiến độ thiết kế không hợp lệ.");
+  const title = workNoteText_(payload.title, 160) || "Tiến độ thiết kế";
+  const rows = normalizeDesignTaskRows_(payload.rows);
+  const previous = readActiveDesignTasks_().filter(function(item) {
+    return !(Number(item.year) === details.year && Number(item.month) === details.month && String(item.projectId) === details.projectId && String(item.kind) === kind);
+  });
+  const active = rows.filter(function(row) { return row.content && row.publishedAt && row.assigneeEmail && !row.actualDate; }).map(function(row) {
+    return {
+      ...row,
+      kind: kind,
+      title: title,
+      year: details.year,
+      month: details.month,
+      projectId: details.projectId,
+      customerName: workNoteText_(payload.customerName, 240),
+      houseId: workNoteText_(payload.houseId, 120),
+      updatedAt: new Date().toISOString(),
+    };
+  });
+  saveActiveDesignTasks_(previous.concat(active));
+  return { ok: true, savedCount: active.length };
+}
+
+function loadAssignedDesignTasks_(payload) {
+  const email = workNoteText_(payload.email, 240).toLowerCase();
+  if (!email) throw new Error("Thiếu email nhân viên.");
+  const tasks = readActiveDesignTasks_().filter(function(task) { return !task.actualDate; });
+  if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
+  return { ok: true, tasks: tasks.filter(function(task) { return String(task.assigneeEmail || "").toLowerCase() === email; }) };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";

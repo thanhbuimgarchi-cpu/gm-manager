@@ -194,6 +194,7 @@ test("customer portal keeps a published token private and returns only project p
     customerShareToken: "a".repeat(48),
     designProgress: [{ content: "Duyệt mặt bằng", plannedDate: "20/09/2026", actualDate: "" }],
     interiorDesignProgress: [],
+    acceptanceDesignProgress: [],
     warrantyProgress: [{ content: "Kiểm tra", reportedDate: "21/09/2026", completedDate: "22/09/2026" }],
   });
   assert.deepEqual(JSON.parse(JSON.stringify(portalRecord)), {
@@ -202,6 +203,7 @@ test("customer portal keeps a published token private and returns only project p
     houseId: "BT-08",
     designProgress: [{ content: "Duyệt mặt bằng", plannedDate: "20/09/2026", actualDate: "" }],
     interiorDesignProgress: [],
+    acceptanceDesignProgress: [],
     warrantyProgress: [{ content: "Kiểm tra", plannedDate: "21/09/2026", actualDate: "22/09/2026" }],
   });
 });
