@@ -3197,12 +3197,13 @@ export default function Home() {
               </section>
             </div>
           ) : (
-            <div className="customer-gateway__body">
+            <div className="customer-gateway__overview">
+              {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
+              <div className="customer-gateway__body">
               <div className="personnel-entry customer-entry">
                 <span className="personnel-entry__icon customer-entry__icon">▰</span>
                 <span><b>Khách hàng</b></span>
               </div>
-              {renderOutstandingNotesSummary("gateway-notes")}
               <button className="add-button customer-gateway__add" onClick={openAddDialog}><span>＋</span> Thêm khách hàng</button>
               <label className="customer-search">
                 <span>⌕</span>
@@ -3232,6 +3233,7 @@ export default function Home() {
                 <span className="personnel-entry__icon">♙</span>
                 <span><b>Nhân lực</b></span>
               </button>}
+              </div>
             </div>
           )}
           {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
