@@ -260,6 +260,11 @@ type WorkNote = {
   status: WorkNoteStatus;
 };
 
+type OutstandingWorkNote = {
+  note: WorkNote;
+  location: CustomerLocation;
+};
+
 type CustomerPortalProgressRow = {
   content: string;
   plannedDate: string;
@@ -1269,6 +1274,8 @@ export default function Home() {
   const [workflowFilesError, setWorkflowFilesError] = useState("");
   const [uploadingWorkflowFiles, setUploadingWorkflowFiles] = useState(false);
   const [workNotes, setWorkNotes] = useState<WorkNote[]>([]);
+  const [workNotesCacheRevision, setWorkNotesCacheRevision] = useState(0);
+  const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
   const [editingWorkNote, setEditingWorkNote] = useState<WorkNote | null>(null);
   const [workNoteMenuId, setWorkNoteMenuId] = useState<string | null>(null);
@@ -1755,6 +1762,7 @@ export default function Home() {
     if (!cacheKey) return;
     if (nextNotes.length) writeDriveCache(cacheKey, nextNotes);
     else removeDriveCache(cacheKey);
+    setWorkNotesCacheRevision((revision) => revision + 1);
   };
   const addWorkNote = () => {
     if (newWorkNote) return;
@@ -2712,6 +2720,33 @@ export default function Home() {
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
+  const canViewNotesSummary = !loggedInEmployee || employeePermissions.includes("Ghi chú");
+  const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
+    if (typeof window === "undefined") return [];
+    const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
+    const locationsByKey = new Map(customerLocations.map((location) => [`${location.year}-${location.month}-${location.record.projectId}`, location]));
+    const outstanding: OutstandingWorkNote[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const storageKey = window.localStorage.key(index);
+      if (!storageKey?.startsWith(notesKeyPrefix)) continue;
+      try {
+        const cached = JSON.parse(window.localStorage.getItem(storageKey) ?? "") as { savedAt?: number; value?: WorkNote[] };
+        if (!cached.savedAt || Date.now() - cached.savedAt > DRIVE_FILE_LIST_CACHE_MS || !Array.isArray(cached.value)) continue;
+        const locationKey = storageKey.slice(notesKeyPrefix.length);
+        const location = locationsByKey.get(locationKey);
+        if (!location) continue;
+        cached.value.filter((note) => note && !note.actualDate).forEach((note) => outstanding.push({ note, location }));
+      } catch {
+        // Ignore a malformed cache item and keep the sidebar usable.
+      }
+    }
+    const priorityOrder: Record<WorkNotePriority, number> = { "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 };
+    const dateValue = (value: string) => {
+      const [day = "99", month = "99", year = "9999"] = value.split("/");
+      return `${year.padStart(4, "9")}${month.padStart(2, "9")}${day.padStart(2, "9")}`;
+    };
+    return outstanding.sort((left, right) => dateValue(left.note.dueDate).localeCompare(dateValue(right.note.dueDate)) || priorityOrder[left.note.priority] - priorityOrder[right.note.priority]);
+  }, [customerLocations, workNotesCacheRevision]);
   const syncPersonnelToDrive = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
@@ -3192,6 +3227,19 @@ export default function Home() {
             </button>
           ))}
         </nav>
+        {canViewNotesSummary && <section className={`sidebar-notes ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
+          <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
+            <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+          </button>
+          {sidebarNotesOpen && <div className="sidebar-notes__list">
+            {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
+              const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green" } as Record<WorkNoteStatus, string>)[note.status] ?? "sidebar-notes__dot--black";
+              return <button type="button" className="sidebar-note" key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
+                <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+              </button>;
+            }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
+          </div>}
+        </section>}
       </aside>
 
       <section className="workspace">
