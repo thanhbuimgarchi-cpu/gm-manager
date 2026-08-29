@@ -2806,7 +2806,7 @@ export default function Home() {
       } catch { /* The next poll retries while the app remains usable offline. */ }
     };
     void loadAssignments();
-    const timer = window.setInterval(() => { void loadAssignments(); }, 60 * 1000);
+    const timer = window.setInterval(() => { void loadAssignments(); }, 30 * 1000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail]);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
