@@ -1195,6 +1195,7 @@ function uploadWorkflowFile_(payload) {
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
 const COMPLETED_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_hoan_thanh.json";
 const ACTIVE_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_dang_giao.json";
+const WORK_NOTES_ADMIN_ACCOUNT = "admin";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
 const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
@@ -1292,7 +1293,11 @@ function syncActiveWorkNotes_(details, notes, payload) {
 function loadAssignedWorkNotes_(payload) {
   const email = workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  return { ok: true, notes: readActiveWorkNotes_().filter(function(note) { return String(note.assigneeEmail || "").toLowerCase() === email && !note.actualDate; }) };
+  const activeNotes = readActiveWorkNotes_().filter(function(note) { return !note.actualDate; });
+  // The built-in manager account needs an overview across every customer,
+  // while each employee continues to receive only work assigned to them.
+  if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
+  return { ok: true, notes: activeNotes.filter(function(note) { return String(note.assigneeEmail || "").toLowerCase() === email; }) };
 }
 
 function loadWorkNotes_(payload) {

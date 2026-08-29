@@ -153,6 +153,17 @@ test("work notes stay black until an assignee accepts the work", () => {
   ]);
 });
 
+test("admin receives the active work-note overview across every customer", () => {
+  const context = loadContext();
+  context.readActiveWorkNotes_ = () => [
+    { id: "note-a", projectId: "GM-A", assigneeEmail: "an@company.com", actualDate: "" },
+    { id: "note-b", projectId: "GM-B", assigneeEmail: "binh@company.com", actualDate: "" },
+    { id: "note-done", projectId: "GM-C", assigneeEmail: "an@company.com", actualDate: "29/08/2026" },
+  ];
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "admin" }).notes.map((note) => note.id))), ["note-a", "note-b"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "an@company.com" }).notes.map((note) => note.id))), ["note-a"]);
+});
+
 test("customer portal keeps a published token private and returns only project progress", () => {
   const context = loadContext();
   assert.equal(context.normalizeCustomerShareToken_("A".repeat(48)), "a".repeat(48));
