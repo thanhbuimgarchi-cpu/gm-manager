@@ -153,10 +153,10 @@ test("work notes stay black until an assignee accepts the work", () => {
   ]);
 });
 
-test("customer portal uses normalized credentials and returns only project progress", () => {
+test("customer portal uses the house code and normalized phone number, then returns only project progress", () => {
   const context = loadContext();
   assert.equal(context.normalizeCustomerPortalHouseId_(" bt - 08 "), "BT-08");
-  assert.equal(context.normalizeCustomerPortalBirthPassword_("20/09/2001"), "20092001");
+  assert.equal(context.normalizeCustomerPortalPhone_("+84 901-234-567"), "0901234567");
   const portalRecord = context.customerPortalRecord_({
     projectId: "GM20092001A",
     name: "Khách hàng thử",

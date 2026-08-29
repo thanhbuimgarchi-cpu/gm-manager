@@ -1226,7 +1226,7 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [customerPortalHouseId, setCustomerPortalHouseId] = useState("");
-  const [customerPortalPassword, setCustomerPortalPassword] = useState("");
+  const [customerPortalPhone, setCustomerPortalPhone] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
   const [customerPortalLoading, setCustomerPortalLoading] = useState(false);
@@ -2813,18 +2813,18 @@ export default function Home() {
   const submitCustomerPortalLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const houseId = customerPortalHouseId.trim();
-    const birthPassword = customerPortalPassword.replace(/\D/g, "").slice(0, 8);
-    if (!houseId || birthPassword.length !== 8) {
-      setCustomerPortalError("Nhập mã nhà và đủ 8 số ngày sinh (ddmmyyyy).");
+    const phonePassword = customerPortalPhone.replace(/\D/g, "").slice(0, 12);
+    if (!houseId || phonePassword.length < 9) {
+      setCustomerPortalError("Nhập mã nhà và số điện thoại hợp lệ.");
       return;
     }
     setCustomerPortalLoading(true);
     setCustomerPortalError("");
     try {
-      const { result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: CustomerPortalRecord }>({ scriptUrl: defaultDriveSyncConfig.scriptUrl }, { action: "customer-portal-login", houseId, birthPassword });
+      const { result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: CustomerPortalRecord }>({ scriptUrl: defaultDriveSyncConfig.scriptUrl }, { action: "customer-portal-login", houseId, phonePassword });
       if (!result.ok || !result.record) throw new Error(result.error || "Không thể mở hồ sơ dự án.");
       setCustomerPortalRecord(result.record);
-      setCustomerPortalPassword("");
+      setCustomerPortalPhone("");
     } catch (error) {
       setCustomerPortalError(error instanceof Error ? error.message : "Không thể đăng nhập. Hãy thử lại.");
     } finally {
@@ -2841,15 +2841,15 @@ export default function Home() {
       {!customerPortalRecord ? <section className="customer-portal__login" aria-labelledby="customer-login-title">
         <p className="eyebrow">Dành cho khách hàng</p>
         <h1 id="customer-login-title">Tra cứu dự án</h1>
-        <p>Nhập mã nhà và ngày tháng năm sinh của chủ đầu tư để xem tiến độ.</p>
+        <p>Nhập đúng mã nhà và số điện thoại chủ đầu tư để xem tiến độ dự án.</p>
         <form onSubmit={submitCustomerPortalLogin}>
-          <label>Mã nhà<input value={customerPortalHouseId} onChange={(event) => setCustomerPortalHouseId(event.target.value)} autoComplete="username" placeholder="Ví dụ: BT-08" autoFocus /></label>
-          <label>Mật khẩu <small>Ngày sinh, ddmmyyyy</small><input value={customerPortalPassword} onChange={(event) => setCustomerPortalPassword(event.target.value.replace(/\D/g, "").slice(0, 8))} inputMode="numeric" autoComplete="current-password" type="password" placeholder="20092001" maxLength={8} /></label>
+          <label>Mã nhà <small>Dòng nằm dưới mã dự án GM...</small><input value={customerPortalHouseId} onChange={(event) => setCustomerPortalHouseId(event.target.value)} autoComplete="username" placeholder="Ví dụ: HP-587" autoFocus /></label>
+          <label>Số điện thoại<input value={customerPortalPhone} onChange={(event) => setCustomerPortalPhone(event.target.value.replace(/\D/g, "").slice(0, 12))} inputMode="tel" autoComplete="current-password" type="password" placeholder="0901234567" maxLength={12} /></label>
           {customerPortalError && <p className="customer-portal__error" role="alert">{customerPortalError}</p>}
           <button className="add-button" type="submit" disabled={customerPortalLoading}>{customerPortalLoading ? "Đang kiểm tra…" : "Xem dự án"}</button>
         </form>
       </section> : <section className="customer-portal__project">
-        <header><p className="eyebrow">Dự án của bạn</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p><button type="button" onClick={() => { setCustomerPortalRecord(null); setCustomerPortalHouseId(""); }}>Đăng xuất</button></header>
+        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p><button type="button" onClick={() => { setCustomerPortalRecord(null); setCustomerPortalHouseId(""); setCustomerPortalPhone(""); }}>Đăng xuất</button></header>
         {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
         {renderCustomerProgress("Bảo hành", customerPortalRecord.warrantyProgress)}
