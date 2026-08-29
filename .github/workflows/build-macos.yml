@@ -1,0 +1,44 @@
+name: Build macOS installer
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "desktop/**"
+      - "public/**"
+      - ".github/workflows/build-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gm-manager-macos-installer
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package.json
+      - name: Install the macOS packager
+        working-directory: desktop
+        run: npm install --no-package-lock
+      - name: Build the macOS installer
+        working-directory: desktop
+        run: npm exec electron-builder -- --mac --x64 --publish=never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Publish the current macOS installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release view desktop-latest --repo "$REPOSITORY" >/dev/null 2>&1 || gh release create desktop-latest --repo "$REPOSITORY" --title "GM Manager Desktop" --notes "Bộ cài GM Manager mới nhất cho Windows và macOS."
+          gh release upload desktop-latest "desktop/release/GM-CRM-macOS-x64.dmg#GM-CRM-macOS-x64.dmg" --repo "$REPOSITORY" --clobber

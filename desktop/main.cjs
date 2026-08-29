@@ -1,10 +1,11 @@
 const { app, BrowserWindow, Notification, ipcMain, shell, session } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
+const os = require("node:os");
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
-const DRIVE_ROOT = "G:\\My Drive";
+const WINDOWS_DRIVE_ROOT = "G:\\My Drive";
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
 
@@ -57,8 +58,23 @@ function openNotificationTarget(target) {
   if (window.webContents.getURL() !== targetUrl) void window.loadURL(targetUrl);
 }
 
+async function googleDriveRoots() {
+  if (process.platform === "win32") return [WINDOWS_DRIVE_ROOT];
+  if (process.platform !== "darwin") return [];
+  const home = os.homedir();
+  const roots = [path.join(home, "Google Drive", "My Drive")];
+  const cloudStorage = path.join(home, "Library", "CloudStorage");
+  try {
+    const entries = await fs.readdir(cloudStorage, { withFileTypes: true });
+    entries.filter((entry) => entry.isDirectory() && /^GoogleDrive/i.test(entry.name)).forEach((entry) => {
+      roots.push(path.join(cloudStorage, entry.name, "My Drive"));
+    });
+  } catch { /* Google Drive Desktop may not be installed or signed in yet. */ }
+  return roots;
+}
+
 async function findProjectDocumentsFolder(projectId) {
-  const queue = [DRIVE_ROOT];
+  const queue = await googleDriveRoots();
   const visited = new Set();
   while (queue.length) {
     const folder = queue.shift();
@@ -106,7 +122,7 @@ app.whenReady().then(() => {
     const projectId = String(payload.projectId || "").trim();
     if (!/^[A-Za-z0-9_-]+$/.test(projectId)) return "Mã dự án không hợp lệ.";
     const documentsFolder = await findProjectDocumentsFolder(projectId);
-    return documentsFolder ? shell.openPath(documentsFolder) : "Không tìm thấy thư mục Tài liệu của dự án trên ổ G.";
+    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của dự án trên Mac." : "Không tìm thấy thư mục Tài liệu của dự án trên ổ G.";
   });
   createWindow();
   app.on("activate", () => {

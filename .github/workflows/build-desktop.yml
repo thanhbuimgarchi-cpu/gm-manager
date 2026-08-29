@@ -43,6 +43,6 @@ jobs:
         run: |
           gh release view desktop-latest --repo $env:REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create desktop-latest --repo $env:REPOSITORY --title "GM-CRM cho Windows" --notes "Bộ cài Windows mới nhất của GM-CRM."
+            gh release create desktop-latest --repo $env:REPOSITORY --title "GM Manager Desktop" --notes "Bộ cài GM Manager mới nhất cho Windows và macOS."
           }
           gh release upload desktop-latest "desktop/release/GM-CRM-Setup.exe#GM-CRM-Setup.exe" --repo $env:REPOSITORY --clobber

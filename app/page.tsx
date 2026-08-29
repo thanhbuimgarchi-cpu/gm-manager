@@ -319,6 +319,8 @@ type DriveSyncConfig = {
 
 type DesktopNotificationBridge = {
   isWindows: boolean;
+  isDesktop?: boolean;
+  platform?: string;
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
   openDrive?: (payload: { projectId: string; year: number; month: number }) => Promise<string>;
 };
@@ -365,6 +367,7 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1/exec",
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
+const macInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-macOS-x64.dmg";
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
@@ -391,6 +394,10 @@ function desktopBridge() {
 
 function isWindowsDesktop() {
   return /windows nt/i.test(navigator.userAgent);
+}
+
+function isMacDesktop() {
+  return /macintosh|mac os x/i.test(navigator.userAgent) && !isMobileDevice();
 }
 
 function isMobileDevice() {
@@ -1627,6 +1634,11 @@ export default function Home() {
       window.location.assign(windowsInstallerUrl);
       return;
     }
+    if (isMacDesktop()) {
+      setNotice("Đang tải bộ cài GM-CRM cho macOS…");
+      window.location.assign(macInstallerUrl);
+      return;
+    }
     if (deferredInstallPrompt) {
       await deferredInstallPrompt.prompt();
       const choice = await deferredInstallPrompt.userChoice;
@@ -1671,7 +1683,7 @@ export default function Home() {
 
   const openDesktopDocuments = async () => {
     const desktop = desktopBridge();
-    if (!desktop?.isWindows || !desktop.openDrive || !selectedCustomerLocation) return;
+    if (!desktop?.isDesktop || !desktop.openDrive || !selectedCustomerLocation) return;
     const error = await desktop.openDrive({
       projectId: selectedCustomerLocation.record.projectId,
       year: selectedCustomerLocation.year,
@@ -3019,7 +3031,7 @@ export default function Home() {
           const url = workNoteNotificationUrl(note);
           const desktop = desktopBridge();
           let shown = false;
-          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url });
+          if (desktop?.isDesktop) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url });
           else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
             await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url } });
             shown = true;
@@ -3050,7 +3062,7 @@ export default function Home() {
           const url = designTaskNotificationUrl(task);
           const desktop = desktopBridge();
           let shown = false;
-          if (desktop?.isWindows) shown = await desktop.showNotification({ title: "GM Manager · Có hạng mục thiết kế mới", body, url });
+          if (desktop?.isDesktop) shown = await desktop.showNotification({ title: "GM Manager · Có hạng mục thiết kế mới", body, url });
           else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
             await serviceWorkerRegistration.current.showNotification("GM Manager · Có hạng mục thiết kế mới", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-design-${task.kind}-${task.id}`, data: { url } });
             shown = true;
@@ -3428,7 +3440,7 @@ export default function Home() {
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
         <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
-        <div className="document-library__actions">{desktopBridge()?.isWindows && desktopBridge()?.openDrive && <button type="button" className="document-library__refresh" onClick={() => void openDesktopDocuments()}>▰ Mở Drive</button>}<button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
+        <div className="document-library__actions">{desktopBridge()?.isDesktop && desktopBridge()?.openDrive && <button type="button" className="document-library__refresh" onClick={() => void openDesktopDocuments()}>▰ Mở Drive</button>}<button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
