@@ -1,4 +1,7 @@
-const CACHE_NAME = "gm-crm-shell-v8";
+// Bump this whenever a release changes how locally cached data is handled.
+// Activating a new shell removes the older UI that used to send every work
+// note to Drive while it was being edited.
+const CACHE_NAME = "gm-crm-shell-v9";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png", "./gm-logo-192.png", "./gm-logo-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -11,7 +14,13 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
-  event.respondWith(fetch(event.request).then((response) => {
+  // GitHub Pages serves HTML and the service worker with a short HTTP cache.
+  // A navigation must nevertheless obtain the newest app shell so an installed
+  // phone/desktop app cannot remain on an older note-sync implementation.
+  const request = event.request.mode === "navigate"
+    ? new Request(event.request, { cache: "no-store" })
+    : event.request;
+  event.respondWith(fetch(request).then((response) => {
     const copy = response.clone();
     if (new URL(event.request.url).origin === self.location.origin) {
       caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
