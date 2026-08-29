@@ -1235,6 +1235,7 @@ function normalizeWorkNotes_(notes) {
     const status = workNoteText_(note && note.status, 20);
     const dueDate = normalizeWorkNoteDate_(note && note.dueDate);
     const actualDate = normalizeWorkNoteDate_(note && note.actualDate);
+    const completedAt = workNoteText_(note && note.completedAt, 40);
     const acceptedAt = workNoteText_(note && note.acceptedAt, 40);
     return {
       id: workNoteText_(note && note.id, 100) || "work-note-" + index + "-" + new Date().getTime(),
@@ -1248,6 +1249,7 @@ function normalizeWorkNotes_(notes) {
       content: workNoteText_(note && note.content, 4000),
       dueDate: dueDate,
       actualDate: actualDate,
+      completedAt: completedAt,
       acceptedAt: acceptedAt,
       // A newly created note stays black until the future assignee-acceptance
       // flow explicitly records acceptedAt.
@@ -1304,8 +1306,14 @@ function loadWorkNotes_(payload) {
   if (!file) return { ok: true, notes: [] };
   try {
     const notes = normalizeWorkNotes_(JSON.parse(file.getBlob().getDataAsString() || "[]"));
-    cacheJson_(cacheKey, notes, 21600);
-    return { ok: true, notes: notes, source: "drive" };
+    const keptNotes = notes.filter(function(note) {
+      if (!note.actualDate || !note.completedAt) return true;
+      const completedAt = new Date(note.completedAt).getTime();
+      return !isFinite(completedAt) || Date.now() - completedAt < 2 * 24 * 60 * 60 * 1000;
+    });
+    if (keptNotes.length !== notes.length) file.setContent(JSON.stringify(keptNotes));
+    cacheJson_(cacheKey, keptNotes, 21600);
+    return { ok: true, notes: keptNotes, source: "drive" };
   } catch (error) {
     throw new Error("Không thể đọc dữ liệu ghi chú công việc.");
   }
@@ -1358,8 +1366,20 @@ function completeWorkNote_(payload) {
   const content = JSON.stringify(records);
   if (file) file.setContent(content);
   else folder.createFile(COMPLETED_WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  const workFolder = workNotesFolder_(details.year, details.month, details.projectId, true);
+  const activeFile = findFileByName_(workFolder, WORK_NOTES_FILE_NAME);
+  let projectNotes = [];
+  if (activeFile) {
+    try { projectNotes = normalizeWorkNotes_(JSON.parse(activeFile.getBlob().getDataAsString() || "[]")); } catch (error) { projectNotes = []; }
+  }
+  const completedNote = { ...note, completedAt: workNoteText_(payload.note && payload.note.completedAt, 40) || new Date().toISOString() };
+  const noteIndex = projectNotes.findIndex(function(item) { return item.id === completedNote.id; });
+  if (noteIndex >= 0) projectNotes[noteIndex] = completedNote;
+  else projectNotes.push(completedNote);
+  if (activeFile) activeFile.setContent(JSON.stringify(projectNotes));
+  else workFolder.createFile(WORK_NOTES_FILE_NAME, JSON.stringify(projectNotes), MimeType.PLAIN_TEXT);
   saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
-  CacheService.getScriptCache().remove(workNotesCacheKey_(details));
+  cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
   return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
 }
 

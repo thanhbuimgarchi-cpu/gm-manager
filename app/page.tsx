@@ -256,6 +256,7 @@ type WorkNote = {
   content: string;
   dueDate: string;
   actualDate: string;
+  completedAt?: string;
   acceptedAt?: string;
   acceptedBy?: string;
   creatorEmail: string;
@@ -1130,6 +1131,12 @@ function workNoteStatus(note: Pick<WorkNote, "acceptedAt" | "dueDate">): WorkNot
   return "Xanh";
 }
 
+function shouldKeepWorkNote(note: WorkNote, now = Date.now()) {
+  if (!note.actualDate || !note.completedAt) return true;
+  const completedAt = new Date(note.completedAt).getTime();
+  return !Number.isFinite(completedAt) || now - completedAt < 2 * 24 * 60 * 60 * 1000;
+}
+
 function nameInitials(name: string) {
   const words = name
     .normalize("NFD")
@@ -1771,15 +1778,19 @@ export default function Home() {
     setEditingWorkNote(null);
     setWorkNoteMenuId(null);
     const cacheKey = workNotesCacheKey();
-    const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS);
-    setWorkNotes(cachedNotes ?? []);
+    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note));
+    setWorkNotes(cachedNotes);
+    if (cachedNotes.length) writeDriveCache(cacheKey, cachedNotes);
+    else removeDriveCache(cacheKey);
     setLoadingWorkNotes(false);
     if (!driveScriptUrl.trim()) return;
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId });
       if (response.ok && result.ok && Array.isArray(result.notes)) {
-        setWorkNotes(result.notes);
-        writeDriveCache(cacheKey, result.notes);
+        const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
+        const mergedNotes = Array.from(new Map([...result.notes, ...assignedForProject].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
+        setWorkNotes(mergedNotes);
+        writeDriveCache(cacheKey, mergedNotes);
         setWorkNotesCacheRevision((revision) => revision + 1);
       }
     } catch { /* Keep the local cache available while offline. */ }
@@ -1801,8 +1812,8 @@ export default function Home() {
         note,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu công việc hoàn thành vào Drive.");
-      persistWorkNotes(workNotes.filter((item) => item.id !== note.id));
-      setNotice("Đã lưu công việc hoàn thành vào Drive.");
+      persistWorkNotes(workNotes.map((item) => item.id === note.id ? note : item));
+      setNotice("Đã xuất công việc hoàn thành vào Drive. Việc sẽ nằm cuối danh sách trong 2 ngày.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể lưu công việc hoàn thành vào Drive.");
     } finally {
@@ -1879,7 +1890,7 @@ export default function Home() {
     setPendingWorkNoteCompletionId(null);
     const note = workNotes.find((item) => item.id === noteId);
     if (!note || note.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người được giao việc mới có thể xác nhận hoàn thành."); return; }
-    if (note) void saveCompletedWorkNoteToDrive({ ...note, actualDate: formatWorkNoteDate() });
+    if (note) void saveCompletedWorkNoteToDrive({ ...note, actualDate: formatWorkNoteDate(), completedAt: new Date().toISOString() });
   };
   const acceptAssignedWorkNote = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!location || note.assigneeEmail !== loggedInEmployeeEmail) return;
@@ -2805,6 +2816,10 @@ export default function Home() {
         if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
         const notes = result.notes.map((note) => ({ ...note, status: workNoteStatus(note) }));
         setAssignedWorkNotes(notes);
+        if (selectedCustomerLocation && activeFolder === "Ghi chú") {
+          const forOpenedProject = notes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
+          if (forOpenedProject.length) setWorkNotes((current) => Array.from(new Map([...current, ...forOpenedProject].map((note) => [note.id, note])).values()));
+        }
         const pending = notes.filter((note) => !note.acceptedAt);
         const now = Date.now();
         for (const note of pending) {
@@ -2824,9 +2839,9 @@ export default function Home() {
       } catch { /* The next poll retries while the app remains usable offline. */ }
     };
     void loadAssignments();
-    const timer = window.setInterval(() => { void loadAssignments(); }, 30 * 1000);
+    const timer = window.setInterval(() => { void loadAssignments(); }, 10 * 1000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail]);
+  }, [activeFolder, canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerLocation]);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
     if (typeof window === "undefined") return [];
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
@@ -3074,7 +3089,7 @@ export default function Home() {
       <div className="work-notes__list">
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
-          : workNotes.length ? [...workNotes].sort((left, right) => ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
+          : workNotes.length ? [...workNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
       </div>
     </section>;
   };
