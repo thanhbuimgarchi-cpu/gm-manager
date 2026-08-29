@@ -1,7 +1,7 @@
 {
-  "name": "GM-manager",
-  "short_name": "GM-manager",
-  "description": "Quản lý khách hàng và quy trình GM-Manager.",
+  "name": "GM Manager",
+  "short_name": "GM Manager",
+  "description": "Quản lý khách hàng và quy trình GM Manager.",
   "lang": "vi",
   "id": "/gm-manager/",
   "start_url": "/gm-manager/",

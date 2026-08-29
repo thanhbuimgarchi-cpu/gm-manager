@@ -298,6 +298,7 @@ type CustomerPortalRecord = {
 
 type DriveSyncConfig = {
   scriptUrl: string;
+  driveUrl?: string;
 };
 
 type DesktopNotificationBridge = {
@@ -354,6 +355,15 @@ function isAppsScriptUrl(value: string) {
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "script.google.com" && url.pathname.startsWith("/macros/s/");
+  } catch {
+    return false;
+  }
+}
+
+function isDriveUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && (url.hostname === "drive.google.com" || url.hostname === "docs.google.com");
   } catch {
     return false;
   }
@@ -1317,6 +1327,7 @@ export default function Home() {
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
   const [driveConfigOpen, setDriveConfigOpen] = useState(false);
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
+  const [driveLinkUrl, setDriveLinkUrl] = useState("");
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
   const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
@@ -1384,8 +1395,15 @@ export default function Home() {
 
     // Production has one canonical deployment. Replacing any URL saved by an
     // older build prevents a device from getting stuck on a retired /exec URL.
-    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(defaultDriveSyncConfig));
-    setDriveScriptUrl(defaultDriveSyncConfig.scriptUrl);
+    let savedDriveLinkUrl = "";
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(driveSyncConfigKey) ?? "{}") as Partial<DriveSyncConfig>;
+      savedDriveLinkUrl = isDriveUrl(String(saved.driveUrl ?? "")) ? String(saved.driveUrl).trim() : "";
+    } catch { /* Keep the canonical Apps Script connection when prior storage is malformed. */ }
+    const config = { ...defaultDriveSyncConfig, driveUrl: savedDriveLinkUrl };
+    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
+    setDriveScriptUrl(config.scriptUrl);
+    setDriveLinkUrl(savedDriveLinkUrl);
   }, []);
 
   useEffect(() => {
@@ -2720,14 +2738,18 @@ export default function Home() {
 
   const saveDriveConfig = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const config = { scriptUrl: driveScriptUrl.trim() };
+    const config = { scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
       setNotice("Hãy nhập Web app URL hợp lệ từ Google Apps Script.");
       return;
     }
+    if (config.driveUrl && !isDriveUrl(config.driveUrl)) {
+      setNotice("Link Drive cần là đường dẫn https://drive.google.com hoặc https://docs.google.com hợp lệ.");
+      return;
+    }
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
-    setNotice("Đã kết nối Google Apps Script trên thiết bị này");
+    setNotice(config.driveUrl ? "Đã lưu kết nối Google Apps Script và Link Drive trên thiết bị này." : "Đã kết nối Google Apps Script trên thiết bị này.");
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth });
   };
 
@@ -2834,6 +2856,7 @@ export default function Home() {
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
   const assignablePersonnel = useMemo(() => allPersonnel.filter((member) => member.status === "Có" && member.email).sort((left, right) => left.name.localeCompare(right.name, "vi")), [allPersonnel]);
   const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
+  const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
@@ -3342,7 +3365,7 @@ export default function Home() {
           <ol>{analysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
         </article>
       </section>
-      <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
+              <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.projectId}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
     </section>;
   };
 
@@ -3375,7 +3398,7 @@ export default function Home() {
       </table>
       <button type="button" className="design-progress-add-row" onClick={addWarrantyProgressRow}><span>＋</span> Thêm dòng bảo hành</button>
     </div>
-    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
+    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
   </section>;
 
   const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
@@ -3489,7 +3512,7 @@ export default function Home() {
       <aside className="sidebar">
         <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
-        <nav className="main-nav" aria-label="Quy trình GM-manager">
+        <nav className="main-nav" aria-label="Quy trình GM Manager">
           {visibleWorkspaceFolders.map((folder) => (
             <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon">{folder.icon}</span>
@@ -3510,7 +3533,7 @@ export default function Home() {
         </header>
 
         {!hasActiveFolderAccess ? (
-          <section className="coming-soon"><span>⌑</span><p className="eyebrow">GM-manager</p><h1>Chưa được cấp quyền</h1><p>Tài khoản <b>{loggedInEmployee?.email}</b> không có quyền truy cập mục <b>{activeFolder}</b>.</p></section>
+          <section className="coming-soon"><span>⌑</span><p className="eyebrow">GM Manager</p><h1>Chưa được cấp quyền</h1><p>Tài khoản <b>{loggedInEmployee?.email}</b> không có quyền truy cập mục <b>{activeFolder}</b>.</p></section>
         ) : activeFolder === "Ghi chú" ? (
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
@@ -3589,7 +3612,7 @@ export default function Home() {
                   </div>}
                 </section>}
               </div>
-              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM-Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.projectId} / Tư vấn</span></footer>
+              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.projectId} / Tư vấn</span></footer>
             </section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
@@ -3621,7 +3644,7 @@ export default function Home() {
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
             <section className="coming-soon">
-              <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM-manager</p><h1>{activeFolder}</h1>
+              <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM Manager</p><h1>{activeFolder}</h1>
               <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
             </section>
           </section>
@@ -3652,6 +3675,8 @@ export default function Home() {
             <p className="drive-config-dialog__hint">Chỉ cần dán Web app URL. GM-CRM sẽ nhớ kết nối trên thiết bị này.</p>
             <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
+            {isBuiltInAdminLoggedIn && <label>Link Google Drive của admin<input type="url" value={driveLinkUrl} onChange={(event) => setDriveLinkUrl(event.target.value.trim())} placeholder="https://drive.google.com/drive/folders/..." /><small>Admin có thể thay link này bất cứ lúc nào. Link được lưu trên thiết bị hiện tại.</small></label>}
+            {isBuiltInAdminLoggedIn && driveLinkUrl && <a className="script-link" href={driveLinkUrl} target="_blank" rel="noreferrer">Mở Link Drive đã lưu ↗</a>}
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
         </div>
@@ -3689,7 +3714,7 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
           <section className="security-dialog notification-setup-dialog" role="dialog" aria-label="Bật thông báo" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
-            <p className="eyebrow">GM-manager đã được cài</p><h2>Bật thông báo?</h2>
+            <p className="eyebrow">GM Manager đã được cài</p><h2>Bật thông báo?</h2>
             <p>Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Bạn luôn có thể bật lại từ nút Thông báo.</p>
             <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>Bật thông báo</button></div>
           </section>

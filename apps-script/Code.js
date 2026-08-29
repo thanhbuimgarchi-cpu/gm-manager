@@ -5,7 +5,7 @@
  * "Deploy Google Apps Script" GitHub Actions workflow. The workflow updates
  * the existing Web App deployment, so its /exec URL stays unchanged.
  *
- * One-time setup: run the Web App as the Google account that owns GM-Manager
+ * One-time setup: run the Web App as the Google account that owns GM Manager
  * and add GEMINI_API_KEY in Project Settings > Script properties.
  */
 
@@ -25,7 +25,7 @@ const PRODUCTION_DEPLOYMENT_ID = "AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw
  */
 function doGet() {
   const html = [
-    "<!doctype html><html><head><meta charset=\"utf-8\"><title>GM-Manager Drive Bridge</title></head><body>",
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>GM Manager Drive Bridge</title></head><body>",
     "<script>(function(){",
     "function allowed(origin){return origin==='https://thanhbuimgarchi-cpu.github.io'||/^http:\\/\\/(?:localhost|127\\.0\\.0\\.1)(?::\\d+)?$/.test(origin);}",
     "window.addEventListener('message',function(event){",
@@ -39,7 +39,7 @@ function doGet() {
     "})();<\/script></body></html>",
   ].join("");
   return HtmlService.createHtmlOutput(html)
-    .setTitle("GM-Manager Drive Bridge")
+    .setTitle("GM Manager Drive Bridge")
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
@@ -53,7 +53,7 @@ function redeployLatest(payload) {
   const deploymentLock = LockService.getScriptLock();
   deploymentLock.waitLock(30000);
   try {
-    const description = String(payload.description || "GM-Manager automatic deployment").replace(/[^\w .:-]/g, "").slice(0, 100);
+    const description = String(payload.description || "GM Manager automatic deployment").replace(/[^\w .:-]/g, "").slice(0, 100);
     const apiRoot = "https://script.googleapis.com/v1/projects/" + encodeURIComponent(SCRIPT_PROJECT_ID);
     const requestOptions = {
       contentType: "application/json",
