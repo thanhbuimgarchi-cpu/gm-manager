@@ -1854,10 +1854,14 @@ export default function Home() {
     setEditingWorkNote(null);
     try { await syncWorkNotesToSharedStore(next); setNotice("Đã lưu thay đổi và đồng bộ người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ thay đổi."); }
   };
-  const removeWorkNote = (id: string) => {
-    persistWorkNotes(workNotes.filter((note) => note.id !== id));
+  const removeWorkNote = async (id: string) => {
+    const note = workNotes.find((item) => item.id === id);
+    if (!note || note.creatorEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người tạo ghi chú mới có thể xóa."); return; }
+    const next = workNotes.filter((item) => item.id !== id);
+    persistWorkNotes(next);
     if (editingWorkNote?.id === id) setEditingWorkNote(null);
     setWorkNoteMenuId(null);
+    try { await syncWorkNotesToSharedStore(next); setNotice("Đã xóa ghi chú và cập nhật người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ việc xóa ghi chú."); }
   };
   const confirmWorkNoteCompletion = () => {
     if (!pendingWorkNoteCompletionId) return;
