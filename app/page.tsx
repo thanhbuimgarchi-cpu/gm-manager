@@ -2810,6 +2810,41 @@ export default function Home() {
       setNotice("Không thể sao chép link. Hãy sao chép từ thanh địa chỉ.");
     }
   };
+  const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
+    const portalHouseId = record.houseId.trim();
+    const portalPhone = String(record.details?.SDT ?? "").replace(/\D/g, "");
+    if (!portalHouseId) {
+      setNotice("Chưa có mã nhà cho hồ sơ này. Hãy bổ sung mã nhà trước khi phát hành link khách.");
+      return;
+    }
+    if (portalPhone.length < 9) {
+      setNotice("Chưa có số điện thoại chủ đầu tư hợp lệ. Hãy nhập ở mục Tư vấn (SDT) trước khi phát hành link khách.");
+      return;
+    }
+
+    const config = { scriptUrl: driveScriptUrl.trim() };
+    if (!isAppsScriptUrl(config.scriptUrl)) {
+      setDriveConfigOpen(true);
+      return;
+    }
+
+    setSyncingRecordId(record.id);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
+        action: "sync-customer",
+        year: location.year,
+        month: location.month,
+        record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ hồ sơ khách hàng.");
+      await navigator.clipboard.writeText(customerPortalLink);
+      setNotice("Đã đồng bộ mã nhà và số điện thoại lên Drive, rồi sao chép link gửi khách.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể phát hành link khách.");
+    } finally {
+      setSyncingRecordId(null);
+    }
+  };
   const submitCustomerPortalLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const houseId = customerPortalHouseId.trim();
@@ -3206,7 +3241,7 @@ export default function Home() {
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
-                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Dữ liệu đã lưu"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button></div>
+                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Dữ liệu đã lưu"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button><button type="button" className="customer-link" onClick={() => selectedCustomerLocation && void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành link khách</button></div>
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
