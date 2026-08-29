@@ -507,6 +507,9 @@ const syncedDriveFolders: DriveFolder[] = [
 
 const personnelRoles = ["Nhân viên kỹ thuật", "Quản lý chung", "Nhân viên văn phòng", "Marketing", "Giám sát", "Thợ xưởng", "Thợ công trình", "Kế toán", "Nhân viên thiết kế"] as const;
 const personnelPermissionOptions = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Tài liệu", "3D"] as const;
+const builtInAdminAccount = "admin";
+const builtInAdminPassword = "1";
+const builtInAdminPersonnel: PersonnelMember = { id: "built-in-admin", status: "Có", name: "Admin", email: builtInAdminAccount, birthDate: "", phone: "", role: "Quản lý chung", permissions: [...personnelPermissionOptions], address: "" };
 
 const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"] as const;
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
@@ -1247,6 +1250,7 @@ export default function Home() {
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [employeeLoginEmail, setEmployeeLoginEmail] = useState("");
+  const [employeeLoginPassword, setEmployeeLoginPassword] = useState("");
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
   const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
@@ -1580,7 +1584,7 @@ export default function Home() {
   const renderMobileAppActions = () => <>
     {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
-    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
   </>;
 
@@ -2715,7 +2719,7 @@ export default function Home() {
   const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.email} ${member.phone} ${member.role} ${member.permissions.join(" ")} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
   const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
-  const loggedInEmployee = allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
+  const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
@@ -2789,14 +2793,16 @@ export default function Home() {
   };
   const loginEmployee = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const email = employeeLoginEmail.trim().toLowerCase();
-    const member = allPersonnel.find((personnel) => personnel.status === "Có" && personnel.email === email);
+    const account = employeeLoginEmail.trim().toLowerCase();
+    const isBuiltInAdmin = account === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword;
+    const member = isBuiltInAdmin ? builtInAdminPersonnel : allPersonnel.find((personnel) => personnel.status === "Có" && personnel.email === account);
     if (!member) {
-      setEmployeeLoginError("Email này chưa có tài khoản hoạt động trong danh sách Nhân lực.");
+      setEmployeeLoginError(account === builtInAdminAccount ? "Mật khẩu quản trị không đúng." : "Email này chưa có tài khoản hoạt động trong danh sách Nhân lực.");
       return;
     }
-    try { window.localStorage.setItem(personnelSessionEmailKey, email); } catch { /* The session remains open in this browser tab. */ }
-    setLoggedInEmployeeEmail(email);
+    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* The session remains open in this browser tab. */ }
+    setLoggedInEmployeeEmail(account);
+    setEmployeeLoginPassword("");
     setEmployeeLoginError("");
     setLoginOpen(false);
     const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
@@ -2807,6 +2813,7 @@ export default function Home() {
     try { window.localStorage.removeItem(personnelSessionEmailKey); } catch { /* Optional device session cleanup. */ }
     setLoggedInEmployeeEmail("");
     setEmployeeLoginEmail("");
+    setEmployeeLoginPassword("");
     setNotice("Đã đăng xuất tài khoản nhân viên.");
   };
   useEffect(() => {
@@ -3400,9 +3407,10 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}>
           <form className="add-dialog login-dialog" onSubmit={loginEmployee} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setLoginOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Tài khoản nhân viên</p><h2>Đăng nhập bằng email</h2>
-            <p>Email phải trùng với email đã ghi trong danh sách Nhân lực. Quyền hiển thị sẽ áp dụng ngay sau khi đăng nhập.</p>
-            <label>Email<input type="email" value={employeeLoginEmail} autoComplete="email" placeholder="ten@congty.com" onChange={(event) => setEmployeeLoginEmail(event.target.value.trim().toLowerCase())} autoFocus required /></label>
+            <p className="eyebrow">Tài khoản nhân viên</p><h2>Đăng nhập</h2>
+            <p>Quản trị dùng tài khoản <b>admin</b> và mật khẩu <b>1</b>. Nhân viên có thể đăng nhập bằng email đã ghi trong danh sách Nhân lực.</p>
+            <label>Tài khoản / Email<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="admin hoặc ten@congty.com" onChange={(event) => setEmployeeLoginEmail(event.target.value.trim().toLowerCase())} autoFocus required /></label>
+            <label>Mật khẩu<input type="password" value={employeeLoginPassword} autoComplete="current-password" placeholder="Nhập mật khẩu quản trị" onChange={(event) => setEmployeeLoginPassword(event.target.value)} /></label>
             {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
             <div className="login-dialog__actions"><button className="add-button" type="submit">Đăng nhập</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
           </form>
