@@ -33,7 +33,7 @@
 .customer-gateway__actions::-webkit-scrollbar { display: none; }
 .customer-gateway__actions > * { flex: 0 0 auto; }
 .customer-gateway__add { margin: -7px 0 12px auto; }
-.customer-context--back { display: inline-flex; align-items: center; max-width: none; padding: 8px 10px; font-size: 11px; font-weight: 500; white-space: nowrap; }
+.topbar__project-controls { display: inline-flex; align-items: center; gap: 9px; min-width: 0; }.customer-context--back, .personnel-back { display: inline-flex; align-items: center; max-width: none; padding: 8px 10px; border: 1px solid #d8847d; border-radius: 5px; background: #fff4f3; color: #a13e38; font-size: 11px; font-weight: 600; white-space: nowrap; }.customer-context--back:hover, .personnel-back:hover { border-color: #b94a43; background: #fce4e2; color: #842f2a; }.customer-link--topbar { border-color: #78a985; background: #edf7ef; color: #2d7040; font-weight: 600; }.customer-link--topbar:hover:not(:disabled) { border-color: #3f8b54; background: #dff0e3; color: #225a33; }.customer-link--topbar:disabled { cursor: wait; opacity: .6; }
 .topbar { justify-content: space-between; }
 
 @media (max-width: 620px) {
@@ -191,3 +191,6 @@
 .sidebar-note b { display: -webkit-box; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 .work-note__status--black { color: #252421; }.work-note__status--red { color: #ba3d36; }.work-note__status--orange { color: #dd8b2b; }.work-note__status--green { color: #3b8652; }.work-note--highlighted { border-color: #3b7fc2; box-shadow: 0 0 0 3px rgba(59, 127, 194, .16); }
+
+/* Return to the overview is intentionally prominent in both personnel and customer views. */
+.customer-context--back, .personnel-back { border-color: #d8847d; background: #fff4f3; color: #a13e38; }.customer-context--back:hover, .personnel-back:hover { border-color: #b94a43; background: #fce4e2; color: #842f2a; }

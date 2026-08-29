@@ -1650,7 +1650,7 @@ export default function Home() {
     {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
-    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>{notificationPermission === "granted" ? "◉ Thông báo thử" : "◌ Bật thông báo"}</button>
+    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>◌ Bật thông báo</button>
   </>;
 
   const persist = (nextYears: YearFolder[]) => {
@@ -3416,7 +3416,10 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
+          <div className="topbar__project-controls">
+            {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành</button>}
+            <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
+          </div>
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
@@ -3439,7 +3442,7 @@ export default function Home() {
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
-                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button><button type="button" className="customer-link" onClick={() => selectedCustomerLocation && void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành</button></div>
+                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button></div>
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
