@@ -164,6 +164,30 @@ test("admin receives the active work-note overview across every customer", () =>
   assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "an@company.com" }).notes.map((note) => note.id))), ["note-a"]);
 });
 
+test("Pancake group names map to a house code only when the GM marker is present", () => {
+  const context = loadContext();
+  assert.equal(context.pancakeHouseIdFromGroupName_("HP-587-GM-Tư vấn"), "HP-587");
+  assert.equal(context.pancakeHouseIdFromGroupName_("bc thi công dv 75 - GM"), "bc thi công dv 75");
+  assert.equal(context.pancakeHouseIdFromGroupName_("HP-587-Tư vấn"), "");
+});
+
+test("Pancake customer messages are grouped into two-hour windows", () => {
+  const context = loadContext();
+  const groups = context.groupPancakeMessages_(
+    { id: "conversation-1", from: { name: "HP-587-GM-Tư vấn" }, page_customer: { name: "Nguyễn Tùng" } },
+    [
+      { id: "m-2", text: "Tin thứ hai", inserted_at: "2026-09-03T10:20:00.000Z", from: { name: "Nguyễn Tùng" } },
+      { id: "m-1", text: "Tin thứ nhất", inserted_at: "2026-09-03T09:00:00.000Z", from: { name: "Nguyễn Tùng" } },
+      { id: "m-3", text: "Tin mới", inserted_at: "2026-09-03T13:00:01.000Z", from: { name: "Nguyễn Tùng" } },
+    ],
+    { houseId: "HP-587", projectId: "GM09092026NT", customerName: "Nguyễn Tùng", year: 2026, month: 9 },
+  );
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].messageCount, 2);
+  assert.equal(groups[0].messages[0].content, "Tin thứ nhất");
+  assert.equal(groups[1].messages[0].content, "Tin mới");
+});
+
 test("employee credentials are stored as a hash and verified by the server", () => {
   const values = new Map();
   const context = loadContext({

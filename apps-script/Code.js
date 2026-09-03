@@ -109,6 +109,7 @@ function doPost(event) {
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
+    if (payload.action === "load-customer-messages") return json_(loadCustomerMessages_(payload));
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
     if (payload.action === "load-assigned-design-tasks") return json_(loadAssignedDesignTasks_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
@@ -128,6 +129,8 @@ function doPost(event) {
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
+      if (payload.action === "save-pancake-config") return json_(savePancakeConfig_(payload));
+      if (payload.action === "update-customer-message-status") return json_(updateCustomerMessageStatus_(payload));
       if (payload.action === "sync-design-tasks") return json_(syncDesignTasks_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
@@ -1409,6 +1412,300 @@ function completeWorkNote_(payload) {
   saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
   cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
   return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
+}
+
+// Pancake integration -------------------------------------------------------
+// Tokens are kept in Apps Script properties so they never ship to GitHub
+// Pages or appear in browser localStorage. Configure them once from the admin
+// Drive dialog (or Project settings > Script properties).
+const PANCAKE_USER_TOKEN_PROPERTY = "PANCAKE_USER_ACCESS_TOKEN";
+const PANCAKE_PAGE_TOKEN_PROPERTY = "PANCAKE_PAGE_ACCESS_TOKEN";
+const PANCAKE_PAGE_ID_PROPERTY = "PANCAKE_PAGE_ID";
+const PANCAKE_PAGE_NAME_PROPERTY = "PANCAKE_PAGE_NAME";
+const PANCAKE_MESSAGE_STATE_FILE_NAME = "_gmcrm_tin_nhan_khach_trang_thai.json";
+const PANCAKE_MESSAGE_EXPORT_FILE_NAME = "Tin nhắn khách.xlsx";
+const PANCAKE_MESSAGE_STATUSES = ["new", "deferred", "processing", "resolved"];
+
+function pancakeProperty_(key) {
+  return String(PropertiesService.getScriptProperties().getProperty(key) || "").trim();
+}
+
+function pancakeJsonRequest_(url) {
+  const response = UrlFetchApp.fetch(url, { method: "get", muteHttpExceptions: true, headers: { Accept: "application/json" } });
+  const status = response.getResponseCode();
+  const text = response.getContentText() || "";
+  let result;
+  try { result = JSON.parse(text); } catch (error) { throw new Error("Pancake không trả về JSON hợp lệ (HTTP " + status + ")."); }
+  if (status < 200 || status >= 300 || result.success === false) {
+    const code = result.error_code ? " (" + result.error_code + ")" : "";
+    throw new Error("Pancake từ chối yêu cầu" + code + ": " + String(result.message || "HTTP " + status).slice(0, 240));
+  }
+  return result;
+}
+
+function pancakePages_(userToken) {
+  const result = pancakeJsonRequest_("https://pages.fm/api/v1/pages?access_token=" + encodeURIComponent(userToken));
+  const categories = result.categorized || {};
+  return [].concat(categories.activated || [], categories.hidden || [], categories.inactivated || [], categories.nopermission || []);
+}
+
+function pancakePageContext_() {
+  const userToken = pancakeProperty_(PANCAKE_USER_TOKEN_PROPERTY);
+  const pageToken = pancakeProperty_(PANCAKE_PAGE_TOKEN_PROPERTY);
+  if (!userToken || !pageToken) throw new Error("Chưa cấu hình Pancake User Access Token và Page Access Token trong Apps Script.");
+  const properties = PropertiesService.getScriptProperties();
+  let pageId = pancakeProperty_(PANCAKE_PAGE_ID_PROPERTY);
+  let pageName = pancakeProperty_(PANCAKE_PAGE_NAME_PROPERTY) || "Gm Manager";
+  let page = null;
+  if (!pageId) {
+    const pages = pancakePages_(userToken);
+    page = pages.find(function(item) { return String(item.name || "").trim().toLocaleLowerCase() === pageName.toLocaleLowerCase(); }) || pages.find(function(item) { return item.is_activated; });
+    if (!page || !page.id) throw new Error("Không tìm thấy page Pancake " + pageName + ".");
+    pageId = String(page.id);
+    pageName = String(page.name || pageName);
+    properties.setProperty(PANCAKE_PAGE_ID_PROPERTY, pageId);
+    properties.setProperty(PANCAKE_PAGE_NAME_PROPERTY, pageName);
+  }
+  return { userToken: userToken, pageToken: pageToken, pageId: pageId, pageName: pageName };
+}
+
+function savePancakeConfig_(payload) {
+  const userToken = workNoteText_(payload.userAccessToken, 4000);
+  const pageToken = workNoteText_(payload.pageAccessToken, 4000);
+  const pageName = workNoteText_(payload.pageName, 200) || "Gm Manager";
+  if (!userToken || !pageToken) throw new Error("Cần nhập cả User Access Token và Page Access Token của Pancake.");
+  const pages = pancakePages_(userToken);
+  const page = pages.find(function(item) { return String(item.name || "").trim().toLocaleLowerCase() === pageName.toLocaleLowerCase(); }) || pages.find(function(item) { return item.is_activated; });
+  if (!page || !page.id) throw new Error("User Access Token không thấy page " + pageName + ".");
+  const properties = PropertiesService.getScriptProperties();
+  properties.setProperty(PANCAKE_USER_TOKEN_PROPERTY, userToken);
+  properties.setProperty(PANCAKE_PAGE_TOKEN_PROPERTY, pageToken);
+  properties.setProperty(PANCAKE_PAGE_ID_PROPERTY, String(page.id));
+  properties.setProperty(PANCAKE_PAGE_NAME_PROPERTY, String(page.name || pageName));
+  // Validate the page token with the read-only conversation endpoint before
+  // telling the UI that the configuration is ready.
+  pancakeJsonRequest_("https://pages.fm/api/public_api/v2/pages/" + encodeURIComponent(String(page.id)) + "/conversations?page_access_token=" + encodeURIComponent(pageToken));
+  return { ok: true, pageId: String(page.id), pageName: String(page.name || pageName) };
+}
+
+function pancakeMessageStateFile_() {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const file = findFileByName_(root, PANCAKE_MESSAGE_STATE_FILE_NAME);
+  return file || root.createFile(PANCAKE_MESSAGE_STATE_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
+}
+
+function readPancakeMessageStates_() {
+  try {
+    const value = JSON.parse(pancakeMessageStateFile_().getBlob().getDataAsString() || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch (error) { return []; }
+}
+
+function savePancakeMessageStates_(states) {
+  pancakeMessageStateFile_().setContent(JSON.stringify(states.slice(-5000)));
+}
+
+function pancakeHouseIdFromGroupName_(groupName) {
+  const match = /^(.+?)\s*-\s*GM(?:\s*-|\s*$)/i.exec(workNoteText_(groupName, 400));
+  return match ? match[1].trim() : "";
+}
+
+function normalizePancakeHouseId_(value) {
+  return workNoteText_(value, 160).toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function pancakeDateIso_(value) {
+  if (value === null || value === undefined || value === "") return "";
+  let date;
+  if (typeof value === "number" || /^\d+(?:\.\d+)?$/.test(String(value))) {
+    const numeric = Number(value);
+    date = new Date(numeric < 100000000000 ? numeric * 1000 : numeric);
+  } else date = new Date(String(value));
+  return isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
+function pancakeNestedText_(value) {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (!value || typeof value !== "object") return "";
+  const nested = value.text || value.message || value.content || value.body;
+  return (nested && typeof nested === "object" ? pancakeNestedText_(nested) : String(nested || value.name || ""));
+}
+
+function pancakeMessageText_(message) {
+  return workNoteText_(pancakeNestedText_(message && (message.message || message.text || message.content || message.body || message.message_content)), 4000);
+}
+
+function pancakeMessageSender_(message, fallback) {
+  const sender = message && (message.sender || message.from || message.user || message.customer || message.conv_customer);
+  return workNoteText_(pancakeNestedText_(sender) || message && (message.sender_name || message.from_name || message.customer_name), 160) || fallback || "Khách hàng";
+}
+
+function pancakeIsPageMessage_(message, pageId) {
+  if (!message) return false;
+  if (message.is_from_page === true || message.from_page === true || message.is_page === true || message.is_admin === true) return true;
+  const from = message.from || message.sender || {};
+  const fromId = from && (from.id || from.global_id || from.page_id);
+  if (pageId && fromId && String(fromId) === String(pageId)) return true;
+  const source = String(message.sender_type || message.from_type || message.actor_type || "").toLocaleLowerCase();
+  return /page|admin|staff|agent|business|shop/.test(source);
+}
+
+function pancakeRawMessages_(result) {
+  const candidates = [result && result.messages, result && result.data, result && result.activities];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const value = candidates[index];
+    if (Array.isArray(value)) return value;
+    if (value && Array.isArray(value.messages)) return value.messages;
+  }
+  return [];
+}
+
+function pancakeConversationMessages_(context, conversation) {
+  const base = "https://pages.fm/api/public_api/v1/pages/" + encodeURIComponent(context.pageId) + "/conversations/" + encodeURIComponent(String(conversation.id)) + "/messages?page_access_token=" + encodeURIComponent(context.pageToken);
+  // This endpoint is v1 and requires current_count. Without it Pancake may
+  // return its HTML shell with HTTP 200 instead of the JSON payload.
+  const result = pancakeJsonRequest_(base + "&current_count=0");
+  return pancakeRawMessages_(result);
+}
+
+function pancakeConversationPages_(context) {
+  const conversations = [];
+  let cursor = "";
+  for (let page = 0; page < 20; page += 1) {
+    const url = "https://pages.fm/api/public_api/v2/pages/" + encodeURIComponent(context.pageId) + "/conversations?page_access_token=" + encodeURIComponent(context.pageToken) + (cursor ? "&last_conversation_id=" + encodeURIComponent(cursor) : "");
+    const result = pancakeJsonRequest_(url);
+    const batch = Array.isArray(result.conversations) ? result.conversations : [];
+    conversations.push.apply(conversations, batch);
+    if (batch.length < 60) break;
+    const next = String(batch[batch.length - 1].id || "");
+    if (!next || next === cursor) break;
+    cursor = next;
+  }
+  return conversations;
+}
+
+function pancakeTargetMap_(payload) {
+  const map = {};
+  (Array.isArray(payload.customerTargets) ? payload.customerTargets : []).slice(0, 2000).forEach(function(target) {
+    const houseId = workNoteText_(target && target.houseId, 160);
+    const key = normalizePancakeHouseId_(houseId);
+    if (!key) return;
+    map[key] = { houseId: houseId, projectId: workNoteText_(target.projectId, 160), customerName: workNoteText_(target.customerName, 240), year: Number(target.year) || 0, month: Number(target.month) || 0 };
+  });
+  return map;
+}
+
+function groupPancakeMessages_(conversation, rawMessages, target) {
+  const fallbackName = workNoteText_(conversation && conversation.page_customer && conversation.page_customer.name, 240) || workNoteText_(conversation && conversation.from && conversation.from.name, 240) || "Khách hàng";
+  const normalized = rawMessages.map(function(message, index) {
+    const content = pancakeMessageText_(message);
+    const sentAt = pancakeDateIso_(message && (message.inserted_at || message.created_at || message.sent_at || message.timestamp || message.time));
+    return { id: workNoteText_(message && (message.id || message.message_id), 180) || "message-" + index, senderName: pancakeMessageSender_(message, fallbackName), content: content, sentAt: sentAt };
+  }).filter(function(message) { return message.content && message.sentAt; }).sort(function(left, right) { return new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime(); });
+  const groups = [];
+  normalized.forEach(function(message) {
+    const last = groups[groups.length - 1];
+    const messageTime = new Date(message.sentAt).getTime();
+    if (!last || messageTime - new Date(last.lastMessageAt).getTime() > 2 * 60 * 60 * 1000) {
+      groups.push({ id: "pancake-" + String(conversation.id) + "-" + message.sentAt, conversationId: String(conversation.id), groupName: workNoteText_(conversation && conversation.from && conversation.from.name, 400), houseId: target.houseId, projectId: target.projectId, customerName: target.customerName || fallbackName, year: target.year, month: target.month, messages: [message], firstMessageAt: message.sentAt, lastMessageAt: message.sentAt, messageCount: 1 });
+    } else {
+      last.messages.push(message);
+      last.lastMessageAt = message.sentAt;
+      last.messageCount += 1;
+    }
+  });
+  return groups;
+}
+
+function loadCustomerMessages_(payload) {
+  const properties = PropertiesService.getScriptProperties();
+  if (!pancakeProperty_(PANCAKE_USER_TOKEN_PROPERTY) || !pancakeProperty_(PANCAKE_PAGE_TOKEN_PROPERTY)) return { ok: true, configured: false, messages: [] };
+  const targets = pancakeTargetMap_(payload);
+  const context = pancakePageContext_();
+  const cacheKey = "gmcrm-pancake-messages-" + Utilities.base64EncodeWebSafe(JSON.stringify(Object.keys(targets).sort())).slice(0, 100);
+  const cached = payload.refresh ? null : readCachedJson_(cacheKey);
+  if (cached) return cached;
+  const conversations = pancakeConversationPages_(context);
+  const groups = [];
+  conversations.forEach(function(conversation) {
+    const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
+    const houseKey = normalizePancakeHouseId_(pancakeHouseIdFromGroupName_(groupName));
+    // A Pancake group is useful to GM-CRM only when its name contains the
+    // GM marker and the extracted house code matches a loaded customer.
+    // Never surface an unassigned group in the all-customer overview.
+    if (!/\bGM\b/i.test(groupName) || !targets[houseKey]) return;
+    const target = targets[houseKey];
+    let messages;
+    try { messages = pancakeConversationMessages_(context, conversation); } catch (error) { return; }
+    groupPancakeMessages_(conversation, messages.filter(function(message) { return !pancakeIsPageMessage_(message, context.pageId); }), target).forEach(function(group) { groups.push(group); });
+  });
+  const states = readPancakeMessageStates_();
+  const stateById = {};
+  states.forEach(function(state) { stateById[String(state.id || "")] = state; });
+  const now = Date.now();
+  const active = groups.map(function(group) {
+    const state = stateById[group.id];
+    return state ? { ...group, status: state.status, resolvedAt: state.resolvedAt || "", statusUpdatedAt: state.statusUpdatedAt || "" } : { ...group, status: "new", resolvedAt: "", statusUpdatedAt: "" };
+  }).filter(function(group) { return group.status !== "resolved" || !group.resolvedAt || now - new Date(group.resolvedAt).getTime() < 24 * 60 * 60 * 1000; });
+  const result = { ok: true, configured: true, pageName: context.pageName, messages: active };
+  cacheJson_(cacheKey, result, 30);
+  return result;
+}
+
+function normalizePancakeMessageGroup_(group) {
+  group = group || {};
+  return {
+    id: workNoteText_(group.id, 220),
+    conversationId: workNoteText_(group.conversationId, 220),
+    groupName: workNoteText_(group.groupName, 400),
+    houseId: workNoteText_(group.houseId, 160),
+    projectId: workNoteText_(group.projectId, 160),
+    customerName: workNoteText_(group.customerName, 240),
+    year: Number(group.year) || 0,
+    month: Number(group.month) || 0,
+    messages: (Array.isArray(group.messages) ? group.messages : []).slice(0, 200).map(function(message) { return { id: workNoteText_(message && message.id, 180), senderName: workNoteText_(message && message.senderName, 160) || "Khách hàng", content: workNoteText_(message && message.content, 4000), sentAt: pancakeDateIso_(message && message.sentAt) }; }).filter(function(message) { return message.content && message.sentAt; }),
+    firstMessageAt: pancakeDateIso_(group.firstMessageAt),
+    lastMessageAt: pancakeDateIso_(group.lastMessageAt),
+    messageCount: Math.min(200, Number(group.messageCount) || 0),
+  };
+}
+
+function exportPancakeMessageWorkbook_(records) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const temporary = SpreadsheetApp.create("GM-CRM Tin nhắn khách temporary");
+  try {
+    const sheet = temporary.getSheets()[0];
+    sheet.setName("Tin nhắn khách");
+    const rows = [["Nhóm Pancake", "Mã nhà", "ID dự án", "Khách hàng", "Người nhắn", "Nội dung", "Ngày giờ khách nhắn", "Ngày giờ hoàn thiện", "Trạng thái"]];
+    records.filter(function(record) { return record && record.status === "resolved"; }).forEach(function(record) {
+      const messages = Array.isArray(record.messages) ? record.messages : [];
+      const content = messages.map(function(message) { return message.senderName + ": " + message.content; }).join("\n");
+      const times = messages.map(function(message) { return message.sentAt; }).filter(Boolean).join("\n");
+      rows.push([record.groupName, record.houseId, record.projectId, record.customerName, messages.map(function(message) { return message.senderName; }).filter(Boolean).join(", "), content, times, record.resolvedAt || "", "Đã xử lý"]);
+    });
+    if (rows.length) sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, rows[0].length).setFontWeight("bold");
+    SpreadsheetApp.flush();
+    const blob = DriveApp.getFileById(temporary.getId()).getBlob().getAs(EXCEL_MIME).setName(PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+    trashFilesByName_(root, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+    root.createFile(blob);
+  } finally {
+    DriveApp.getFileById(temporary.getId()).setTrashed(true);
+  }
+}
+
+function updateCustomerMessageStatus_(payload) {
+  const group = normalizePancakeMessageGroup_(payload.message);
+  const status = workNoteText_(payload.status, 20);
+  if (!group.id || PANCAKE_MESSAGE_STATUSES.indexOf(status) === -1) throw new Error("Trạng thái tin nhắn không hợp lệ.");
+  const states = readPancakeMessageStates_();
+  const next = states.filter(function(item) { return String(item.id || "") !== group.id; });
+  const state = { ...group, status: status, resolvedAt: status === "resolved" ? new Date().toISOString() : "", statusUpdatedAt: new Date().toISOString() };
+  next.push(state);
+  if (status === "resolved") exportPancakeMessageWorkbook_(next);
+  savePancakeMessageStates_(next);
+  return { ok: true, id: group.id, status: status, resolvedAt: state.resolvedAt };
 }
 
 // Published design rows live in one small registry at the root.  This is the

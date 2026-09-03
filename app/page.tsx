@@ -291,6 +291,33 @@ type AssignedDesignTask = DesignProgressRow & {
   houseId?: string;
 };
 
+type CustomerMessageStatus = "new" | "deferred" | "processing" | "resolved";
+
+type CustomerMessageLine = {
+  id: string;
+  senderName: string;
+  content: string;
+  sentAt: string;
+};
+
+type CustomerMessageGroup = {
+  id: string;
+  conversationId: string;
+  groupName: string;
+  houseId: string;
+  projectId: string;
+  customerName: string;
+  year: number;
+  month: number;
+  messages: CustomerMessageLine[];
+  firstMessageAt: string;
+  lastMessageAt: string;
+  messageCount: number;
+  status: CustomerMessageStatus;
+  resolvedAt?: string;
+  statusUpdatedAt?: string;
+};
+
 type OutstandingWorkNote = {
   note: WorkNote;
   location: CustomerLocation;
@@ -503,7 +530,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -543,6 +570,7 @@ function browserAudioMimeType(file: File) {
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫" },
   { label: "Ghi chú", icon: "✎" },
+  { label: "Tin nhắn", icon: "✉" },
   { label: "Tư vấn", icon: "⌂" },
   { label: "Thiết kế", icon: "▣" },
   { label: "Dự toán", icon: "⌁" },
@@ -567,6 +595,29 @@ const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|
 const isPreviewableFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => file.mimeType.startsWith("image/") || file.mimeType === "application/pdf" || /\.pdf$/i.test(file.name);
 const filePreviewUrl = (file: Pick<WorkflowFile, "id" | "viewUrl" | "downloadUrl">) => file.viewUrl || `https://drive.google.com/file/d/${encodeURIComponent(file.id)}/view` || file.downloadUrl;
 
+
+function customerMessageDate(value: string) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return date.toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function customerMessageStatusLabel(status: CustomerMessageStatus) {
+  return ({ new: "Mới", deferred: "Để sau", processing: "Đang xử lý", resolved: "Đã xử lý" } as Record<CustomerMessageStatus, string>)[status];
+}
+
+function normalizeCustomerMessageGroup(value: CustomerMessageGroup): CustomerMessageGroup {
+  const status = (["new", "deferred", "processing", "resolved"] as CustomerMessageStatus[]).includes(value.status) ? value.status : "new";
+  return {
+    ...value,
+    status,
+    messages: Array.isArray(value.messages) ? value.messages.map((message) => ({ ...message, senderName: String(message.senderName ?? "Khách hàng"), content: String(message.content ?? ""), sentAt: String(message.sentAt ?? "") })) : [],
+  };
+}
+
+function customerMessageHouseKey(value: string) {
+  return String(value ?? "").toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+}
 
 const personnelCategories: PersonnelCategory[] = [
   { id: "coordination", label: "Điều phối", icon: "⇄", description: "Điều phối công việc, lịch triển khai và nguồn lực" },
@@ -1385,6 +1436,14 @@ export default function Home() {
   const [assignedWorkNotes, setAssignedWorkNotes] = useState<AssignedWorkNote[]>([]);
   const [assignedDesignTasks, setAssignedDesignTasks] = useState<AssignedDesignTask[]>([]);
   const [workNotesCacheRevision, setWorkNotesCacheRevision] = useState(0);
+  const [customerMessages, setCustomerMessages] = useState<CustomerMessageGroup[]>([]);
+  const [loadingCustomerMessages, setLoadingCustomerMessages] = useState(false);
+  const [customerMessagesError, setCustomerMessagesError] = useState("");
+  const [customerMessageStatusBusyId, setCustomerMessageStatusBusyId] = useState("");
+  const [pancakeUserAccessToken, setPancakeUserAccessToken] = useState("");
+  const [pancakePageAccessToken, setPancakePageAccessToken] = useState("");
+  const [pancakePageName, setPancakePageName] = useState("Gm Manager");
+  const [savingPancakeConfig, setSavingPancakeConfig] = useState(false);
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
   const [editingWorkNote, setEditingWorkNote] = useState<WorkNote | null>(null);
@@ -1575,7 +1634,7 @@ export default function Home() {
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
-  const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation) => {
+  const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation, targetFolder = "Tư vấn") => {
     setSelectedCustomerProjectId(record.projectId);
     setSelectedYear(year);
     setSelectedMonth(month);
@@ -1592,6 +1651,7 @@ export default function Home() {
     setDocumentFiles([]);
     setDocumentFilesBySnapshotId({});
     setDocumentsError("");
+    setActiveFolder(targetFolder);
     void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
@@ -1605,7 +1665,7 @@ export default function Home() {
     if (!location) return;
     setHighlightWorkNoteId(noteId);
     setActiveFolder("Ghi chú");
-    selectCustomerForWorkflow(location);
+    selectCustomerForWorkflow(location, "Ghi chú");
     url.searchParams.delete("gmcrmProject");
     url.searchParams.delete("gmcrmNote");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
@@ -1938,6 +1998,64 @@ export default function Home() {
     if (nextNotes.length) writeDriveCache(cacheKey, nextNotes);
     else removeDriveCache(cacheKey);
     setWorkNotesCacheRevision((revision) => revision + 1);
+  };
+  const customerMessagesCacheKey = (location?: CustomerLocation | null) => location
+    ? "customer-messages:" + location.year + "-" + location.month + "-" + location.record.projectId
+    : "customer-messages:all";
+  const loadCustomerMessages = async (location?: CustomerLocation | null, refresh = false) => {
+    const cacheKey = customerMessagesCacheKey(location);
+    const cached = readDriveCache<CustomerMessageGroup[]>(cacheKey, 10 * 60 * 1000);
+    if (cached && !refresh) {
+      setCustomerMessages(cached.map(normalizeCustomerMessageGroup));
+      setCustomerMessagesError("");
+    }
+    if (!driveScriptUrl.trim()) return;
+    setLoadingCustomerMessages(!cached || refresh);
+    setCustomerMessagesError("");
+    const targets = (location ? [location] : customerLocations).filter((item) => item.record.houseId?.trim()).map((item) => ({
+      houseId: item.record.houseId,
+      projectId: item.record.projectId,
+      customerName: item.record.name,
+      year: item.year,
+      month: item.month,
+    }));
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; configured?: boolean; error?: string; messages?: CustomerMessageGroup[] }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "load-customer-messages",
+        customerTargets: targets,
+        refresh,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể nạp Tin nhắn khách.");
+      if (!result.configured) {
+        setCustomerMessagesError("Chưa cấu hình Pancake trong Apps Script.");
+        return;
+      }
+      const next = (Array.isArray(result.messages) ? result.messages : []).map(normalizeCustomerMessageGroup);
+      setCustomerMessages(next);
+      writeDriveCache(cacheKey, next);
+    } catch (error) {
+      if (!cached) setCustomerMessagesError(error instanceof Error ? error.message : "Không thể nạp Tin nhắn khách.");
+    } finally {
+      setLoadingCustomerMessages(false);
+    }
+  };
+  const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
+    if (customerMessageStatusBusyId) return;
+    const previous = customerMessages;
+    const next = previous.map((item) => item.id === message.id ? { ...item, status, resolvedAt: status === "resolved" ? new Date().toISOString() : "" } : item);
+    setCustomerMessages(next);
+    setCustomerMessageStatusBusyId(message.id);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "update-customer-message-status", message: { ...message, status }, status });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật trạng thái tin nhắn.");
+      writeDriveCache(customerMessagesCacheKey(selectedCustomerLocation), next);
+      setNotice(status === "resolved" ? "Đã lưu Tin nhắn khách vào Drive. Tin nhắn sẽ tự ẩn sau 1 ngày." : "Đã chuyển Tin nhắn khách sang “" + customerMessageStatusLabel(status) + "”.");
+    } catch (error) {
+      setCustomerMessages(previous);
+      setNotice(error instanceof Error ? error.message : "Không thể cập nhật trạng thái tin nhắn.");
+    } finally {
+      setCustomerMessageStatusBusyId("");
+    }
   };
   const addWorkNote = () => {
     if (!loggedInEmployee) { setNotice("Hãy đăng nhập trước khi tạo và giao việc."); setLoginOpen(true); return; }
@@ -2892,6 +3010,34 @@ export default function Home() {
     setNotice(config.driveUrl ? "Đã lưu kết nối Google Apps Script và Link Drive trên thiết bị này." : "Đã kết nối Google Apps Script trên thiết bị này.");
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth });
   };
+  const savePancakeConfig = async () => {
+    if (!driveScriptUrl.trim()) {
+      setNotice("Hãy lưu Web app URL trước khi cấu hình Pancake.");
+      return;
+    }
+    if (!pancakeUserAccessToken.trim() || !pancakePageAccessToken.trim()) {
+      setNotice("Cần nhập cả token cá nhân và token page Pancake.");
+      return;
+    }
+    setSavingPancakeConfig(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; pageName?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "save-pancake-config",
+        userAccessToken: pancakeUserAccessToken.trim(),
+        pageAccessToken: pancakePageAccessToken.trim(),
+        pageName: pancakePageName.trim() || "Gm Manager",
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu cấu hình Pancake.");
+      setPancakeUserAccessToken("");
+      setPancakePageAccessToken("");
+      setNotice("Đã kết nối Pancake page " + (result.pageName || pancakePageName || "Gm Manager") + ".");
+      void loadCustomerMessages(selectedCustomerLocation, true);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể lưu cấu hình Pancake.");
+    } finally {
+      setSavingPancakeConfig(false);
+    }
+  };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
@@ -2998,11 +3144,12 @@ export default function Home() {
   const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
-  const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (!loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
-  const hasActiveFolderAccess = !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
+  const canViewCustomerMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || employeePermissions.includes("Ghi chú")));
+  const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (folder.label === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
+  const hasActiveFolderAccess = activeFolder === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   useEffect(() => {
     if (!canViewNotesSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedWorkNotes([]); return; }
     let cancelled = false;
@@ -3044,6 +3191,20 @@ export default function Home() {
     const timer = window.setInterval(() => { void loadAssignments(); }, 10 * 1000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeFolder, canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerLocation]);
+  useEffect(() => {
+    if (!canViewCustomerMessages || !driveScriptUrl.trim()) {
+      setCustomerMessages([]);
+      setCustomerMessagesError("");
+      return;
+    }
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadCustomerMessages(selectedCustomerLocation);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [canViewCustomerMessages, driveScriptUrl, selectedCustomerProjectId, customerLocations.length]);
   useEffect(() => {
     if (!canViewDesignSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedDesignTasks([]); return; }
     let cancelled = false;
@@ -3575,6 +3736,47 @@ export default function Home() {
     <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
   </section>;
 
+  const openCustomerMessage = (message: CustomerMessageGroup) => {
+    const location = customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
+      ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
+    if (location) selectCustomerForWorkflow(location, "Tin nhắn");
+    else setActiveFolder("Tin nhắn");
+  };
+  const messageStatusClass = (status: CustomerMessageStatus) => status === "processing" ? "customer-message--processing" : status === "resolved" ? "customer-message--resolved" : "customer-message--alert";
+  const renderCustomerMessagesSummary = (className = "") => canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary " + className + (sidebarNotesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
+    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
+      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+    </button>
+    {sidebarNotesOpen && <div className="sidebar-notes__list">
+      {loadingCustomerMessages && !customerMessages.length ? <p className="sidebar-notes__empty">Đang nạp Tin nhắn khách…</p>
+        : customerMessagesError && !customerMessages.length ? <p className="sidebar-notes__empty">{customerMessagesError}</p>
+          : customerMessages.length ? customerMessages.slice().sort((left, right) => Number(right.status === "resolved") - Number(left.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => (
+            <button type="button" className={"sidebar-note customer-message-summary__item " + messageStatusClass(message.status)} key={message.id} onClick={() => openCustomerMessage(message)}>
+              <i className={message.status === "processing" ? "sidebar-notes__dot--orange" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.customerName || message.houseId || message.groupName}</b><small>{message.groupName} · {message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
+            </button>
+          )) : <p className="sidebar-notes__empty">Chưa có tin nhắn khách phù hợp.</p>}
+    </div>}
+  </section> : null;
+  const renderCustomerMessages = () => {
+    const visibleMessages = selectedCustomerLocation
+      ? customerMessages.filter((message) => (message.projectId && message.projectId === selectedCustomerLocation.record.projectId) || customerMessageHouseKey(message.houseId) === customerMessageHouseKey(selectedCustomerLocation.record.houseId ?? ""))
+      : customerMessages;
+    return <section className="customer-messages" aria-label="Tin nhắn khách">
+      <header className="customer-messages__heading">
+        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? selectedCustomerLocation.record.name : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Chỉ nhóm có dạng <b>Mã nhà-GM-Nội dung</b> mới được ghép với hồ sơ dự án.</p></div>
+        <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Đồng bộ Pancake mỗi phút"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
+      </header>
+      <div className="customer-messages__list">
+        {customerMessagesError && <p className="customer-messages__empty">{customerMessagesError}</p>}
+        {loadingCustomerMessages && !visibleMessages.length ? <p className="customer-messages__empty">Đang nạp Tin nhắn khách…</p>
+          : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
+            <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
+            <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "deferred" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "deferred")} disabled={customerMessageStatusBusyId === message.id}>Để sau</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã xử lý</button></div>
+          </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
+      </div>
+    </section>;
+  };
   const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
       <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
@@ -3582,7 +3784,7 @@ export default function Home() {
     {sidebarNotesOpen && <div className="sidebar-notes__list">
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
-        return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => { setActiveFolder("Ghi chú"); selectCustomerForWorkflow(location); }}>
+        return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
           <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
@@ -3605,8 +3807,7 @@ export default function Home() {
           const index = currentRows.findIndex((item) => item.id === task.id);
           const mergedRows = index >= 0 ? currentRows.map((item) => item.id === task.id ? { ...item, ...task } : item) : [...currentRows, task];
           persistRecord({ ...location.record, [field]: mergedRows, progressHydrated: true }, location.year, location.month);
-          setActiveFolder("Thiết kế");
-          selectCustomerForWorkflow(location);
+          selectCustomerForWorkflow(location, "Thiết kế");
         }}>
           <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.projectId} · Dự kiến {task.plannedDate || "—"}</small></span>
         </button>;
@@ -3665,9 +3866,10 @@ export default function Home() {
               </section>
             </div>
           ) : (
-            <div className={`customer-gateway__overview ${canViewNotesSummary || canViewDesignSummary ? "" : "customer-gateway__overview--no-notes"}`}>
+            <div className={`customer-gateway__overview ${canViewNotesSummary || canViewCustomerMessages || canViewDesignSummary ? "" : "customer-gateway__overview--no-notes"}`}>
               <div className="customer-gateway__summaries">
                 {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
+                {renderCustomerMessagesSummary("gateway-notes gateway-notes--side")}
                 {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
               </div>
               <div className="customer-gateway__body">
@@ -3723,6 +3925,7 @@ export default function Home() {
           ))}
         </nav>
         {renderOutstandingNotesSummary()}
+        {renderCustomerMessagesSummary()}
         {renderOutstandingDesignSummary()}
       </aside>
 
@@ -3741,6 +3944,11 @@ export default function Home() {
           <section className="workflow-page">
             {renderWorkflowCustomerSearch()}
             {selectedCustomerLocation && renderWorkNotes()}
+          </section>
+        ) : activeFolder === "Tin nhắn" ? (
+          <section className="customer-messages-workspace">
+            {renderWorkflowCustomerSearch()}
+            {renderCustomerMessages()}
           </section>
         ) : activeFolder === "Tư vấn" ? (
           <section className="consulting-view">
@@ -3876,11 +4084,18 @@ export default function Home() {
           <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
-            <p className="drive-config-dialog__hint">Chỉ cần dán Web app URL. GM-CRM sẽ nhớ kết nối trên thiết bị này.</p>
+            <p className="drive-config-dialog__hint">Dán Web app URL. Kết nối Drive được nhớ trên thiết bị này. Token Pancake được lưu trong Script Properties, không lưu trên GitHub hay trình duyệt.</p>
             <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
             {isBuiltInAdminLoggedIn && <label>Link Google Drive của admin<input type="url" value={driveLinkUrl} onChange={(event) => setDriveLinkUrl(event.target.value.trim())} placeholder="https://drive.google.com/drive/folders/..." /><small>Admin có thể thay link này bất cứ lúc nào. Link được lưu trên thiết bị hiện tại.</small></label>}
             {isBuiltInAdminLoggedIn && driveLinkUrl && <a className="script-link" href={driveLinkUrl} target="_blank" rel="noreferrer">Mở Link Drive đã lưu ↗</a>}
+            {isBuiltInAdminLoggedIn && <fieldset className="pancake-config">
+              <legend>Pancake · Tin nhắn khách</legend>
+              <label>Tên page<input value={pancakePageName} onChange={(event) => setPancakePageName(event.target.value)} placeholder="Gm Manager" /></label>
+              <label>User Access Token<input type="password" value={pancakeUserAccessToken} onChange={(event) => setPancakeUserAccessToken(event.target.value)} placeholder="Dán token cá nhân Pancake" autoComplete="off" /></label>
+              <label>Page Access Token<input type="password" value={pancakePageAccessToken} onChange={(event) => setPancakePageAccessToken(event.target.value)} placeholder="Dán token page Pancake" autoComplete="off" /></label>
+              <button type="button" className="add-button" onClick={() => void savePancakeConfig()} disabled={savingPancakeConfig}>{savingPancakeConfig ? "Đang kiểm tra…" : "Lưu kết nối Pancake"}</button>
+            </fieldset>}
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
         </div>
