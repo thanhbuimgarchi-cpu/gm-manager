@@ -143,14 +143,44 @@ test("deleting a document day trashes only that day and removes its manifest met
 
 test("work notes stay black until an assignee accepts the work", () => {
   const context = loadContext();
+  const due = new Date();
+  due.setDate(due.getDate() + 2);
+  const dueDate = [String(due.getDate()).padStart(2, "0"), String(due.getMonth() + 1).padStart(2, "0"), due.getFullYear()].join("/");
   const notes = context.normalizeWorkNotes_([
-    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", content: "Duyệt bản vẽ", dueDate: "2026-08-31", actualDate: "31/08/2026", acceptedAt: "28/08/2026", status: "Đỏ" },
+    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", content: "Duyệt bản vẽ", dueDate, actualDate: "31/08/2026", acceptedAt: "28/08/2026", status: "Đỏ" },
     { id: "note-2", priority: "Không hợp lệ", workType: "Khác", dueDate: "31/08/2026", actualDate: "2026/08/31", status: "Tím" },
   ]);
-  assert.deepEqual(JSON.parse(JSON.stringify(notes)), [
-    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", assigneeEmail: "", creatorEmail: "", creatorName: "", acceptedBy: "", content: "Duyệt bản vẽ", dueDate: "31/08/2026", actualDate: "31/08/2026", completedAt: "", acceptedAt: "28/08/2026", status: "Đỏ" },
+  const normalized = JSON.parse(JSON.stringify(notes));
+  assert.deepEqual(normalized, [
+    { id: "note-1", priority: "Gấp", workType: "Thiết kế", assignee: "An", assigneeEmail: "", creatorEmail: "", creatorName: "", acceptedBy: "", content: "Duyệt bản vẽ", dueDate, actualDate: "31/08/2026", completedAt: "", acceptedAt: "28/08/2026", status: "Đỏ" },
     { id: "note-2", priority: "Bình thường", workType: "Tư vấn", assignee: "", assigneeEmail: "", creatorEmail: "", creatorName: "", acceptedBy: "", content: "", dueDate: "31/08/2026", actualDate: "", completedAt: "", acceptedAt: "", status: "Đen" },
   ]);
+});
+
+test("publishing work notes falls back to shared script properties when Drive is read-only", () => {
+  const values = new Map();
+  const properties = {
+    getProperty: (key) => values.get(key) || null,
+    setProperty: (key, value) => values.set(key, String(value)),
+    deleteProperty: (key) => values.delete(key),
+  };
+  const context = loadContext({
+    Utilities: { base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url") },
+    PropertiesService: { getScriptProperties: () => properties },
+  });
+  context.workNotesFolder_ = () => { throw new Error("Truy cập bị từ chối: DriveApp."); };
+  context.cacheJson_ = () => {};
+  context.syncActiveWorkNotes_ = () => {};
+  const payload = {
+    year: 2026,
+    month: 9,
+    projectId: "GM03092026TEST",
+    notes: [{ id: "note-1", priority: "Gấp", workType: "Tư vấn", content: "Gọi khách", dueDate: "05/09/2026" }],
+  };
+  const result = context.syncWorkNotes_(payload);
+  assert.equal(result.ok, true);
+  assert.equal(result.storage, "script-properties");
+  assert.equal(context.loadWorkNotes_(payload).notes[0].content, "Gọi khách");
 });
 
 test("admin receives the active work-note overview across every customer", () => {

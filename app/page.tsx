@@ -1876,8 +1876,9 @@ export default function Home() {
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
   const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
     if (!location || !driveScriptUrl.trim()) return;
-    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes });
+    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; storage?: string; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes });
     if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ghi chú được giao.");
+    return result;
   };
   const loadWorkNotes = async () => {
     if (!selectedCustomerLocation) return;
@@ -2023,7 +2024,10 @@ export default function Home() {
     const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
     persistWorkNotes(next);
     setNewWorkNote(null);
-    try { await syncWorkNotesToSharedStore(next); setNotice("Đã giao việc và đồng bộ cho người được gắn."); } catch (error) { setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc."); }
+    try {
+      const result = await syncWorkNotesToSharedStore(next);
+      setNotice(result?.driveWarning ? `Đã giao việc và lưu dùng chung. ${result.driveWarning}` : "Đã giao việc và đồng bộ cho người được gắn.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc."); }
   };
   const updateWorkNote = (id: string, field: Exclude<keyof WorkNote, "id">, value: string) => {
     persistWorkNotes(workNotes.map((note) => note.id === id ? { ...note, [field]: value } as WorkNote : note));

@@ -1225,9 +1225,48 @@ const WORK_NOTES_ADMIN_ACCOUNT = "admin";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
 const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
+// A shared Apps Script property store keeps active notes working when the
+// account running the Web App can read Drive but cannot write to the shared
+// root folder. Values are split because Script Properties limits one value to
+// roughly 9 KB. Drive remains the preferred archival store when writable.
+const WORK_NOTES_PROPERTY_PREFIX = "gmcrm-work-notes-state-";
+const ACTIVE_WORK_NOTES_PROPERTY_KEY = "gmcrm-active-work-notes-state";
+const SCRIPT_PROPERTY_CHUNK_SIZE = 8000;
 
 function workNotesCacheKey_(details) {
   return "gmcrm-work-notes-" + details.year + "-" + details.month + "-" + details.projectId;
+}
+
+function workNotesPropertyKey_(details) {
+  return WORK_NOTES_PROPERTY_PREFIX + details.year + "-" + details.month + "-" + Utilities.base64EncodeWebSafe(details.projectId).replace(/=+$/g, "");
+}
+
+function readPropertyJson_(key) {
+  const properties = PropertiesService.getScriptProperties();
+  const count = Number(properties.getProperty(key + ":count") || 0);
+  if (!count) return null;
+  let text = "";
+  for (let index = 0; index < count; index += 1) text += properties.getProperty(key + ":" + index) || "";
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (error) { return null; }
+}
+
+function writePropertyJson_(key, value) {
+  const properties = PropertiesService.getScriptProperties();
+  const text = JSON.stringify(value);
+  const chunks = [];
+  for (let offset = 0; offset < text.length; offset += SCRIPT_PROPERTY_CHUNK_SIZE) chunks.push(text.slice(offset, offset + SCRIPT_PROPERTY_CHUNK_SIZE));
+  const previousCount = Number(properties.getProperty(key + ":count") || 0);
+  chunks.forEach(function(chunk, index) { properties.setProperty(key + ":" + index, chunk); });
+  for (let index = chunks.length; index < previousCount; index += 1) properties.deleteProperty(key + ":" + index);
+  properties.setProperty(key + ":count", String(chunks.length));
+}
+
+function clearPropertyJson_(key) {
+  const properties = PropertiesService.getScriptProperties();
+  const count = Number(properties.getProperty(key + ":count") || 0);
+  for (let index = 0; index < count; index += 1) properties.deleteProperty(key + ":" + index);
+  properties.deleteProperty(key + ":count");
 }
 
 function workNotesFolder_(year, month, projectId, createMissing) {
@@ -1305,10 +1344,16 @@ function activeWorkNotesFile_() {
 }
 
 function readActiveWorkNotes_() {
+  const shared = readPropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY);
+  if (Array.isArray(shared)) return shared;
   try { const value = JSON.parse(activeWorkNotesFile_().getBlob().getDataAsString() || "[]"); return Array.isArray(value) ? value : []; } catch (error) { return []; }
 }
 
-function saveActiveWorkNotes_(records) { activeWorkNotesFile_().setContent(JSON.stringify(records.slice(-3000))); }
+function saveActiveWorkNotes_(records) {
+  const normalized = records.slice(-3000);
+  writePropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY, normalized);
+  try { activeWorkNotesFile_().setContent(JSON.stringify(normalized)); } catch (error) { /* Shared property storage is the fallback when Drive is read-only. */ }
+}
 
 function syncActiveWorkNotes_(details, notes, payload) {
   const previous = readActiveWorkNotes_().filter(function(item) { return !(Number(item.year) === details.year && Number(item.month) === details.month && String(item.projectId) === details.projectId); });
@@ -1329,6 +1374,8 @@ function loadAssignedWorkNotes_(payload) {
 function loadWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
   const cacheKey = workNotesCacheKey_(details);
+  const shared = readPropertyJson_(workNotesPropertyKey_(details));
+  if (Array.isArray(shared)) return { ok: true, notes: normalizeWorkNotes_(shared), source: "script-properties" };
   const cached = readCachedJson_(cacheKey);
   if (cached) return { ok: true, notes: normalizeWorkNotes_(cached), source: "cache" };
   const folder = workNotesFolder_(details.year, details.month, details.projectId, false);
@@ -1352,15 +1399,24 @@ function loadWorkNotes_(payload) {
 
 function syncWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
-  const folder = workNotesFolder_(details.year, details.month, details.projectId, true);
   const notes = normalizeWorkNotes_(payload.notes);
+  const propertyKey = workNotesPropertyKey_(details);
+  writePropertyJson_(propertyKey, notes);
   cacheJson_(workNotesCacheKey_(details), notes, 21600);
-  const content = JSON.stringify(notes);
-  const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
-  if (file) file.setContent(content);
-  else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+  let driveSaved = false;
+  try {
+    const folder = workNotesFolder_(details.year, details.month, details.projectId, true);
+    const content = JSON.stringify(notes);
+    const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
+    if (file) file.setContent(content);
+    else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+    driveSaved = true;
+  } catch (error) {
+    // Publishing must not fail just because the connected Drive folder is
+    // read-only. The shared property store still reaches every employee.
+  }
   syncActiveWorkNotes_(details, notes, payload);
-  return { ok: true, savedCount: notes.length };
+  return { ok: true, savedCount: notes.length, storage: driveSaved ? "drive" : "script-properties", driveWarning: driveSaved ? "" : "Drive hiện chỉ có quyền xem; ghi chú đã lưu vào kho dùng chung Apps Script." };
 }
 
 function completedWorkNotesFolder_(details) {
