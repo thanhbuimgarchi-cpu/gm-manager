@@ -417,6 +417,18 @@ function isDriveUrl(value: string) {
   }
 }
 
+function driveFolderIdFromUrl(value: string) {
+  const text = String(value || "").trim();
+  const match = /\/folders\/([A-Za-z0-9_-]+)/.exec(text);
+  if (match?.[1]) return match[1];
+  try {
+    const queryId = new URL(text).searchParams.get("id") || "";
+    return /^[A-Za-z0-9_-]{10,}$/.test(queryId) ? queryId : "";
+  } catch {
+    return /^[A-Za-z0-9_-]{10,}$/.test(text) ? text : "";
+  }
+}
+
 function desktopBridge() {
   return (window as Window & { gmDesktop?: DesktopNotificationBridge }).gmDesktop;
 }
@@ -594,6 +606,7 @@ const documentWorkOptions = ["Chưa gắn", "Tư vấn", "Thiết kế", "Dự t
 const workNotePriorities: WorkNotePriority[] = ["Gấp", "Cần lập tức", "Bình thường"];
 const workNoteTypes = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"] as const;
 const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|tmp|lck|lock)|^~\$)/i.test(fileName.trim());
+const isSpreadsheetFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => /spreadsheet|ms-excel|text\/csv/i.test(file.mimeType) || /\.(?:xlsx?|xlsm|csv)$/i.test(file.name.trim());
 const isPreviewableFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => file.mimeType.startsWith("image/") || file.mimeType === "application/pdf" || /\.pdf$/i.test(file.name);
 const filePreviewUrl = (file: Pick<WorkflowFile, "id" | "viewUrl" | "downloadUrl">) => file.viewUrl || `https://drive.google.com/file/d/${encodeURIComponent(file.id)}/view` || file.downloadUrl;
 
@@ -1323,6 +1336,14 @@ function removeDriveCache(key: string) {
     window.localStorage.removeItem(`${driveCachePrefix}${key}`);
   } catch {
     // Cache removal is optional; the server result remains authoritative.
+  }
+}
+
+function clearDriveClientCache() {
+  try {
+    Object.keys(window.localStorage).filter((key) => key.startsWith(driveCachePrefix)).forEach((key) => window.localStorage.removeItem(key));
+  } catch {
+    // Cache cleanup is optional; the next Drive refresh remains authoritative.
   }
 }
 
@@ -2208,8 +2229,9 @@ export default function Home() {
         refresh,
       });
       if (!response.ok || !result.ok || !result.files) throw new Error(result.error || "Không thể nạp danh sách tệp.");
-      writeDriveCache(clientCacheKey, result.files ?? []);
-      setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: result.files ?? [] }));
+      const visibleFiles = (result.files ?? []).filter((file) => file.isFolder || !isSpreadsheetFile(file));
+      writeDriveCache(clientCacheKey, visibleFiles);
+      setWorkflowFilesByFolder((current) => ({ ...current, [cacheKey]: visibleFiles }));
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : "Không thể nạp danh sách tệp.";
       const message = rawMessage.includes("Thiếu dữ liệu hồ sơ") ? "Apps Script chưa được cập nhật chức năng nạp danh sách tệp." : rawMessage;
@@ -3018,7 +3040,7 @@ export default function Home() {
     updateFunctionalRoom(floorId, roomId, "room", match ?? "");
   };
 
-  const saveDriveConfig = (event: FormEvent<HTMLFormElement>) => {
+  const saveDriveConfig = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const config = { scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
@@ -3029,10 +3051,25 @@ export default function Home() {
       setNotice("Link Drive cần là đường dẫn https://drive.google.com hoặc https://docs.google.com hợp lệ.");
       return;
     }
+    const folderId = driveFolderIdFromUrl(config.driveUrl);
+    if (config.driveUrl && !folderId) {
+      setNotice("Link Drive cần trỏ trực tiếp đến một thư mục (dạng /drive/folders/...).");
+      return;
+    }
+    if (folderId) {
+      try {
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: config.scriptUrl }, { action: "set-drive-root", folderId, driveUrl: config.driveUrl });
+        if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đổi thư mục Drive dùng chung.");
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Không thể đổi thư mục Drive dùng chung.");
+        return;
+      }
+    }
+    clearDriveClientCache();
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
     setNotice(config.driveUrl ? "Đã lưu kết nối Google Apps Script và Link Drive trên thiết bị này." : "Đã kết nối Google Apps Script trên thiết bị này.");
-    void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth });
+    void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth, force: true });
   };
   const savePancakeConfig = async () => {
     if (!driveScriptUrl.trim()) {
@@ -3593,7 +3630,7 @@ export default function Home() {
     </section>;
   };
   const renderDocumentLibrary = () => {
-    const visibleDocumentFiles = documentFiles.filter((file) => !isHiddenDocumentFile(file.name));
+    const visibleDocumentFiles = documentFiles.filter((file) => !isHiddenDocumentFile(file.name) && !isSpreadsheetFile(file));
     const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
       title,
       files: visibleDocumentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),

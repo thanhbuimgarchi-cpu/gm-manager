@@ -35,6 +35,28 @@ test("Drive folder matching tolerates Unicode normalization and casing", () => {
   assert.equal(context.normalizeDriveName_(composed), context.normalizeDriveName_(decomposed));
 });
 
+test("Drive root links can be normalized and saved for all devices", () => {
+  const values = new Map();
+  const folder = { getName: () => "GM Manager" };
+  const context = loadContext({
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => values.get(key) || "", setProperty: (key, value) => values.set(key, value) }) },
+    DriveApp: { getFolderById: (id) => { assert.equal(id, "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu"); return folder; } },
+  });
+  assert.equal(context.normalizeDriveFolderId_("https://drive.google.com/drive/folders/1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu?usp=sharing"), "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu");
+  const saved = context.setDriveRootFolder_({ driveUrl: "https://drive.google.com/drive/folders/1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu" });
+  assert.equal(saved.ok, true);
+  assert.equal(saved.folderId, "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu");
+  assert.equal(saved.folderName, "GM Manager");
+  assert.equal(values.get("gmcrm-drive-root-folder-id"), "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu");
+});
+
+test("Drive listings exclude spreadsheet files", () => {
+  const context = loadContext();
+  assert.equal(context.isSpreadsheetFile_("Phiếu thông tin khách hàng.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), true);
+  assert.equal(context.isSpreadsheetFile_("danh-sach.csv", "text/csv"), true);
+  assert.equal(context.isSpreadsheetFile_("hop-dong.pdf", "application/pdf"), false);
+});
+
 test("getOrCreateFolder_ reuses the oldest folder and trashes empty duplicates", () => {
   const older = folder("Nghiệm thu", "2026-01-01T00:00:00Z");
   const newer = folder("NGHIỆM THU".normalize("NFD"), "2026-02-01T00:00:00Z");

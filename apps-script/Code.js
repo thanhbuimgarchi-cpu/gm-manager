@@ -10,6 +10,7 @@
  */
 
 const ROOT_FOLDER_ID = "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu";
+const DRIVE_ROOT_FOLDER_PROPERTY_KEY = "gmcrm-drive-root-folder-id";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const SCRIPT_PROJECT_ID = "1E2YbfpBHw2HpLySbRjoAPJ72__mekfu3NwoYwTcLnCj4qSPSNACV5KfA";
@@ -83,6 +84,31 @@ function redeployLatest(payload) {
   }
 }
 
+function normalizeDriveFolderId_(value) {
+  const text = String(value || "").trim();
+  const fromUrl = /\/folders\/([A-Za-z0-9_-]+)/.exec(text);
+  const id = fromUrl ? fromUrl[1] : text;
+  return /^[A-Za-z0-9_-]{10,}$/.test(id) ? id : "";
+}
+
+function configuredRootFolderId_() {
+  const saved = normalizeDriveFolderId_(PropertiesService.getScriptProperties().getProperty(DRIVE_ROOT_FOLDER_PROPERTY_KEY));
+  return saved || ROOT_FOLDER_ID;
+}
+
+function rootFolder_() {
+  return DriveApp.getFolderById(configuredRootFolderId_());
+}
+
+function setDriveRootFolder_(payload) {
+  const folderId = normalizeDriveFolderId_(payload.folderId || payload.driveUrl);
+  if (!folderId) throw new Error("Link thư mục Drive không hợp lệ.");
+  const folder = DriveApp.getFolderById(folderId);
+  const properties = PropertiesService.getScriptProperties();
+  properties.setProperty(DRIVE_ROOT_FOLDER_PROPERTY_KEY, folderId);
+  return { ok: true, folderId: folderId, folderName: folder.getName() };
+}
+
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
@@ -128,6 +154,7 @@ function doPost(event) {
       if (payload.action === "register-employee-account") return json_(registerEmployeeAccount_(payload));
       if (payload.action === "request-password-reset") return json_(requestEmployeePasswordReset_(payload));
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
+      if (payload.action === "set-drive-root") return json_(setDriveRootFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
@@ -312,9 +339,13 @@ function splitTranscript_(text) {
   return chunks;
 }
 
+function driveScopedCacheKey_(key) {
+  return "gmcrm-root-" + configuredRootFolderId_() + "-" + key;
+}
+
 function readCachedJson_(key) {
   try {
-    const raw = CacheService.getScriptCache().get(key);
+    const raw = CacheService.getScriptCache().get(driveScopedCacheKey_(key));
     return raw ? JSON.parse(raw) : null;
   } catch (error) {
     return null;
@@ -323,14 +354,14 @@ function readCachedJson_(key) {
 
 function cacheJson_(key, value, seconds) {
   try {
-    CacheService.getScriptCache().put(key, JSON.stringify(value), seconds);
+    CacheService.getScriptCache().put(driveScopedCacheKey_(key), JSON.stringify(value), seconds);
   } catch (error) {
     // A large result simply bypasses the server cache; Drive loading still works.
   }
 }
 
 function loadConsultingWorkspace_(payload) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
   if (!customers) return { ok: true, years: [] };
 
@@ -364,7 +395,7 @@ function loadConsultingWorkspace_(payload) {
 function customerPortalShare_(payload) {
   const shareToken = normalizeCustomerShareToken_(payload.shareToken);
   if (!shareToken) throw new Error("Link xem dự án không hợp lệ.");
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
   const match = customers && findCustomerPortalShare_(customers, shareToken);
   if (!match) throw new Error("Link xem dự án đã hết hạn hoặc không hợp lệ.");
@@ -1118,6 +1149,7 @@ function listWorkflowFiles_(payload) {
       const isFolder = item.mimeType === "application/vnd.google-apps.folder";
       if (isFolder && item.name.indexOf("-") === 0) return;
       if (!isFolder && isSpecialWorkflowWorkbook_(item.name)) return;
+      if (!isFolder && isSpreadsheetFile_(item.name, item.mimeType)) return;
       const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
       files.push({
         id: item.id,
@@ -1145,6 +1177,7 @@ function listWorkflowFiles_(payload) {
       const file = iterator.next();
       if (file.getName() === WORK_NOTES_FILE_NAME) continue;
       if (isSpecialWorkflowWorkbook_(file.getName())) continue;
+      if (isSpreadsheetFile_(file.getName(), file.getMimeType())) continue;
       const fileUpdated = file.getLastUpdated();
       files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(fileUpdated, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: fileUpdated.getTime() });
     }
@@ -1191,7 +1224,7 @@ function createWorkflowDateFolder_(payload) {
   const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
   const folderName = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
   const folder = getOrCreateFolder_(workflowFolder, folderName);
-  CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
+  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow)));
   return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
 }
 
@@ -1216,7 +1249,7 @@ function uploadWorkflowFile_(payload) {
   trashFilesByName_(workflowFolder, fileName);
   const blob = Utilities.newBlob(bytes, String(upload.mimeType || "application/octet-stream"), fileName);
   const file = workflowFolder.createFile(blob);
-  CacheService.getScriptCache().remove("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow));
+  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow)));
   return { ok: true, fileId: file.getId(), fileName: fileName, fileUrl: file.getUrl(), folderUrl: workflowFolder.getUrl() };
 }
 
@@ -1362,7 +1395,7 @@ function workNoteStatus_(acceptedAt, dueDate) {
 }
 
 function activeWorkNotesFile_() {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const file = findFileByName_(root, ACTIVE_WORK_NOTES_FILE_NAME);
   return file || root.createFile(ACTIVE_WORK_NOTES_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
 }
@@ -1444,7 +1477,7 @@ function syncWorkNotes_(payload) {
 }
 
 function completedWorkNotesFolder_(details) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const customers = getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME);
   const yearFolder = getOrCreateFolder_(customers, String(details.year));
   return getOrCreateFolder_(yearFolder, "T" + details.month);
@@ -1569,7 +1602,7 @@ function savePancakeConfig_(payload) {
 }
 
 function pancakeMessageStateFile_() {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const file = findFileByName_(root, PANCAKE_MESSAGE_STATE_FILE_NAME);
   return file || root.createFile(PANCAKE_MESSAGE_STATE_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
 }
@@ -1751,7 +1784,7 @@ function normalizePancakeMessageGroup_(group) {
 }
 
 function exportPancakeMessageWorkbook_(records) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const temporary = SpreadsheetApp.create("GM-CRM Tin nhắn khách temporary");
   try {
     const sheet = temporary.getSheets()[0];
@@ -1794,7 +1827,7 @@ const ACTIVE_DESIGN_TASKS_FILE_NAME = "_gmcrm_thiet_ke_dang_giao.json";
 const DESIGN_TASK_KINDS = ["architecture", "interior", "acceptance"];
 
 function activeDesignTasksFile_() {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const file = findFileByName_(root, ACTIVE_DESIGN_TASKS_FILE_NAME);
   return file || root.createFile(ACTIVE_DESIGN_TASKS_FILE_NAME, "[]", MimeType.PLAIN_TEXT);
 }
@@ -2010,7 +2043,7 @@ function documentCachePrefix_(year, month, projectId) {
 }
 
 function clearDocumentCache_(year, month, projectId) {
-  CacheService.getScriptCache().remove(documentCachePrefix_(year, month, projectId) + "-latest");
+  CacheService.getScriptCache().remove(driveScopedCacheKey_(documentCachePrefix_(year, month, projectId) + "-latest"));
 }
 
 function archiveDocumentFile_(customerFolder, sourceFile, work, replaceExisting) {
@@ -2049,7 +2082,7 @@ function archiveDocumentFile_(customerFolder, sourceFile, work, replaceExisting)
 }
 
 function seedExistingDocuments_(year, month, projectId) {
-  const seedKey = documentCachePrefix_(year, month, projectId) + "-seed";
+  const seedKey = driveScopedCacheKey_(documentCachePrefix_(year, month, projectId) + "-seed");
   if (CacheService.getScriptCache().get(seedKey)) return;
   const customerFolder = getCustomerFolder_(year, month, projectId, false);
   if (!customerFolder) return;
@@ -2060,6 +2093,7 @@ function seedExistingDocuments_(year, month, projectId) {
     while (files.hasNext()) {
       const file = files.next();
       if (isHiddenDocumentFile_(file.getName())) continue;
+      if (isSpreadsheetFile_(file.getName(), file.getMimeType())) continue;
       // Existing files are copied once into the latest daily folder, then the
       // user can decide whether they are continuous or daily documents.
       archiveDocumentFile_(customerFolder, file, work, false);
@@ -2090,6 +2124,7 @@ function projectSourceFiles_(customerFolder) {
     while (files.hasNext()) {
       const file = files.next();
       if (isHiddenDocumentFile_(file.getName())) continue;
+      if (isSpreadsheetFile_(file.getName(), file.getMimeType())) continue;
       const documentKey = "system:" + work + ":" + file.getName();
       sources[documentKey] = { file: file, workflow: work };
     }
@@ -2117,6 +2152,7 @@ function listDocuments_(payload) {
       listDriveChildrenMetadata_(target.folder.getId()).forEach(function(item) {
         if (item.mimeType === "application/vnd.google-apps.folder") return;
         if (isHiddenDocumentFile_(item.name)) return;
+        if (isSpreadsheetFile_(item.name, item.mimeType)) return;
         const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
         const meta = normalizeDocumentMeta_(manifest.files[item.id], { getId: function() { return item.id; } }, "Chưa gắn");
         files.push({
@@ -2135,6 +2171,7 @@ function listDocuments_(payload) {
       while (iterator.hasNext()) {
         const file = iterator.next();
         if (isHiddenDocumentFile_(file.getName())) continue;
+        if (isSpreadsheetFile_(file.getName(), file.getMimeType())) continue;
         const modified = file.getLastUpdated();
         const meta = normalizeDocumentMeta_(manifest.files[file.getId()], file, "Chưa gắn");
         files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), work: meta.work, updatedAtMillis: modified.getTime() });
@@ -2151,6 +2188,7 @@ function listThreeDFolderFiles_(folder) {
   try {
     listDriveChildrenMetadata_(folder.getId()).forEach(function(item) {
       if (item.mimeType === "application/vnd.google-apps.folder" || isHiddenDocumentFile_(item.name)) return;
+      if (isSpreadsheetFile_(item.name, item.mimeType)) return;
       const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
       files.push({
         id: item.id,
@@ -2167,6 +2205,7 @@ function listThreeDFolderFiles_(folder) {
     while (iterator.hasNext()) {
       const file = iterator.next();
       if (isHiddenDocumentFile_(file.getName())) continue;
+      if (isSpreadsheetFile_(file.getName(), file.getMimeType())) continue;
       const modified = file.getLastUpdated();
       files.push({ id: file.getId(), name: file.getName(), downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(file.getId()), viewUrl: driveFileViewUrl_(file.getId()), updatedAt: Utilities.formatDate(modified, "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"), mimeType: file.getMimeType(), updatedAtMillis: modified.getTime() });
     }
@@ -2302,7 +2341,7 @@ function updateDocumentMetadata_(payload) {
 }
 
 function personnelFolder_() {
-  return getOrCreateFolder_(DriveApp.getFolderById(ROOT_FOLDER_ID), "Nhân lực");
+  return getOrCreateFolder_(rootFolder_(), "Nhân lực");
 }
 
 function loadPersonnel_() {
@@ -2501,6 +2540,14 @@ function isSpecialWorkflowWorkbook_(name) {
   ].some(function(prefix) { return normalized.indexOf(prefix.toLowerCase()) === 0; });
 }
 
+function isSpreadsheetFile_(name, mimeType) {
+  const normalizedMime = String(mimeType || "").toLowerCase();
+  return normalizedMime.indexOf("spreadsheet") >= 0
+    || normalizedMime === "application/vnd.ms-excel"
+    || normalizedMime === "text/csv"
+    || /\.(?:xlsx?|xlsm|csv)$/i.test(String(name || ""));
+}
+
 function getCustomerFolder_(year, month, projectId, createMissing) {
   const folderCacheKey = "gmcrm-customer-folder-" + year + "-" + month + "-" + projectId;
   const cachedFolder = getCachedFolder_(folderCacheKey);
@@ -2508,7 +2555,7 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
     if (createMissing) ensureProjectFolders_(cachedFolder);
     return cachedFolder;
   }
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const root = rootFolder_();
   const customers = createMissing ? getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME) : findFolder_(root, CUSTOMERS_FOLDER_NAME);
   if (!customers) return null;
   let yearFolder = createMissing ? getOrCreateFolder_(customers, String(year)) : findFolder_(customers, String(year));
@@ -2524,17 +2571,17 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
 
 function getCachedFolder_(key) {
   try {
-    const folderId = CacheService.getScriptCache().get(key);
+    const folderId = CacheService.getScriptCache().get(driveScopedCacheKey_(key));
     return folderId ? DriveApp.getFolderById(folderId) : null;
   } catch (error) {
-    CacheService.getScriptCache().remove(key);
+    CacheService.getScriptCache().remove(driveScopedCacheKey_(key));
     return null;
   }
 }
 
 function cacheFolder_(key, folder) {
   try {
-    CacheService.getScriptCache().put(key, folder.getId(), 21600);
+    CacheService.getScriptCache().put(driveScopedCacheKey_(key), folder.getId(), 21600);
   } catch (error) {
     // Folder caching is an optimization only.
   }
