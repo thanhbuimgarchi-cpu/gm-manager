@@ -1948,7 +1948,11 @@ export default function Home() {
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
       if (result.years.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = false;
-        persist(mergeSharedWorkspaceYears(result.years, years), false);
+        const mergedYears = mergeSharedWorkspaceYears(result.years, years);
+        persist(mergedYears, false);
+        // Preserve records that only existed on this device and publish the
+        // merged snapshot so the next device sees the same workspace.
+        queueWorkspaceCacheSync(mergedYears);
       } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = true;
         queueWorkspaceCacheSync(years);
