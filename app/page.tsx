@@ -382,7 +382,7 @@ const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
-const defaultDriveFolderUrl = "https://drive.google.com/drive/folders/1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu?usp=sharing";
+const defaultDriveFolderUrl = "https://drive.google.com/drive/folders/1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu?usp=drive_link";
 const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
