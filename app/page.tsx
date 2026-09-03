@@ -382,6 +382,8 @@ const MAX_DIRECT_AUDIO_BYTES = 600 * 1024;
 const MAX_AUDIO_CHUNK_SECONDS = Math.floor((MAX_AUDIO_CHUNK_BYTES - 44) / (AUDIO_OUTPUT_SAMPLE_RATE * 2));
 const buildMonths = (): MonthFolder[] => monthLabels.map((label) => ({ label, records: [] }));
 const driveSyncConfigKey = "gm-manager-apps-script";
+const defaultDriveFolderUrl = "https://drive.google.com/drive/folders/1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu?usp=sharing";
+const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
 const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
@@ -391,6 +393,7 @@ const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 const deployedAppsScriptCompatibilityToken = "010101";
 const defaultDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1/exec",
+  driveUrl: defaultDriveFolderUrl,
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const macInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-macOS-x64.dmg";
@@ -1545,7 +1548,9 @@ export default function Home() {
     let savedDriveLinkUrl = "";
     try {
       const saved = JSON.parse(window.localStorage.getItem(driveSyncConfigKey) ?? "{}") as Partial<DriveSyncConfig>;
-      savedDriveLinkUrl = isDriveUrl(String(saved.driveUrl ?? "")) ? String(saved.driveUrl).trim() : "";
+      const savedDriveUrl = isDriveUrl(String(saved.driveUrl ?? "")) ? String(saved.driveUrl).trim() : "";
+      // Migrate devices that still have the previous root folder saved.
+      savedDriveLinkUrl = savedDriveUrl && !savedDriveUrl.includes(legacyDriveFolderId) ? savedDriveUrl : defaultDriveFolderUrl;
     } catch { /* Keep the canonical Apps Script connection when prior storage is malformed. */ }
     const config = { ...defaultDriveSyncConfig, driveUrl: savedDriveLinkUrl };
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));

@@ -9,7 +9,7 @@
  * and add GEMINI_API_KEY in Project Settings > Script properties.
  */
 
-const ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
+const ROOT_FOLDER_ID = "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu";
 const CUSTOMERS_FOLDER_NAME = "Kh\u00e1ch h\u00e0ng";
 const EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const SCRIPT_PROJECT_ID = "1E2YbfpBHw2HpLySbRjoAPJ72__mekfu3NwoYwTcLnCj4qSPSNACV5KfA";
