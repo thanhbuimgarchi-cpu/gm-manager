@@ -3681,7 +3681,7 @@ export default function Home() {
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới có sẵn ngày tạo. Sang ngày mới, bấm <b>＋ Bản ngày mới</b> để tạo đúng ngày hiện tại; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
+        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới chưa có bản Tài liệu. Khi có nhu cầu, bấm <b>＋ Bản ngày mới</b> để tạo ngày tài liệu; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
         <div className="document-library__actions">{desktopBridge()?.isDesktop && desktopBridge()?.openDrive && <button type="button" className="document-library__refresh" onClick={() => void openDesktopDocuments()}>▰ Mở Drive</button>}<button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
