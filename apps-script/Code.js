@@ -144,6 +144,7 @@ function doPost(event) {
     if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
     if (payload.action === "customer-portal-share") return json_(customerPortalShare_(payload));
+    if (payload.action === "inspect-drive-tree") return json_(inspectDriveTree_(payload));
 
     const lock = LockService.getScriptLock();
     lock.waitLock(30000);
@@ -166,7 +167,6 @@ function doPost(event) {
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
     if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
     if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
-    if (payload.action === "inspect-drive-tree") return json_(inspectDriveTree_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
