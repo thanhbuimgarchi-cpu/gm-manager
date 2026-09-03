@@ -166,6 +166,7 @@ function doPost(event) {
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
     if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
     if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
+    if (payload.action === "inspect-drive-tree") return json_(inspectDriveTree_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -389,6 +390,25 @@ function loadConsultingWorkspace_(payload) {
   const result = { ok: true, years: loadMonthCustomerIndex_(customers, year, month) };
   cacheJson_(cacheKey, result, 300);
   return result;
+}
+
+// Small read-only diagnostic used to verify that the configured root is the
+// same folder level as the user's Drive/Shared drives path. It intentionally
+// returns names and folder flags only (never file contents).
+function inspectDriveTree_(payload) {
+  const root = rootFolder_();
+  const maxDepth = Math.min(Math.max(Number(payload.depth || 2), 1), 3);
+  const maxItems = Math.min(Math.max(Number(payload.limit || 200), 1), 500);
+  const walk = function(folder, depth) {
+    const result = { name: folder.getName(), id: folder.getId(), children: [] };
+    if (depth >= maxDepth) return result;
+    const folders = folder.getFolders();
+    while (folders.hasNext() && result.children.length < maxItems) {
+      result.children.push(walk(folders.next(), depth + 1));
+    }
+    return result;
+  };
+  return { ok: true, root: walk(root, 0) };
 }
 
 // A random token in the published link selects one read-only project snapshot.
