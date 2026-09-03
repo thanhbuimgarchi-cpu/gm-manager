@@ -367,8 +367,6 @@ const MAX_AUDIO_CHUNK_BYTES = 700 * 1024;
 const MAX_WORKFLOW_UPLOAD_BYTES = 12 * 1024 * 1024;
 const DRIVE_INDEX_CACHE_MS = 15 * 60 * 1000;
 const DRIVE_SEARCH_CACHE_MS = 3 * 60 * 1000;
-const DRIVE_DETAIL_CACHE_MS = 30 * 60 * 1000;
-const DRIVE_PROGRESS_CACHE_MS = 30 * 60 * 1000;
 // File metadata changes much less often than customer forms. Keep the latest
 // successful list for instant rendering, then refresh it quietly in the
 // background when it is older than fifteen minutes.
@@ -1336,7 +1334,6 @@ function isDriveCacheFresh(key: string, maxAgeMs: number) {
 }
 
 function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
-  const localByProjectId = new Map(localYears.flatMap((year) => year.months.flatMap((month) => month.records)).map((record) => [record.projectId, record]));
   const driveByYear = new Map(driveYears.map((year) => [year.year, year]));
   const localByYear = new Map(localYears.map((year) => [year.year, year]));
   const mergedYears = Array.from(new Set([...localYears.map((year) => year.year), ...driveYears.map((year) => year.year)])).sort((a, b) => a - b);
@@ -1349,24 +1346,32 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
         const driveMonth = driveYear?.months?.find((month) => month.label === label);
         const localMonth = localYear?.months?.find((month) => month.label === label) ?? localYear?.months?.[index] ?? { label, records: [] };
         if (!driveMonth) return localMonth;
-      return {
-        label,
-        records: (driveMonth.records ?? []).map((record) => {
+        const localRecords = localMonth.records ?? [];
+        const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
+        const driveProjectIds = new Set((driveMonth.records ?? []).map((record) => record.projectId));
+        const mergedRecords = (driveMonth.records ?? []).map((record) => {
+          // Local cache is authoritative once a customer has been opened or
+          // edited. Drive index rows are only a discovery list and must not
+          // overwrite cached form/progress data.
           const localRecord = localByProjectId.get(record.projectId);
+          const merged = localRecord ? { ...record, ...localRecord } : { ...record };
           return {
-            ...record,
-            id: record.id || `drive-${record.projectId}`,
-            name: record.name || localRecord?.name || record.details?.HVT || record.projectId,
-            houseId: record.houseId || localRecord?.houseId || "",
-            details: record.isHydrated ? record.details ?? {} : localRecord?.details ?? record.details ?? {},
-            isHydrated: record.isHydrated ?? localRecord?.isHydrated ?? false,
-            designProgress: record.isHydrated ? record.designProgress ?? createDesignProgress() : localRecord?.designProgress ?? record.designProgress ?? createDesignProgress(),
-            interiorDesignProgress: record.isHydrated ? record.interiorDesignProgress ?? createDesignProgress("interior") : localRecord?.interiorDesignProgress ?? record.interiorDesignProgress ?? createDesignProgress("interior"),
-            acceptanceDesignProgress: record.isHydrated ? record.acceptanceDesignProgress ?? createDesignProgress("acceptance") : localRecord?.acceptanceDesignProgress ?? record.acceptanceDesignProgress ?? createDesignProgress("acceptance"),
-            warrantyProgress: record.isHydrated ? record.warrantyProgress ?? createWarrantyProgress() : localRecord?.warrantyProgress ?? record.warrantyProgress ?? createWarrantyProgress(),
+            ...merged,
+            id: merged.id || `drive-${record.projectId}`,
+            name: merged.name || merged.details?.HVT || record.projectId,
+            houseId: merged.houseId || "",
+            details: merged.details ?? {},
+            isHydrated: merged.isHydrated ?? false,
+            designProgress: merged.designProgress ?? createDesignProgress(),
+            interiorDesignProgress: merged.interiorDesignProgress ?? createDesignProgress("interior"),
+            acceptanceDesignProgress: merged.acceptanceDesignProgress ?? createDesignProgress("acceptance"),
+            warrantyProgress: merged.warrantyProgress ?? createWarrantyProgress(),
           };
-        }),
-      };
+        });
+        // Keep customers created on this device even before their optional
+        // Excel export creates a matching Drive folder.
+        localRecords.filter((record) => !driveProjectIds.has(record.projectId)).forEach((record) => mergedRecords.unshift(record));
+        return { label, records: mergedRecords };
       }),
     };
   });
@@ -1464,11 +1469,12 @@ export default function Home() {
   const [documentsError, setDocumentsError] = useState("");
   const [threeDLibrary, setThreeDLibrary] = useState<{ rootUrl: string; folders: ThreeDLibraryFolder[] }>({ rootUrl: "", folders: [] });
   const [loadingThreeDLibrary, setLoadingThreeDLibrary] = useState(false);
-  const [loadingCustomerId, setLoadingCustomerId] = useState<string | null>(null);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const customerSearchTimer = useRef<number | null>(null);
   const driveRequestsInFlight = useRef(new Set<string>());
+  const workNotesLoadRevision = useRef(0);
+  const locallyDeletedWorkNoteIds = useRef(new Set<string>());
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   const promptForMobileNotifications = () => {
@@ -1631,7 +1637,6 @@ export default function Home() {
     setDocumentFiles([]);
     setDocumentFilesBySnapshotId({});
     setDocumentsError("");
-    void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
   const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation, targetFolder = "Tư vấn") => {
@@ -1652,7 +1657,6 @@ export default function Home() {
     setDocumentFilesBySnapshotId({});
     setDocumentsError("");
     setActiveFolder(targetFolder);
-    void loadCustomerDetailsFromDrive({ record, year, month });
   };
 
   useEffect(() => {
@@ -1868,74 +1872,6 @@ export default function Home() {
     return () => window.clearInterval(refreshTimer);
   }, [driveScriptUrl, isCustomerPortal]);
 
-  const loadCustomerDetailsFromDrive = async (location: CustomerLocation) => {
-    const config = { scriptUrl: driveScriptUrl.trim() };
-    if (!config.scriptUrl) return;
-    const cacheKey = `detail:${location.year}:${location.month}:${location.record.projectId}`;
-    const cachedRecord = readDriveCache<WorkRecord>(cacheKey, DRIVE_DETAIL_CACHE_MS);
-    if (cachedRecord) {
-      persistRecord({ ...cachedRecord, isHydrated: true }, location.year, location.month);
-      return;
-    }
-    setLoadingCustomerId(location.record.projectId);
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, { action: "load-consulting", mode: "detail", year: location.year, month: location.month, projectId: location.record.projectId, includeProgress: false });
-      if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp chi tiết hồ sơ.");
-      const hydratedRecord = {
-        ...location.record,
-        ...result.record,
-        designProgress: result.record.designProgress ?? location.record.designProgress,
-        interiorDesignProgress: result.record.interiorDesignProgress ?? location.record.interiorDesignProgress,
-        acceptanceDesignProgress: result.record.acceptanceDesignProgress ?? location.record.acceptanceDesignProgress,
-        warrantyProgress: result.record.warrantyProgress ?? location.record.warrantyProgress,
-        progressHydrated: result.record.progressHydrated ?? location.record.progressHydrated ?? false,
-        isHydrated: true,
-      };
-      writeDriveCache(cacheKey, hydratedRecord);
-      persistRecord(hydratedRecord, location.year, location.month);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể nạp chi tiết hồ sơ.");
-    } finally {
-      setLoadingCustomerId(null);
-    }
-  };
-
-  const loadCustomerProgressFromDrive = async (location: CustomerLocation) => {
-    const config = { scriptUrl: driveScriptUrl.trim() };
-    if (!config.scriptUrl || location.record.progressHydrated) return;
-    const cacheKey = `progress:${location.year}:${location.month}:${location.record.projectId}`;
-    const cached = readDriveCache<Pick<WorkRecord, "designProgress" | "interiorDesignProgress" | "acceptanceDesignProgress" | "warrantyProgress" | "progressHydrated">>(cacheKey, DRIVE_PROGRESS_CACHE_MS);
-    if (cached) {
-      persistRecord({ ...location.record, ...cached, progressHydrated: true }, location.year, location.month);
-      return;
-    }
-    if (driveRequestsInFlight.current.has(cacheKey)) return;
-    driveRequestsInFlight.current.add(cacheKey);
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; record?: WorkRecord }>(config, {
-        action: "load-consulting",
-        mode: "progress",
-        year: location.year,
-        month: location.month,
-        projectId: location.record.projectId,
-      });
-      if (!response.ok || !result.ok || !result.record) throw new Error(result.error || "Không thể nạp tiến độ hồ sơ.");
-      const progress = {
-        designProgress: result.record.designProgress,
-        interiorDesignProgress: result.record.interiorDesignProgress,
-        acceptanceDesignProgress: result.record.acceptanceDesignProgress,
-        warrantyProgress: result.record.warrantyProgress,
-        progressHydrated: true,
-      };
-      writeDriveCache(cacheKey, progress);
-      persistRecord({ ...location.record, ...progress }, location.year, location.month);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể nạp tiến độ hồ sơ.");
-    } finally {
-      driveRequestsInFlight.current.delete(cacheKey);
-    }
-  };
-
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
   const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
@@ -1945,6 +1881,7 @@ export default function Home() {
   };
   const loadWorkNotes = async () => {
     if (!selectedCustomerLocation) return;
+    const loadRevision = ++workNotesLoadRevision.current;
     setNewWorkNote(null);
     setEditingWorkNote(null);
     setWorkNoteMenuId(null);
@@ -1957,9 +1894,11 @@ export default function Home() {
     if (!driveScriptUrl.trim()) return;
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId });
+      if (loadRevision !== workNotesLoadRevision.current) return;
       if (response.ok && result.ok && Array.isArray(result.notes)) {
-        const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
-        const mergedNotes = Array.from(new Map([...result.notes, ...assignedForProject].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
+        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
+        const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId && !locallyDeletedWorkNoteIds.current.has(note.id));
+        const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
         setWorkNotes(mergedNotes);
         writeDriveCache(cacheKey, mergedNotes);
         setWorkNotesCacheRevision((revision) => revision + 1);
@@ -2107,11 +2046,19 @@ export default function Home() {
   const removeWorkNote = async (id: string) => {
     const note = workNotes.find((item) => item.id === id);
     if (!note || note.creatorEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người tạo ghi chú mới có thể xóa."); return; }
+    locallyDeletedWorkNoteIds.current.add(id);
+    workNotesLoadRevision.current += 1;
     const next = workNotes.filter((item) => item.id !== id);
     persistWorkNotes(next);
+    setAssignedWorkNotes((current) => current.filter((item) => item.id !== id));
     if (editingWorkNote?.id === id) setEditingWorkNote(null);
     setWorkNoteMenuId(null);
-    try { await syncWorkNotesToSharedStore(next); setNotice("Đã xóa ghi chú và cập nhật người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ việc xóa ghi chú."); }
+    try {
+      await syncWorkNotesToSharedStore(next);
+      setNotice("Đã xóa ghi chú và cập nhật người được giao.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ việc xóa ghi chú.");
+    }
   };
   const confirmWorkNoteCompletion = () => {
     if (!pendingWorkNoteCompletionId) return;
@@ -2475,11 +2422,6 @@ export default function Home() {
     }
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
 
-  useEffect(() => {
-    if (!selectedCustomerLocation || (activeFolder !== "Thiết kế" && activeFolder !== "Bảo hành")) return;
-    void loadCustomerProgressFromDrive(selectedCustomerLocation);
-  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, selectedCustomerLocation?.record.progressHydrated]);
-
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim();
     if (customerSearchTimer.current) window.clearTimeout(customerSearchTimer.current);
@@ -2504,12 +2446,7 @@ export default function Home() {
     event.preventDefault();
     const name = customerName.trim();
     const normalizedHouseId = houseId.trim();
-    const targetYear = years.find((folder) => folder.year === modalYear);
     if (!name) return;
-    if (!targetYear) {
-      setNotice(`Chưa có thư mục năm ${modalYear}. Hãy tạo thư mục năm này trên Drive trước.`);
-      return;
-    }
 
     const created = getVietnamDate();
     const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
@@ -2521,16 +2458,20 @@ export default function Home() {
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       details: {},
       isHydrated: true,
+      progressHydrated: true,
       designProgress: createDesignProgress(),
       interiorDesignProgress: createDesignProgress("interior"),
       acceptanceDesignProgress: createDesignProgress("acceptance"),
       warrantyProgress: createWarrantyProgress(),
       functionalFloors: [createFunctionalFloor()],
     };
-    const nextYears = years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
-    });
+    const hasTargetYear = years.some((yearFolder) => yearFolder.year === modalYear);
+    const nextYears = hasTargetYear
+      ? years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
+        ...yearFolder,
+        months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
+      })
+      : [...years, { year: modalYear, months: buildMonths().map((monthFolder, index) => index === modalMonth - 1 ? { ...monthFolder, records: [record] } : monthFolder) }].sort((left, right) => left.year - right.year);
     persist(nextYears);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
@@ -2538,7 +2479,7 @@ export default function Home() {
     setPersonnelView(false);
     setActiveFolder("Tư vấn");
     setAddOpen(false);
-    setNotice(`Đã tạo thư mục ${projectId} trong T${modalMonth}/${modalYear}`);
+    setNotice(`Đã tạo hồ sơ ${projectId} trên thiết bị. Nhấn Export Excel khi muốn ghi lên Drive.`);
   };
 
   const deleteRecord = (id: string) => {
@@ -3157,7 +3098,9 @@ export default function Home() {
       try {
         const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", email: loggedInEmployeeEmail });
         if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
-        const notes = result.notes.map((note) => ({ ...note, status: workNoteStatus(note) }));
+        const serverNoteIds = new Set(result.notes.map((note) => note.id));
+        locallyDeletedWorkNoteIds.current.forEach((id) => { if (!serverNoteIds.has(id)) locallyDeletedWorkNoteIds.current.delete(id); });
+        const notes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id)).map((note) => ({ ...note, status: workNoteStatus(note) }));
         setAssignedWorkNotes(notes);
         if (selectedCustomerLocation && activeFolder === "Ghi chú") {
           const forOpenedProject = notes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
@@ -3932,7 +3875,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <div className="topbar__project-controls">
-            {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>↗ Phát hành</button>}
+            {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
           </div>
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
@@ -3962,7 +3905,7 @@ export default function Home() {
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
-                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId ? "is-syncing" : ""} />{loadingCustomerId === selectedRecord.projectId ? "Đang nạp chi tiết hồ sơ…" : syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id || loadingCustomerId === selectedRecord.projectId}>⇩ Export Excel</button></div>
+                  <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id}>⇩ Export Excel</button></div>
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
@@ -3973,7 +3916,6 @@ export default function Home() {
                 </div>
               </header>
               <div className="detail-scroll">
-                {loadingCustomerId === selectedRecord.projectId && <div className="customer-detail-loading">Đang nạp Excel chi tiết của {selectedRecord.projectId}…</div>}
                 {!hasConsultingSearchResults && <div className="consulting-search-empty"><span>∅</span><p>Không tìm thấy nội dung phù hợp với “{consultingSearch}”.</p></div>}
                 {visibleDetailSections.length > 0 && <table className="information-table">
                   <thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead>
