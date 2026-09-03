@@ -112,6 +112,7 @@ function doPost(event) {
     if (payload.action === "load-customer-messages") return json_(loadCustomerMessages_(payload));
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
     if (payload.action === "load-assigned-design-tasks") return json_(loadAssignedDesignTasks_(payload));
+    if (payload.action === "load-workspace-cache") return json_(loadWorkspaceCache_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
@@ -127,6 +128,7 @@ function doPost(event) {
       if (payload.action === "register-employee-account") return json_(registerEmployeeAccount_(payload));
       if (payload.action === "request-password-reset") return json_(requestEmployeePasswordReset_(payload));
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
+      if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
       if (payload.action === "save-pancake-config") return json_(savePancakeConfig_(payload));
@@ -1267,6 +1269,28 @@ function clearPropertyJson_(key) {
   const count = Number(properties.getProperty(key + ":count") || 0);
   for (let index = 0; index < count; index += 1) properties.deleteProperty(key + ":" + index);
   properties.deleteProperty(key + ":count");
+}
+
+const WORKSPACE_CACHE_PROPERTY_KEY = "gmcrm-workspace-cache-v1";
+
+function loadWorkspaceCache_() {
+  const stored = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
+  return {
+    ok: true,
+    updatedAt: stored && Number(stored.updatedAt || 0) || 0,
+    years: stored && Array.isArray(stored.years) ? stored.years : [],
+  };
+}
+
+function saveWorkspaceCache_(payload) {
+  const incomingUpdatedAt = Number(payload.updatedAt || Date.now());
+  const current = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
+  if (current && Number(current.updatedAt || 0) > incomingUpdatedAt) {
+    return { ok: true, updatedAt: Number(current.updatedAt || 0), years: Array.isArray(current.years) ? current.years : [], ignored: true };
+  }
+  const years = Array.isArray(payload.years) ? payload.years : [];
+  writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { version: 1, updatedAt: incomingUpdatedAt, years: years });
+  return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
 }
 
 function workNotesFolder_(year, month, projectId, createMissing) {

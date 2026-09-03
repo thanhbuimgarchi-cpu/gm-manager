@@ -183,6 +183,21 @@ test("publishing work notes falls back to shared script properties when Drive is
   assert.equal(context.loadWorkNotes_(payload).notes[0].content, "Gọi khách");
 });
 
+test("workspace cache is shared without touching Drive", () => {
+  const values = new Map();
+  const properties = {
+    getProperty: (key) => values.get(key) || null,
+    setProperty: (key, value) => values.set(key, String(value)),
+    deleteProperty: (key) => values.delete(key),
+  };
+  const context = loadContext({ PropertiesService: { getScriptProperties: () => properties } });
+  const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM03092026TEST", details: { HVT: "Khách thử" }, designProgress: [] }] }] }];
+  assert.equal(context.saveWorkspaceCache_({ updatedAt: 100, years }).ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), years);
+  assert.equal(context.saveWorkspaceCache_({ updatedAt: 90, years: [] }).ignored, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), years);
+});
+
 test("admin receives the active work-note overview across every customer", () => {
   const context = loadContext();
   context.readActiveWorkNotes_ = () => [

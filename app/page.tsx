@@ -125,6 +125,7 @@ type WorkRecord = {
   customerShareToken?: string;
   projectId: string;
   createdAt: string;
+  cacheUpdatedAt?: number;
   details: Record<string, string>;
   audioNote?: AudioNote;
   isHydrated?: boolean;
@@ -528,7 +529,7 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
   const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -1377,12 +1378,42 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
   });
 }
 
+function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFolder[]) {
+  const sharedByYear = new Map(sharedYears.map((year) => [year.year, year]));
+  const localByYear = new Map(localYears.map((year) => [year.year, year]));
+  const mergedYearNumbers = Array.from(new Set([...sharedYears.map((year) => year.year), ...localYears.map((year) => year.year)])).sort((left, right) => left - right);
+  return mergedYearNumbers.map((yearNumber) => {
+    const sharedYear = sharedByYear.get(yearNumber);
+    const localYear = localByYear.get(yearNumber);
+    return {
+      year: yearNumber,
+      months: monthLabels.map((label, index) => {
+        const sharedMonth = sharedYear?.months?.find((month) => month.label === label);
+        const localMonth = localYear?.months?.find((month) => month.label === label) ?? localYear?.months?.[index] ?? { label, records: [] };
+        if (!sharedMonth) return localMonth;
+        const localRecords = localMonth.records ?? [];
+        const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
+        const sharedProjectIds = new Set((sharedMonth.records ?? []).map((record) => record.projectId));
+        const records = (sharedMonth.records ?? []).map((record) => {
+          const localRecord = localByProjectId.get(record.projectId);
+          const localUpdatedAt = Number(localRecord?.cacheUpdatedAt ?? 0);
+          const sharedUpdatedAt = Number(record.cacheUpdatedAt ?? 0);
+          return localRecord && localUpdatedAt > sharedUpdatedAt ? { ...record, ...localRecord } : { ...localRecord, ...record };
+        });
+        localRecords.filter((record) => !sharedProjectIds.has(record.projectId)).forEach((record) => records.unshift(record));
+        return { label, records };
+      }),
+    };
+  });
+}
+
 export default function Home() {
   const now = getVietnamDate();
   const isCustomerPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("view") === "customer";
   const appVersionLabel = APP_VERSION === "development" ? "dev" : APP_VERSION.slice(0, 7);
   const [activeFolder, setActiveFolder] = useState("Tư vấn");
   const [years, setYears] = useState<YearFolder[]>(initialYears);
+  const [workspaceStorageReady, setWorkspaceStorageReady] = useState(false);
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
@@ -1475,6 +1506,9 @@ export default function Home() {
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
   const locallyDeletedWorkNoteIds = useRef(new Set<string>());
+  const workspaceSyncTimer = useRef<number | null>(null);
+  const workspaceSyncPending = useRef<YearFolder[] | null>(null);
+  const workspaceSyncInFlight = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   const promptForMobileNotifications = () => {
@@ -1516,6 +1550,7 @@ export default function Home() {
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveScriptUrl(config.scriptUrl);
     setDriveLinkUrl(savedDriveLinkUrl);
+    setWorkspaceStorageReady(true);
   }, []);
 
   useEffect(() => {
@@ -1802,22 +1837,53 @@ export default function Home() {
     <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>◌ Bật thông báo</button>
   </>;
 
-  const persist = (nextYears: YearFolder[]) => {
+  const flushWorkspaceCacheSync = async () => {
+    if (workspaceSyncInFlight.current || !workspaceSyncPending.current || !driveScriptUrl.trim()) return;
+    const nextYears = workspaceSyncPending.current;
+    workspaceSyncPending.current = null;
+    workspaceSyncInFlight.current = true;
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: "save-workspace-cache",
+        updatedAt: Date.now(),
+        years: nextYears,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ cache dùng chung.");
+    } catch {
+      // Keep edits in this device cache. A later edit retries the shared sync.
+    } finally {
+      workspaceSyncInFlight.current = false;
+      if (workspaceSyncPending.current && driveScriptUrl.trim()) {
+        if (workspaceSyncTimer.current) window.clearTimeout(workspaceSyncTimer.current);
+        workspaceSyncTimer.current = window.setTimeout(() => { workspaceSyncTimer.current = null; void flushWorkspaceCacheSync(); }, 700);
+      }
+    }
+  };
+  const queueWorkspaceCacheSync = (nextYears: YearFolder[]) => {
+    workspaceSyncPending.current = nextYears;
+    if (!driveScriptUrl.trim() || workspaceSyncInFlight.current) return;
+    if (workspaceSyncTimer.current) window.clearTimeout(workspaceSyncTimer.current);
+    workspaceSyncTimer.current = window.setTimeout(() => { workspaceSyncTimer.current = null; void flushWorkspaceCacheSync(); }, 700);
+  };
+  const persist = (nextYears: YearFolder[], syncRemote = true) => {
     setYears(nextYears);
     saveWorkspace(nextYears);
+    if (syncRemote) queueWorkspaceCacheSync(nextYears);
   };
 
   const persistRecord = (record: WorkRecord, year: number, month: number) => {
-    writeDriveCache(`detail:${year}:${month}:${record.projectId}`, record);
+    const updatedRecord = { ...record, cacheUpdatedAt: Date.now() };
+    writeDriveCache(`detail:${year}:${month}:${updatedRecord.projectId}`, updatedRecord);
     setYears((currentYears) => {
       const nextYears = currentYears.map((yearFolder) => yearFolder.year !== year ? yearFolder : {
         ...yearFolder,
         months: yearFolder.months.map((monthFolder, index) => index !== month - 1 ? monthFolder : {
           ...monthFolder,
-          records: monthFolder.records.map((currentRecord) => currentRecord.projectId === record.projectId ? record : currentRecord),
+          records: monthFolder.records.map((currentRecord) => currentRecord.projectId === updatedRecord.projectId ? updatedRecord : currentRecord),
         }),
       });
       saveWorkspace(nextYears);
+      queueWorkspaceCacheSync(nextYears);
       return nextYears;
     });
   };
@@ -1833,7 +1899,7 @@ export default function Home() {
     if (!options.force && cacheAge) {
       const cachedYears = readDriveCache<YearFolder[]>(cacheKey, cacheAge);
       if (cachedYears) {
-        persist(preserveDriveRecordMetadata(cachedYears, years));
+        persist(preserveDriveRecordMetadata(cachedYears, years), false);
         return;
       }
     }
@@ -1846,7 +1912,7 @@ export default function Home() {
       if (cacheAge) writeDriveCache(cacheKey, result.years);
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
-        persist(driveYears);
+        persist(driveYears, false);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
     } catch (error) {
@@ -1871,6 +1937,26 @@ export default function Home() {
     const refreshTimer = window.setInterval(() => refreshWorkspace(true), DRIVE_INDEX_CACHE_MS);
     return () => window.clearInterval(refreshTimer);
   }, [driveScriptUrl, isCustomerPortal]);
+
+  const loadWorkspaceCache = async () => {
+    if (!workspaceStorageReady || isCustomerPortal || !driveScriptUrl.trim()) return;
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
+      if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
+      if (result.years.some((year) => year.months?.some((month) => month.records?.length))) {
+        persist(mergeSharedWorkspaceYears(result.years, years), false);
+      } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
+        queueWorkspaceCacheSync(years);
+      }
+    } catch {
+      // The per-device cache remains usable when the shared cache is offline.
+    }
+  };
+
+  useEffect(() => {
+    if (!workspaceStorageReady || isCustomerPortal || !driveScriptUrl.trim()) return;
+    void loadWorkspaceCache();
+  }, [workspaceStorageReady, driveScriptUrl, isCustomerPortal]);
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
@@ -2460,6 +2546,7 @@ export default function Home() {
       houseId: normalizedHouseId,
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
+      cacheUpdatedAt: Date.now(),
       details: {},
       isHydrated: true,
       progressHydrated: true,
@@ -2691,7 +2778,7 @@ export default function Home() {
   const renameRecord = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!protectedAction || !renameValue.trim()) return;
-    const updatedRecord = { ...protectedAction.record, name: renameValue.trim() };
+    const updatedRecord = { ...protectedAction.record, name: renameValue.trim(), cacheUpdatedAt: Date.now() };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
@@ -2711,28 +2798,12 @@ export default function Home() {
       setNotice("Ngày không hợp lệ. Hãy nhập theo dạng ngày/tháng/năm, ví dụ 11/11/1999.");
       return;
     }
-    const updatedRecord = { ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: nextValue } };
-    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
-        ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
-      }),
-    });
-    persist(nextYears);
+    persistRecord({ ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: nextValue } }, selectedYear, selectedMonth);
   };
 
   const updateRecordName = (value: string) => {
     if (!selectedRecord) return;
-    const updatedRecord = { ...selectedRecord, name: value };
-    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
-        ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
-      }),
-    });
-    persist(nextYears);
+    persistRecord({ ...selectedRecord, name: value }, selectedYear, selectedMonth);
   };
 
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
@@ -2898,15 +2969,7 @@ export default function Home() {
 
   const updateFunctionalFloors = (nextFloors: FunctionalFloor[]) => {
     if (!selectedRecord) return;
-    const updatedRecord = { ...selectedRecord, functionalFloors: nextFloors, functionalRows: undefined };
-    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
-        ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === selectedRecord.id ? updatedRecord : record),
-      }),
-    });
-    persist(nextYears);
+    persistRecord({ ...selectedRecord, functionalFloors: nextFloors, functionalRows: undefined }, selectedYear, selectedMonth);
   };
 
   const updateFunctionalFloor = (floorId: string, value: string) => {
