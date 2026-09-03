@@ -1509,6 +1509,7 @@ export default function Home() {
   const workspaceSyncTimer = useRef<number | null>(null);
   const workspaceSyncPending = useRef<YearFolder[] | null>(null);
   const workspaceSyncInFlight = useRef(false);
+  const sharedWorkspaceCacheEmpty = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   const promptForMobileNotifications = () => {
@@ -1868,7 +1869,9 @@ export default function Home() {
   const persist = (nextYears: YearFolder[], syncRemote = true) => {
     setYears(nextYears);
     saveWorkspace(nextYears);
-    if (syncRemote) queueWorkspaceCacheSync(nextYears);
+    // If the shared store was empty, the first Drive index loaded on this
+    // device also becomes the seed for the web/desktop shared cache.
+    if (syncRemote || sharedWorkspaceCacheEmpty.current) queueWorkspaceCacheSync(nextYears);
   };
 
   const persistRecord = (record: WorkRecord, year: number, month: number) => {
@@ -1944,9 +1947,13 @@ export default function Home() {
       const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
       if (result.years.some((year) => year.months?.some((month) => month.records?.length))) {
+        sharedWorkspaceCacheEmpty.current = false;
         persist(mergeSharedWorkspaceYears(result.years, years), false);
       } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
+        sharedWorkspaceCacheEmpty.current = true;
         queueWorkspaceCacheSync(years);
+      } else {
+        sharedWorkspaceCacheEmpty.current = true;
       }
     } catch {
       // The per-device cache remains usable when the shared cache is offline.
