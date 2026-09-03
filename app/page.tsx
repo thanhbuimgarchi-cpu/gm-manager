@@ -1458,6 +1458,7 @@ export default function Home() {
   const [modalYear, setModalYear] = useState(now.year);
   const [customerName, setCustomerName] = useState("");
   const [houseId, setHouseId] = useState("");
+  const [creatingCustomer, setCreatingCustomer] = useState(false);
   const [notice, setNotice] = useState("");
   const [loginOpen, setLoginOpen] = useState(false);
   const [employeeLoginEmail, setEmployeeLoginEmail] = useState("");
@@ -2570,14 +2571,31 @@ export default function Home() {
     setAddOpen(true);
   };
 
-  const addCustomer = (event: FormEvent<HTMLFormElement>) => {
+  const addCustomer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const name = customerName.trim();
     const normalizedHouseId = houseId.trim();
-    if (!name) return;
+    if (!name || creatingCustomer) return;
 
     const created = getVietnamDate();
     const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
+    setCreatingCustomer(true);
+    try {
+      const config = { scriptUrl: driveScriptUrl.trim() };
+      if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
+        action: "create-customer-folder",
+        year: modalYear,
+        month: modalMonth,
+        projectId,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể tạo thư mục hồ sơ trên Drive.");
+      return;
+    } finally {
+      setCreatingCustomer(false);
+    }
     const record: WorkRecord = {
       id: `${Date.now()}-${projectId}`,
       name,
@@ -2608,7 +2626,7 @@ export default function Home() {
     setPersonnelView(false);
     setActiveFolder("Tư vấn");
     setAddOpen(false);
-    setNotice(`Đã tạo hồ sơ ${projectId} trên thiết bị. Nhấn Export Excel khi muốn ghi lên Drive.`);
+    setNotice(`Đã tạo thư mục ${projectId} trên Drive và hồ sơ cache trên thiết bị.`);
   };
 
   const deleteRecord = (id: string) => {
@@ -4136,7 +4154,7 @@ export default function Home() {
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>
             <label>Mã nhà <span className="field-code">(IDH)</span><input value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
             <p className="id-preview">ID dự kiến: <b>GM{String(getVietnamDate().day).padStart(2, "0")}{String(getVietnamDate().month).padStart(2, "0")}{getVietnamDate().year}{customerName ? nameInitials(customerName) : "..."}</b></p>
-            <button className="add-button" type="submit">Tạo thư mục</button>
+            <button className="add-button" type="submit" disabled={creatingCustomer}>{creatingCustomer ? "Đang tạo trên Drive…" : "Tạo thư mục"}</button>
           </form>
         </div>
       )}

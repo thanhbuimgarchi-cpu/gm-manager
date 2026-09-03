@@ -109,6 +109,18 @@ function setDriveRootFolder_(payload) {
   return { ok: true, folderId: folderId, folderName: folder.getName() };
 }
 
+function createCustomerFolder_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !/^GM[A-Za-z0-9_-]+$/.test(projectId)) {
+    throw new Error("Thiếu thông tin hồ sơ hợp lệ để tạo thư mục Drive.");
+  }
+  const folder = getCustomerFolder_(year, month, projectId, true);
+  if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
+  return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId };
+}
+
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
@@ -156,6 +168,7 @@ function doPost(event) {
       if (payload.action === "request-password-reset") return json_(requestEmployeePasswordReset_(payload));
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
       if (payload.action === "set-drive-root") return json_(setDriveRootFolder_(payload));
+      if (payload.action === "create-customer-folder") return json_(createCustomerFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
