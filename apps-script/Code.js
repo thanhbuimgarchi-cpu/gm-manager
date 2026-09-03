@@ -116,7 +116,9 @@ function createCustomerFolder_(payload) {
   if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !/^GM[A-Za-z0-9_-]+$/.test(projectId)) {
     throw new Error("Thiếu thông tin hồ sơ hợp lệ để tạo thư mục Drive.");
   }
-  const folder = getCustomerFolder_(year, month, projectId, true);
+  // Creating a project only establishes the folder tree. A blank document day
+  // must not appear until the user explicitly creates a day or uploads files.
+  const folder = getCustomerFolder_(year, month, projectId, true, false);
   if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId };
 }
@@ -2581,7 +2583,7 @@ function isSpreadsheetFile_(name, mimeType) {
     || /\.(?:xlsx?|xlsm|csv)$/i.test(String(name || ""));
 }
 
-function getCustomerFolder_(year, month, projectId, createMissing) {
+function getCustomerFolder_(year, month, projectId, createMissing, createInitialDocumentSnapshot) {
   const folderCacheKey = "gmcrm-customer-folder-" + year + "-" + month + "-" + projectId;
   const cachedFolder = getCachedFolder_(folderCacheKey);
   if (cachedFolder) {
@@ -2598,7 +2600,10 @@ function getCustomerFolder_(year, month, projectId, createMissing) {
   const existingCustomerFolder = findFolder_(monthFolder, projectId);
   const customerFolder = existingCustomerFolder || (createMissing ? getOrCreateFolder_(monthFolder, projectId) : null);
   if (customerFolder) cacheFolder_(folderCacheKey, customerFolder);
-  if (customerFolder && createMissing) ensureProjectFolders_(customerFolder, !existingCustomerFolder);
+  if (customerFolder && createMissing) {
+    const shouldCreateSnapshot = createInitialDocumentSnapshot === undefined ? !existingCustomerFolder : Boolean(createInitialDocumentSnapshot);
+    ensureProjectFolders_(customerFolder, shouldCreateSnapshot);
+  }
   return customerFolder;
 }
 
