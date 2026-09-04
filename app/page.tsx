@@ -3994,7 +3994,7 @@ export default function Home() {
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder">▰</span>
-                    <span className="customer-result__identity"><b>{location.record.name}</b><small>{location.record.projectId}{location.record.houseId ? ` · ${location.record.houseId}` : ""}</small></span>
+                    <span className="customer-result__identity"><b>{location.record.houseId || location.record.name || location.record.projectId}</b><small>{location.record.projectId}</small></span>
                     <span className="customer-result__date">T{location.month} / {location.year}</span>
                     <span className="customer-result__arrow">→</span>
                   </button>
