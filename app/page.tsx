@@ -140,11 +140,15 @@ type WorkRecord = {
 
 // projectId is kept only as an internal/cache key. Never use it as a visible
 // customer label; legacy records may still have their old GM… value in name.
+function isPlaceholderCustomerName(value: string) {
+  return value.trim().toLocaleLowerCase("vi") === "chưa có mã nhà";
+}
+
 function customerDisplayName(record: Pick<WorkRecord, "name" | "houseId" | "projectId">) {
   const name = String(record.name || "").trim();
   const houseId = String(record.houseId || "").trim();
   const projectId = String(record.projectId || "").trim();
-  if (name && name !== projectId) return name;
+  if (name && name !== projectId && !isPlaceholderCustomerName(name)) return name;
   return houseId || (name && !/^GM\d{2}\d{2}\d{4}/i.test(name) ? name : "Chưa có mã nhà");
 }
 
@@ -2869,7 +2873,7 @@ export default function Home() {
     setOpenMenuId(null);
     setProtectedAction({ type, record });
     if (type === "rename") {
-      setRenameValue(record.name === record.projectId ? "" : record.name);
+      setRenameValue(record.name === record.projectId || isPlaceholderCustomerName(record.name) ? "" : record.name);
       setRenameHouseId(record.houseId ?? "");
     }
   };
@@ -2890,7 +2894,7 @@ export default function Home() {
       return;
     }
     const previousRecord = protectedAction.record;
-    const nextName = renameValue.trim() || previousRecord.name || previousRecord.projectId;
+    const nextName = renameValue.trim() || (previousRecord.name && !isPlaceholderCustomerName(previousRecord.name) ? previousRecord.name : previousRecord.projectId);
     const updatedRecord = { ...previousRecord, name: nextName, houseId: nextHouseId, cacheUpdatedAt: Date.now() };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
