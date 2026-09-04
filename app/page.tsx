@@ -145,7 +145,7 @@ function customerDisplayName(record: Pick<WorkRecord, "name" | "houseId" | "proj
   const houseId = String(record.houseId || "").trim();
   const projectId = String(record.projectId || "").trim();
   if (name && name !== projectId) return name;
-  return houseId || (name && !/^GM\d{2}\d{2}\d{4}/i.test(name) ? name : "Chưa đặt tên");
+  return houseId || (name && !/^GM\d{2}\d{2}\d{4}/i.test(name) ? name : "Chưa có mã nhà");
 }
 
 type DesignProgressRow = {
@@ -1394,7 +1394,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
           return {
             ...merged,
             id: merged.id || `drive-${record.projectId}`,
-            name: merged.name || merged.details?.HVT || merged.houseId || "Chưa đặt tên",
+            name: merged.name || merged.details?.HVT || merged.houseId || "Chưa có mã nhà",
             houseId: merged.houseId || "",
             details: merged.details ?? {},
             isHydrated: merged.isHydrated ?? false,
