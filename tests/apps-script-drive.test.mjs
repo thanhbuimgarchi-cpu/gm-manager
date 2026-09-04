@@ -258,6 +258,14 @@ test("admin receives the active work-note overview across every customer", () =>
   assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "an@company.com" }).notes.map((note) => note.id))), ["note-a"]);
 });
 
+test("legacy personnel rows without email remain assignable by stable member id", () => {
+  const context = loadContext();
+  context.readActiveWorkNotes_ = () => [{ id: "note-legacy", assigneeEmail: "member:person-1", actualDate: "" }];
+  context.employeeRosterMember_ = () => ({ id: "person-1", email: "employee@example.com", status: "Có" });
+  assert.equal(context.personnelAssignmentKey_({ id: "person-1", email: "" }), "member:person-1");
+  assert.equal(context.loadAssignedWorkNotes_({ email: "employee@example.com" }).notes[0].id, "note-legacy");
+});
+
 test("Pancake group names map to a house code only when the GM marker is present", () => {
   const context = loadContext();
   assert.equal(context.pancakeHouseIdFromGroupName_("HP-587-GM-Tư vấn"), "HP-587");

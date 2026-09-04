@@ -1575,7 +1575,12 @@ function loadAssignedWorkNotes_(payload) {
   // The built-in manager account needs an overview across every customer,
   // while each employee continues to receive only work assigned to them.
   if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
-  return { ok: true, notes: activeNotes.filter(function(note) { return String(note.assigneeEmail || "").toLowerCase() === email; }) };
+  // Only legacy ID-based assignments need a roster lookup. Email assignments
+  // can be matched directly and this keeps the overview usable when Drive is
+  // unavailable (for example in a read-only test/cache environment).
+  const needsMemberLookup = activeNotes.some(function(note) { return /^member:/i.test(workNoteText_(note.assigneeEmail, 240)); });
+  const member = needsMemberLookup ? employeeRosterMember_(email) : null;
+  return { ok: true, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
 }
 
 function loadWorkNotes_(payload) {
@@ -1638,7 +1643,8 @@ function completeWorkNote_(payload) {
   const note = normalizeWorkNotes_([payload.note || {}])[0];
   if (!note || !note.actualDate) throw new Error("Cần xác nhận ngày hoàn thành trước khi lưu công việc vào Drive.");
   const actorEmail = workNoteText_(payload.actorEmail, 240).toLowerCase();
-  if (!note.assigneeEmail || actorEmail !== note.assigneeEmail) throw new Error("Chỉ người được giao việc mới có thể xác nhận hoàn thành.");
+  const actorMember = /^member:/i.test(workNoteText_(note.assigneeEmail, 240)) ? employeeRosterMember_(actorEmail) : null;
+  if (!note.assigneeEmail || !assignmentMatchesEmployee_(note.assigneeEmail, actorEmail, actorMember)) throw new Error("Chỉ người được giao việc mới có thể xác nhận hoàn thành.");
 
   const folder = completedWorkNotesFolder_(details);
   const file = findFileByName_(folder, COMPLETED_WORK_NOTES_FILE_NAME);
@@ -2043,7 +2049,9 @@ function loadAssignedDesignTasks_(payload) {
   if (!email) throw new Error("Thiếu email nhân viên.");
   const tasks = readActiveDesignTasks_().filter(function(task) { return !task.actualDate; });
   if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
-  return { ok: true, tasks: tasks.filter(function(task) { return String(task.assigneeEmail || "").toLowerCase() === email; }) };
+  const needsMemberLookup = tasks.some(function(task) { return /^member:/i.test(workNoteText_(task.assigneeEmail, 240)); });
+  const member = needsMemberLookup ? employeeRosterMember_(email) : null;
+  return { ok: true, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";
@@ -2616,6 +2624,22 @@ function employeeRosterMember_(email) {
     if (member) return member;
   }
   return null;
+}
+
+function personnelAssignmentKey_(member) {
+  if (!member) return "";
+  const email = workNoteText_(member.email, 240).toLowerCase();
+  if (email) return email;
+  const id = workNoteText_(member.id, 160).toLowerCase();
+  return id ? "member:" + id : "";
+}
+
+function assignmentMatchesEmployee_(assignmentKey, email, member) {
+  const key = workNoteText_(assignmentKey, 240).toLowerCase();
+  const account = workNoteText_(email, 240).toLowerCase();
+  const memberId = member ? workNoteText_(member.id, 160).toLowerCase() : "";
+  const legacyMemberKey = memberId ? "member:" + memberId : "";
+  return Boolean(key && ((account && key === account) || (member && key === personnelAssignmentKey_(member)) || (legacyMemberKey && key === legacyMemberKey)));
 }
 
 function employeeAccountKey_(email) {

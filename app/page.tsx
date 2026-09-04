@@ -265,6 +265,20 @@ type PersonnelMember = {
   address: string;
 };
 
+// Email is the preferred assignment key. Older personnel rows may not have
+// an email yet, so keep a stable member key instead of dropping them from
+// every assignment selector. Once an email is added, the server can resolve
+// the same member key to that employee account.
+const personnelAssignmentKey = (member: Pick<PersonnelMember, "id" | "email">) => {
+  const email = String(member.email || "").trim().toLowerCase();
+  return email || `member:${String(member.id || "").trim()}`;
+};
+
+const personnelLegacyAssignmentKey = (member: Pick<PersonnelMember, "id"> | null | undefined) => {
+  const id = String(member?.id || "").trim();
+  return id ? `member:${id}` : "";
+};
+
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
 type EmployeeAuthMode = "login" | "register" | "reset-request" | "reset-confirm";
 
@@ -2230,11 +2244,11 @@ export default function Home() {
     const noteId = pendingWorkNoteCompletionId;
     setPendingWorkNoteCompletionId(null);
     const note = workNotes.find((item) => item.id === noteId);
-    if (!note || note.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người được giao việc mới có thể xác nhận hoàn thành."); return; }
+    if (!note || !isAssignedToLoggedInEmployee(note.assigneeEmail)) { setNotice("Chỉ người được giao việc mới có thể xác nhận hoàn thành."); return; }
     if (note) void saveCompletedWorkNoteToDrive({ ...note, actualDate: formatWorkNoteDate(), completedAt: new Date().toISOString() });
   };
   const acceptAssignedWorkNote = async (note: WorkNote, location = selectedCustomerLocation) => {
-    if (!location || note.assigneeEmail !== loggedInEmployeeEmail) return;
+    if (!location || !isAssignedToLoggedInEmployee(note.assigneeEmail)) return;
     const accepted = { ...note, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail, status: workNoteStatus({ ...note, acceptedAt: new Date().toISOString() }) };
     const next = workNotes.map((item) => item.id === note.id ? accepted : item);
     persistWorkNotes(next);
@@ -2736,11 +2750,11 @@ export default function Home() {
   };
 
   const updateDesignAssignee = (kind: DesignProgressKind, rowIndex: number, email: string) => {
-    const member = assignablePersonnel.find((item) => item.email === email);
+    const member = assignablePersonnel.find((item) => personnelAssignmentKey(item) === email);
     const nextRows = progressRowsFor(kind).map((row, index) => index === rowIndex ? {
       ...row,
       assignee: member?.name ?? "",
-      assigneeEmail: member?.email ?? "",
+      assigneeEmail: member ? personnelAssignmentKey(member) : "",
       acceptedAt: "",
       acceptedBy: "",
       publishedAt: "",
@@ -2786,7 +2800,7 @@ export default function Home() {
   const acceptDesignTask = async (kind: DesignProgressKind, rowId: string) => {
     const rows = progressRowsFor(kind);
     const row = rows.find((item) => item.id === rowId);
-    if (!row || row.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ Người phụ trách mới có thể xác nhận nhận việc."); return; }
+    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới có thể xác nhận nhận việc."); return; }
     const nextRows = rows.map((item) => item.id === rowId ? { ...item, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail } : item);
     commitDesignProgressRows(kind, nextRows);
     try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã xác nhận nhận việc thiết kế."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận."); }
@@ -2795,7 +2809,7 @@ export default function Home() {
   const completeDesignTask = async (kind: DesignProgressKind, rowId: string) => {
     const rows = progressRowsFor(kind);
     const row = rows.find((item) => item.id === rowId);
-    if (!row || row.assigneeEmail !== loggedInEmployeeEmail) { setNotice("Chỉ Người phụ trách mới có thể hoàn thành hạng mục."); return; }
+    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới có thể hoàn thành hạng mục."); return; }
     if (!row.acceptedAt) { setNotice("Hãy xác nhận nhận việc trước khi hoàn thành."); return; }
     const today = getVietnamDate();
     const actualDate = `${String(today.day).padStart(2, "0")}/${String(today.month).padStart(2, "0")}/${today.year}`;
@@ -3307,8 +3321,14 @@ export default function Home() {
   const visiblePersonnel = selectedPersonnel.filter((member) => !personnelSearch.trim() || normalizeSearchText(`${member.name} ${member.email} ${member.phone} ${member.role} ${member.permissions.join(" ")} ${member.address}`).includes(normalizeSearchText(personnelSearch)));
   const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
-  const assignablePersonnel = useMemo(() => allPersonnel.filter((member) => member.status === "Có" && member.email).sort((left, right) => left.name.localeCompare(right.name, "vi")), [allPersonnel]);
+  const assignablePersonnel = useMemo(() => allPersonnel.filter((member) => member.status === "Có" && (member.email || member.id)).sort((left, right) => left.name.localeCompare(right.name, "vi")), [allPersonnel]);
   const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
+  const loggedInEmployeeAssignmentKey = loggedInEmployee ? personnelAssignmentKey(loggedInEmployee) : loggedInEmployeeEmail;
+  const loggedInEmployeeLegacyAssignmentKey = personnelLegacyAssignmentKey(loggedInEmployee);
+  const isAssignedToLoggedInEmployee = (assignmentKey: string) => {
+    const key = String(assignmentKey || "").trim().toLowerCase();
+    return Boolean(loggedInEmployeeEmail && key && (key === loggedInEmployeeEmail || key === loggedInEmployeeAssignmentKey || key === loggedInEmployeeLegacyAssignmentKey));
+  };
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
@@ -3383,7 +3403,7 @@ export default function Home() {
         if (!response.ok || !result.ok || !Array.isArray(result.tasks) || cancelled) return;
         const tasks = result.tasks.filter((task) => !task.actualDate);
         setAssignedDesignTasks(tasks);
-        const pending = tasks.filter((task) => task.assigneeEmail === loggedInEmployeeEmail && !task.acceptedAt);
+        const pending = tasks.filter((task) => isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt);
         const now = Date.now();
         for (const task of pending) {
           const key = `gm-manager-design-assignment-alert:${loggedInEmployeeEmail}:${task.kind}:${task.id}`;
@@ -3586,7 +3606,8 @@ export default function Home() {
     if (!visibleWorkspaceFolders.some((folder) => folder.label === activeFolder)) setActiveFolder(visibleWorkspaceFolders[0].label);
   }, [activeFolder, loggedInEmployee?.id, visibleWorkspaceFolders]);
   useEffect(() => {
-    if ((!personnelView && activeFolder !== "Ghi chú" && !loginOpen) || !driveScriptUrl.trim()) return;
+    const needsPersonnel = personnelView || loginOpen || Boolean(loggedInEmployeeEmail) || activeFolder === "Ghi chú" || activeFolder === "Thiết kế" || activeFolder === "Bảo hành";
+    if (!needsPersonnel || !driveScriptUrl.trim()) return;
     let cancelled = false;
     setLoadingPersonnel(true);
     void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
@@ -3596,7 +3617,7 @@ export default function Home() {
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
     return () => { cancelled = true; };
-  }, [personnelView, activeFolder, driveScriptUrl, loginOpen]);
+  }, [personnelView, activeFolder, driveScriptUrl, loginOpen, loggedInEmployeeEmail]);
   useEffect(() => {
     if (activeFolder !== "Ghi chú" || !selectedCustomerLocation) return;
     loadWorkNotes();
@@ -3697,19 +3718,19 @@ export default function Home() {
       const selectedStatus = workNoteStatus(note);
       const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green", "Tím": "work-note__status--purple" } as Record<WorkNoteStatus, string>)[selectedStatus];
       const isCreator = Boolean(loggedInEmployeeEmail && note.creatorEmail === loggedInEmployeeEmail);
-      const isAssignee = Boolean(loggedInEmployeeEmail && note.assigneeEmail === loggedInEmployeeEmail);
+      const isAssignee = isAssignedToLoggedInEmployee(note.assigneeEmail);
       const canEdit = isNew || (isEditing && isCreator);
       const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (field: Exclude<keyof WorkNote, "id">, value: string) => updateWorkNote(note.id, field, value);
       const chooseAssignee = (email: string) => {
-        const member = assignablePersonnel.find((personnel) => personnel.email === email);
-        if (isNew) setNewWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
-        else if (isEditing) setEditingWorkNote((current) => current ? { ...current, assigneeEmail: email, assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
+        const member = assignablePersonnel.find((personnel) => personnelAssignmentKey(personnel) === email);
+        if (isNew) setNewWorkNote((current) => current ? { ...current, assigneeEmail: member ? personnelAssignmentKey(member) : "", assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
+        else if (isEditing) setEditingWorkNote((current) => current ? { ...current, assigneeEmail: member ? personnelAssignmentKey(member) : "", assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
       };
       return <article className={`work-note ${isNew ? "work-note--new" : ""} ${isAssignee && !note.acceptedAt ? "work-note--assignment-pending" : ""} ${highlightWorkNoteId === note.id ? "work-note--highlighted" : ""}`} key={note.id}>
         <div className="work-note__line work-note__line--primary">
           <label>Ưu tiên<select value={note.priority} onChange={(event) => update("priority", event.target.value)} aria-label="Ưu tiên" disabled={!canEdit}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
           <label>Công việc<select value={note.workType} onChange={(event) => update("workType", event.target.value)} aria-label="Công việc" disabled={!canEdit}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
-          <label>Người phụ trách<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Người phụ trách" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></label>
+          <label>Người phụ trách<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Người phụ trách" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
           <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
@@ -3849,9 +3870,9 @@ export default function Home() {
                 </span>
               </div></td>
               <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small><label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={Boolean(row.actualDate) || !row.publishedAt || row.assigneeEmail !== loggedInEmployeeEmail || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
-              <td><select className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={member.email} value={member.email}>{member.name}</option>)}</select></td>
-              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && row.assigneeEmail === loggedInEmployeeEmail && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)}>Xác nhận nhận việc</button>}</td>
+              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small><label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={Boolean(row.actualDate) || !row.publishedAt || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
+              <td><select className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
+              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && isAssignedToLoggedInEmployee(row.assigneeEmail) && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)}>Xác nhận nhận việc</button>}</td>
               <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
@@ -3953,7 +3974,7 @@ export default function Home() {
     {sidebarNotesOpen && <div className="sidebar-notes__list">
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
-        return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
+        return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
           <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {customerDisplayName(location.record)} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
@@ -3968,7 +3989,7 @@ export default function Home() {
       {assignedDesignTasks.length ? assignedDesignTasks.slice().sort((left, right) => left.plannedDate.localeCompare(right.plannedDate)).map((task) => {
         const status = designTaskStatus(task);
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[status];
-        return <button type="button" className={`sidebar-note ${task.assigneeEmail === loggedInEmployeeEmail && !task.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${task.year}-${task.month}-${task.projectId}-${task.kind}-${task.id}`} onClick={() => {
+        return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${task.year}-${task.month}-${task.projectId}-${task.kind}-${task.id}`} onClick={() => {
           const location = customerLocations.find((item) => item.year === task.year && item.month === task.month && item.record.projectId === task.projectId);
           if (!location) { setNotice("Đang nạp hồ sơ dự án. Hãy thử lại sau vài giây."); return; }
           const field = designProgressDefinitions[task.kind].field;
