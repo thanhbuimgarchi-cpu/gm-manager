@@ -350,7 +350,7 @@ type DesktopNotificationBridge = {
   isDesktop?: boolean;
   platform?: string;
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
-  openDrive?: (payload: { projectId: string; year: number; month: number }) => Promise<string>;
+  openDrive?: (payload: { projectId: string; houseId?: string; year: number; month: number }) => Promise<string>;
 };
 
 type InstallPromptEvent = Event & {
@@ -1373,17 +1373,18 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
         if (!driveMonth) return localMonth;
         const localRecords = localMonth.records ?? [];
         const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
+        const localByHouseId = new Map(localRecords.filter((record) => record.houseId?.trim()).map((record) => [record.houseId!.trim().toLocaleLowerCase("vi"), record]));
         const driveProjectIds = new Set((driveMonth.records ?? []).map((record) => record.projectId));
         const mergedRecords = (driveMonth.records ?? []).map((record) => {
           // Local cache is authoritative once a customer has been opened or
           // edited. Drive index rows are only a discovery list and must not
           // overwrite cached form/progress data.
-          const localRecord = localByProjectId.get(record.projectId);
+          const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const merged = localRecord ? { ...record, ...localRecord } : { ...record };
           return {
             ...merged,
             id: merged.id || `drive-${record.projectId}`,
-            name: merged.name || merged.details?.HVT || record.projectId,
+            name: merged.name || merged.details?.HVT || merged.houseId || "Chưa đặt tên",
             houseId: merged.houseId || "",
             details: merged.details ?? {},
             isHydrated: merged.isHydrated ?? false,
@@ -1414,13 +1415,15 @@ function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFo
         const driveKey = `${yearNumber}-${index + 1}`;
         const knownDriveIds = driveIndexProjectIds?.get(driveKey);
         const driveIndexKnown = Boolean(knownDriveIds);
+        const isKnownDriveRecord = (record: WorkRecord) => Boolean(knownDriveIds?.has(record.projectId) || (record.houseId && knownDriveIds?.has(record.houseId.trim())));
         if (!sharedMonth && !driveIndexKnown) return localMonth;
-        const localRecords = (localMonth.records ?? []).filter((record) => !driveIndexKnown || knownDriveIds?.has(record.projectId));
+        const localRecords = (localMonth.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record));
         const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
-        const sharedRecords = (sharedMonth?.records ?? []).filter((record) => !driveIndexKnown || knownDriveIds?.has(record.projectId));
+        const localByHouseId = new Map(localRecords.filter((record) => record.houseId?.trim()).map((record) => [record.houseId!.trim().toLocaleLowerCase("vi"), record]));
+        const sharedRecords = (sharedMonth?.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record));
         const sharedProjectIds = new Set(sharedRecords.map((record) => record.projectId));
         const records = sharedRecords.map((record) => {
-          const localRecord = localByProjectId.get(record.projectId);
+          const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const localUpdatedAt = Number(localRecord?.cacheUpdatedAt ?? 0);
           const sharedUpdatedAt = Number(record.cacheUpdatedAt ?? 0);
           return localRecord && localUpdatedAt > sharedUpdatedAt ? { ...record, ...localRecord } : { ...localRecord, ...record };
@@ -1686,7 +1689,10 @@ export default function Home() {
     if (!term) return [];
     return customerLocations.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)).slice(0, 8);
   }, [customerLocations, workflowSearch]);
-  const selectedCustomerLocation = customerLocations.find(({ record }) => record.projectId === selectedCustomerProjectId) ?? null;
+  const selectedCustomerLocation = customerLocations.find(({ record }) =>
+    record.projectId === selectedCustomerProjectId ||
+    (record.houseId && record.houseId === selectedCustomerProjectId)
+  ) ?? null;
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
     setSelectedCustomerProjectId(record.projectId);
     setSelectedYear(year);
@@ -1818,6 +1824,7 @@ export default function Home() {
     if (!desktop?.isDesktop || !desktop.openDrive || !selectedCustomerLocation) return;
     const error = await desktop.openDrive({
       projectId: selectedCustomerLocation.record.projectId,
+      houseId: selectedCustomerLocation.record.houseId,
       year: selectedCustomerLocation.year,
       month: selectedCustomerLocation.month,
     });
@@ -1947,7 +1954,7 @@ export default function Home() {
       if (cacheAge) writeDriveCache(cacheKey, result.years);
       if (mode === "index") {
         const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
-        driveIndexProjectIds.current.set(`${year}-${month}`, new Set((indexedMonth?.records ?? []).map((record) => record.projectId)));
+        driveIndexProjectIds.current.set(`${year}-${month}`, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
       }
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
@@ -2036,7 +2043,7 @@ export default function Home() {
     setLoadingWorkNotes(false);
     if (!driveScriptUrl.trim()) return;
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId });
       if (loadRevision !== workNotesLoadRevision.current) return;
       if (response.ok && result.ok && Array.isArray(result.notes)) {
         const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
@@ -2061,6 +2068,7 @@ export default function Home() {
         year: location.year,
         month: location.month,
         projectId: location.record.projectId,
+        houseId: location.record.houseId,
         actorEmail: loggedInEmployeeEmail,
         note,
       });
@@ -2244,6 +2252,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         workflow: folder,
         refresh,
       });
@@ -2271,6 +2280,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         workflow: activeFolder,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục mới.");
@@ -2307,6 +2317,7 @@ export default function Home() {
           year: selectedCustomerLocation.year,
           month: selectedCustomerLocation.month,
           projectId: selectedCustomerLocation.record.projectId,
+          houseId: selectedCustomerLocation.record.houseId,
           workflow: activeFolder,
           file: { fileName: file.name, mimeType: file.type || "application/octet-stream", data: bytesToBase64(new Uint8Array(await file.arrayBuffer())) },
         });
@@ -2357,6 +2368,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         snapshotId: requestedSnapshotId || undefined,
         refresh,
       });
@@ -2389,6 +2401,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
       });
       if (!response.ok || !result.ok || !result.snapshot) throw new Error(result.error || "Không thể tạo bản Tài liệu hôm nay.");
       const nextSnapshots = [result.snapshot, ...documentSnapshots.filter((snapshot) => snapshot.id !== result.snapshot?.id)];
@@ -2442,6 +2455,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
       });
       if (!response.ok || !result.ok || !result.rootUrl || !result.folders) throw new Error(result.error || "Không thể nạp thư mục 3D.");
       const next = { rootUrl: result.rootUrl, folders: result.folders };
@@ -2472,6 +2486,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         snapshotId: selectedDocumentSnapshotId,
         fileId,
         work: changedFile.work,
@@ -2494,6 +2509,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         snapshotId: snapshot.id,
         locked,
         passcode,
@@ -2530,6 +2546,7 @@ export default function Home() {
         year: selectedCustomerLocation.year,
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
         snapshotId: snapshot.id,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa bản ngày.");
@@ -2594,6 +2611,10 @@ export default function Home() {
     const name = customerName.trim();
     const normalizedHouseId = houseId.trim();
     if (!name || creatingCustomer) return;
+    if (!normalizedHouseId) {
+      setNotice("Hãy nhập mã nhà trước khi tạo hồ sơ.");
+      return;
+    }
 
     const created = getVietnamDate();
     const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
@@ -2606,6 +2627,7 @@ export default function Home() {
         year: modalYear,
         month: modalMonth,
         projectId,
+        houseId: normalizedHouseId,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
     } catch (error) {
@@ -2644,7 +2666,7 @@ export default function Home() {
     setPersonnelView(false);
     setActiveFolder("Tư vấn");
     setAddOpen(false);
-    setNotice(`Đã tạo thư mục ${projectId} trên Drive và hồ sơ cache trên thiết bị.`);
+    setNotice(`Đã tạo thư mục ${normalizedHouseId} trên Drive và hồ sơ cache trên thiết bị.`);
   };
 
   const deleteRecord = (id: string) => {
@@ -2845,7 +2867,7 @@ export default function Home() {
   const confirmDeleteRecord = () => {
     if (!protectedAction || protectedAction.type !== "delete") return;
     deleteRecord(protectedAction.record.id);
-    setNotice(`Đã xóa ${protectedAction.record.projectId}`);
+    setNotice(`Đã xóa ${protectedAction.record.houseId || protectedAction.record.name || "hồ sơ"}`);
     setProtectedAction(null);
   };
 
@@ -2893,7 +2915,15 @@ export default function Home() {
       setAudioProcessingStatus(`Đang xử lý đoạn ${index + 1}/${totalChunks}…`);
       let result: AudioProcessResponse | null = null;
       for (let attempt = 0; attempt < 5; attempt += 1) {
-        const directResponse = await postToAppsScript<AudioProcessResponse>(config, { action: "process-audio-chunk", year, month, projectId: startingRecord.projectId, chunkIndex: index, totalChunks });
+        const directResponse = await postToAppsScript<AudioProcessResponse>(config, {
+          action: "process-audio-chunk",
+          year,
+          month,
+          projectId: startingRecord.projectId,
+          houseId: startingRecord.houseId,
+          chunkIndex: index,
+          totalChunks,
+        });
         const response = directResponse.response;
         result = directResponse.result;
         if (response.ok && result?.ok && result.segments) break;
@@ -2972,6 +3002,7 @@ export default function Home() {
           year: selectedYear,
           month: selectedMonth,
           projectId: record.projectId,
+          houseId: record.houseId,
           chunkIndex: index,
           totalChunks: chunks.length,
           originalFileName: file.name,
@@ -3009,7 +3040,7 @@ export default function Home() {
 
   const deleteAudioNote = async (record: WorkRecord) => {
     if (!record.audioNote || audioProcessingId) return;
-    if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${record.projectId}?`)) return;
+    if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${record.houseId || record.name || "hồ sơ này"}?`)) return;
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
       setDriveConfigOpen(true);
@@ -3023,6 +3054,7 @@ export default function Home() {
         year: selectedYear,
         month: selectedMonth,
         projectId: record.projectId,
+        houseId: record.houseId,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa file ghi âm trên Drive.");
       const updatedRecord = { ...record };
@@ -3152,7 +3184,7 @@ export default function Home() {
         record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo file Excel.");
-      setNotice(`Đã xuất ${record.projectId}.xlsx vào Drive`);
+      setNotice(`Đã xuất ${(record.houseId || record.name || "hồ sơ")}.xlsx vào Drive`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể kết nối Drive.");
     } finally {
@@ -3176,7 +3208,7 @@ export default function Home() {
         record: { ...record, [designProgressDefinitions[kind].field]: normalizeDesignProgress(record, kind) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || `Không thể tạo Excel ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
-      setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${record.projectId}.xlsx`);
+      setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${(record.houseId || record.name || "hồ sơ")}.xlsx`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : `Không thể đồng bộ ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
     } finally {
@@ -3199,7 +3231,7 @@ export default function Home() {
         record: { ...record, warrantyProgress: normalizeWarrantyProgress(record) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel Phiếu thông tin bảo hành.");
-      setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${record.projectId}.xlsx`);
+      setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${(record.houseId || record.name || "hồ sơ")}.xlsx`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể đồng bộ Phiếu thông tin bảo hành.");
     } finally {
@@ -3270,7 +3302,7 @@ export default function Home() {
           const previous = Number(window.localStorage.getItem(key) ?? 0);
           if (now - previous < 15 * 60 * 1000) continue;
           const body = [
-            `Khách hàng: ${note.customerName || note.projectId}`,
+            `Khách hàng: ${note.customerName || note.houseId || "Khách hàng"}`,
             `Công việc: ${note.workType} · Ưu tiên: ${note.priority}`,
             note.dueDate ? `Hoàn thành dự kiến: ${note.dueDate}` : "Hoàn thành dự kiến: Chưa có",
             `Nội dung: ${note.content.trim() || "(Chưa có nội dung)"}`,
@@ -3319,7 +3351,7 @@ export default function Home() {
         for (const task of pending) {
           const key = `gm-manager-design-assignment-alert:${loggedInEmployeeEmail}:${task.kind}:${task.id}`;
           if (now - Number(window.localStorage.getItem(key) ?? 0) < 15 * 60 * 1000) continue;
-          const body = [`Khách hàng: ${task.customerName || task.projectId}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`].join("\n");
+          const body = [`Khách hàng: ${task.customerName || task.houseId || "Khách hàng"}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`].join("\n");
           const url = designTaskNotificationUrl(task);
           const desktop = desktopBridge();
           let shown = false;
@@ -3597,7 +3629,7 @@ export default function Home() {
         <h1 id="customer-login-title">Dự án của bạn</h1>
         <p>{customerPortalLoading ? "Đang mở thông tin dự án…" : customerPortalError || "Không thể mở thông tin dự án."}</p>
       </section> : <section className="customer-portal__project">
-        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.projectId}</h1><p>Mã nhà: <b>{customerPortalRecord.houseId}</b> · Mã dự án: {customerPortalRecord.projectId}</p></header>
+        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.houseId || "Dự án"}</h1>{customerPortalRecord.houseId && <p>Mã nhà: <b>{customerPortalRecord.houseId}</b></p>}</header>
         {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nghiệm thu", customerPortalRecord.acceptanceDesignProgress)}
@@ -3742,7 +3774,7 @@ export default function Home() {
       {workflowSearch && <div className="workflow-customer-search__results">
         {workflowSearchResults.length ? workflowSearchResults.map((location) => (
           <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location)}>
-            <span><b>{location.record.name}</b><small>{location.record.projectId}{location.record.houseId ? ` · ${location.record.houseId}` : ""}</small></span>
+            <span><b>{location.record.name || location.record.houseId || "Chưa đặt tên"}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
             <em>T{location.month} / {location.year} →</em>
           </button>
         )) : <p>Không tìm thấy khách hàng phù hợp.</p>}
@@ -3800,7 +3832,7 @@ export default function Home() {
           <ol>{analysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
         </article>
       </section>
-              <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.projectId}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Thiết kế</span></footer>
+              <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Thiết kế</span></footer>
     </section>;
   };
 
@@ -3833,7 +3865,7 @@ export default function Home() {
       </table>
       <button type="button" className="design-progress-add-row" onClick={addWarrantyProgressRow}><span>＋</span> Thêm dòng bảo hành</button>
     </div>
-    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.projectId}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.projectId} / Bảo hành</span></footer>
+    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Bảo hành</span></footer>
   </section>;
 
   const openCustomerMessage = (message: CustomerMessageGroup) => {
@@ -3885,7 +3917,7 @@ export default function Home() {
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
         return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {location.record.name || location.record.projectId} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {location.record.name || location.record.houseId || "Khách hàng"} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
     </div>}
@@ -3909,7 +3941,7 @@ export default function Home() {
           persistRecord({ ...location.record, [field]: mergedRows, progressHydrated: true }, location.year, location.month);
           selectCustomerForWorkflow(location, "Thiết kế");
         }}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.projectId} · Dự kiến {task.plannedDate || "—"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.houseId || "Khách hàng"} · Dự kiến {task.plannedDate || "—"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có hạng mục thiết kế đang chờ.</p>}
     </div>}
@@ -3993,7 +4025,7 @@ export default function Home() {
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder">▰</span>
-                    <span className="customer-result__identity"><b>{location.record.houseId || location.record.name || location.record.projectId}</b><small>{location.record.projectId}</small></span>
+                    <span className="customer-result__identity"><b>{location.record.name || location.record.houseId || "Chưa đặt tên"}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
                     <span className="customer-result__date">T{location.month} / {location.year}</span>
                     <span className="customer-result__arrow">→</span>
                   </button>
@@ -4060,11 +4092,11 @@ export default function Home() {
 
             {selectedRecord && <section className="record-detail record-detail--inline">
               <header className="record-detail__heading">
-                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
+                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.name || selectedRecord.houseId || "Khách hàng"}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
                   <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id}>⇩ Export Excel</button></div>
                   <div className="project-actions">
-                    <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.projectId}`}>…</button>
+                    <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.houseId || selectedRecord.name || "hồ sơ"}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
                       <button onClick={() => startProtectedAction("rename", selectedRecord)}>Rename</button>
                       <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Delete</button>
@@ -4122,7 +4154,7 @@ export default function Home() {
                   </div>}
                 </section>}
               </div>
-              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.projectId} / Tư vấn</span></footer>
+              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.houseId || "chưa có mã nhà"} / Tư vấn</span></footer>
             </section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
@@ -4156,7 +4188,7 @@ export default function Home() {
             {renderWorkflowCustomerSearch()}
             <section className="coming-soon">
               <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM Manager</p><h1>{activeFolder}</h1>
-              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b> · {selectedCustomerLocation?.record.projectId}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
+              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b>{selectedCustomerLocation?.record.houseId ? <> · Mã nhà {selectedCustomerLocation.record.houseId}</> : null}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
             </section>
           </section>
         )}
@@ -4171,8 +4203,7 @@ export default function Home() {
             <label>Tháng<select value={modalMonth} onChange={(event) => setModalMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
             <label>Năm<select value={modalYear} onChange={(event) => setModalYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>
-            <label>Mã nhà <span className="field-code">(IDH)</span><input value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
-            <p className="id-preview">ID dự kiến: <b>GM{String(getVietnamDate().day).padStart(2, "0")}{String(getVietnamDate().month).padStart(2, "0")}{getVietnamDate().year}{customerName ? nameInitials(customerName) : "..."}</b></p>
+            <label>Mã nhà <span className="field-code">(bắt buộc)</span><input required value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
             <button className="add-button" type="submit" disabled={creatingCustomer}>{creatingCustomer ? "Đang tạo trên Drive…" : "Tạo thư mục"}</button>
           </form>
         </div>
@@ -4268,7 +4299,7 @@ export default function Home() {
           {protectedAction.type === "delete" ? (
             <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>
               <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.record.projectId}</p>
+              <p className="eyebrow">{protectedAction.record.houseId || protectedAction.record.name}</p>
               <h2>Xóa hồ sơ?</h2>
               <p>Thao tác này sẽ xóa hồ sơ khỏi danh sách hiện tại.</p>
               <div className="dialog-actions"><button type="button" onClick={() => setProtectedAction(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDeleteRecord}>Xóa hồ sơ</button></div>
@@ -4276,7 +4307,7 @@ export default function Home() {
           ) : (
             <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
               <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.record.projectId}</p>
+              <p className="eyebrow">{protectedAction.record.houseId || protectedAction.record.name}</p>
               <h2>Rename hồ sơ</h2>
               <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
               <button className="add-button" type="submit">Lưu tên mới</button>
@@ -4289,7 +4320,7 @@ export default function Home() {
         <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
           <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
             <header className="record-detail__heading">
-              <div className="record-detail__identity"><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.projectId}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /></div>
+              <div className="record-detail__identity"><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.name || selectedRecord.houseId || "Khách hàng"}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /></div>
               <button className="dialog-close" onClick={() => setSelectedRecordId(null)} aria-label="Đóng">×</button>
             </header>
             <div className="detail-scroll">

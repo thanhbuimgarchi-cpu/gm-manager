@@ -73,7 +73,9 @@ async function googleDriveRoots() {
   return roots;
 }
 
-async function findProjectDocumentsFolder(projectId) {
+async function findProjectDocumentsFolder(...identifiers) {
+  const wanted = new Set(identifiers.map((value) => String(value || "").trim()).filter(Boolean));
+  if (!wanted.size) return "";
   const queue = await googleDriveRoots();
   const visited = new Set();
   while (queue.length) {
@@ -89,11 +91,11 @@ async function findProjectDocumentsFolder(projectId) {
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const child = path.join(folder, entry.name);
-      if (entry.name === projectId) {
+      if (wanted.has(entry.name)) {
         const documentsFolder = path.join(child, "Tài liệu");
         try {
           if ((await fs.stat(documentsFolder)).isDirectory()) return documentsFolder;
-        } catch { /* Keep looking: the same project ID can exist in an old archive. */ }
+        } catch { /* Keep looking: a legacy project folder may not contain Tài liệu. */ }
       }
       queue.push(child);
     }
@@ -120,9 +122,11 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("gmcrm:open-drive", async (_event, payload = {}) => {
     const projectId = String(payload.projectId || "").trim();
-    if (!/^[A-Za-z0-9_-]+$/.test(projectId)) return "Mã dự án không hợp lệ.";
-    const documentsFolder = await findProjectDocumentsFolder(projectId);
-    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của dự án trên Mac." : "Không tìm thấy thư mục Tài liệu của dự án trên ổ G.";
+    const houseId = String(payload.houseId || "").trim();
+    const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
+    if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
+    const documentsFolder = await findProjectDocumentsFolder(...identifiers);
+    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ G.";
   });
   createWindow();
   app.on("activate", () => {

@@ -109,18 +109,64 @@ function setDriveRootFolder_(payload) {
   return { ok: true, folderId: folderId, folderName: folder.getName() };
 }
 
+// The house code is the user-facing Drive key. projectId remains in the
+// cached record for backwards compatibility, but new customer folders and
+// exported files use houseId whenever it is available.
+function customerFolderKey_(value) {
+  const source = value && typeof value === "object" ? value : { projectId: value };
+  return String(source.houseId || source.projectId || "").trim();
+}
+
+function validCustomerFolderKey_(value) {
+  const text = String(value || "").trim();
+  return text.length > 0 && text.length <= 160 && !/[\\/:*?"<>|\u0000-\u001f]/.test(text) && text !== "." && text !== "..";
+}
+
+function customerFolderForPayload_(payload, createMissing) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
+  if (!folderKey) return null;
+  let folder = getCustomerFolder_(year, month, folderKey, false);
+  // Existing GM... folders remain readable after a house code is added to a
+  // cached record. New writes can migrate that legacy folder by record.
+  if (!folder && projectId && folderKey !== projectId) folder = getCustomerFolder_(year, month, projectId, false);
+  if (!folder && createMissing) folder = getCustomerFolder_(year, month, folderKey, true);
+  return folder;
+}
+
+function customerFolderForRecord_(record, year, month, createMissing) {
+  const projectId = String(record && record.projectId || "").trim();
+  const houseId = String(record && record.houseId || "").trim();
+  const folderKey = customerFolderKey_(record);
+  if (!folderKey) return null;
+  let folder = getCustomerFolder_(year, month, folderKey, false);
+  if (!folder && houseId && projectId && houseId !== projectId) {
+    const legacy = getCustomerFolder_(year, month, projectId, false);
+    if (legacy) {
+      try { legacy.setName(houseId); } catch (error) { /* Keep the legacy name if rename is unavailable. */ }
+      folder = legacy;
+    }
+  }
+  if (!folder && createMissing) folder = getCustomerFolder_(year, month, folderKey, true);
+  return folder;
+}
+
 function createCustomerFolder_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
-  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !/^GM[A-Za-z0-9_-]+$/.test(projectId)) {
+  const houseId = String(payload.houseId || "").trim();
+  const folderKey = houseId || projectId;
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !validCustomerFolderKey_(folderKey)) {
     throw new Error("Thiếu thông tin hồ sơ hợp lệ để tạo thư mục Drive.");
   }
   // Creating a project only establishes the folder tree. A blank document day
   // must not appear until the user explicitly creates a day or uploads files.
-  const folder = getCustomerFolder_(year, month, projectId, true, false);
+  const folder = getCustomerFolder_(year, month, folderKey, true, false);
   if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
-  return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId };
+  return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
 }
 
 function doPost(event) {
@@ -250,6 +296,7 @@ function storeAudioChunk_(payload) {
   const chunkIndex = Number(payload.chunkIndex);
   const totalChunks = Number(payload.totalChunks);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   if (!year || month < 1 || month > 12 || !projectId || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
     throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c ghi \u00e2m.");
   }
@@ -257,12 +304,12 @@ function storeAudioChunk_(payload) {
     throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u \u0111o\u1ea1n ghi \u00e2m.");
   }
 
-  const audioFolder = getAudioFolder_(year, month, projectId, true);
-  const prefix = "Ghi \u00e2m " + projectId + " - ph\u1ea7n ";
+  const audioFolder = getAudioFolderForPayload_(payload, true);
+  const prefix = "Ghi \u00e2m " + folderKey + " - ph\u1ea7n ";
   if (chunkIndex === 0) trashFilesByPrefix_(audioFolder, prefix);
   const extensionMatch = /\.([a-z0-9]{1,5})$/i.exec(String(audio.fileName || ""));
   const extension = extensionMatch ? extensionMatch[1].toLowerCase() : audio.mimeType === "audio/mpeg" ? "mp3" : "wav";
-  const fileName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + "." + extension;
+  const fileName = audioChunkBaseName_(folderKey, chunkIndex, totalChunks) + "." + extension;
   trashFilesByName_(audioFolder, fileName);
   const blob = Utilities.newBlob(Utilities.base64Decode(audio.data), audio.mimeType, fileName);
   const file = audioFolder.createFile(blob);
@@ -274,7 +321,7 @@ function deleteAudioNote_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thi\u1ebfu th\u00f4ng tin ghi \u00e2m c\u1ea7n x\u00f3a.");
-  const audioFolder = getAudioFolder_(year, month, projectId, false);
+  const audioFolder = getAudioFolderForPayload_(payload, false);
   if (!audioFolder) return { ok: true, deletedCount: 0 };
   let deletedCount = 0;
   const files = audioFolder.getFiles();
@@ -291,12 +338,14 @@ function processStoredAudioChunk_(payload) {
   const chunkIndex = Number(payload.chunkIndex);
   const totalChunks = Number(payload.totalChunks);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   if (!year || month < 1 || month > 12 || !projectId || chunkIndex < 0 || totalChunks < 1 || chunkIndex >= totalChunks) {
     throw new Error("Thi\u1ebfu th\u00f4ng tin \u0111o\u1ea1n ghi \u00e2m c\u1ea7n x\u1eed l\u00fd.");
   }
-  const baseName = audioChunkBaseName_(projectId, chunkIndex, totalChunks) + ".";
-  const audioFolder = getAudioFolder_(year, month, projectId, false);
+  const baseName = audioChunkBaseName_(folderKey, chunkIndex, totalChunks) + ".";
+  const audioFolder = getAudioFolderForPayload_(payload, false);
   let audioFile = findFileByPrefix_(audioFolder, baseName);
+  if (!audioFile && folderKey !== projectId) audioFile = findFileByPrefix_(audioFolder, audioChunkBaseName_(projectId, chunkIndex, totalChunks) + ".");
   if (!audioFile) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y \u0111o\u1ea1n ghi \u00e2m " + (chunkIndex + 1) + "/" + totalChunks + " tr\u00ean Drive.");
   const blob = audioFile.getBlob();
   const result = transcribeAudio_({ audio: { fileName: audioFile.getName(), mimeType: audioMimeType_(audioFile.getName(), blob.getContentType()), data: Utilities.base64Encode(blob.getBytes()) } });
@@ -513,13 +562,14 @@ function loadMonthCustomerIndex_(customers, year, month) {
   return monthResult_(year, month, records);
 }
 
-function fastCustomerIndexFromFolder_(projectId) {
-  const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
+function fastCustomerIndexFromFolder_(folderName) {
+  const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(folderName);
+  const isLegacyProjectFolder = Boolean(dateMatch);
   return {
-    id: "drive-" + projectId,
+    id: "drive-" + folderName,
     name: "",
-    houseId: "",
-    projectId: projectId,
+    houseId: isLegacyProjectFolder ? "" : folderName,
+    projectId: folderName,
     createdAt: dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "",
     details: {},
     isHydrated: false,
@@ -535,7 +585,7 @@ function loadCustomerDetail_(customers, payload) {
   }
   const yearFolder = findFolder_(customers, String(year));
   const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
-  const customerFolder = monthFolder && findFolder_(monthFolder, projectId);
+  const customerFolder = customerFolderForPayload_(payload, false);
   if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c h\u1ed3 s\u01a1 tr\u00ean Drive.");
   const workbook = latestCustomerWorkbook_(customerFolder, projectId);
   if (!workbook) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng trong th\u01b0 m\u1ee5c T\u01b0 v\u1ea5n.");
@@ -554,7 +604,7 @@ function loadCustomerProgress_(customers, payload) {
   }
   const yearFolder = findFolder_(customers, String(year));
   const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
-  const customerFolder = monthFolder && findFolder_(monthFolder, projectId);
+  const customerFolder = customerFolderForPayload_(payload, false);
   if (!customerFolder) throw new Error("Kh\u00f4ng t\u00ecm th\u1ea5y th\u01b0 m\u1ee5c h\u1ed3 s\u01a1 tr\u00ean Drive.");
   return {
     ok: true,
@@ -562,6 +612,7 @@ function loadCustomerProgress_(customers, payload) {
     month: month,
     record: {
       projectId: projectId,
+      houseId: String(payload.houseId || ""),
       designProgress: readDesignProgress_(customerFolder, projectId, "architecture"),
       interiorDesignProgress: readDesignProgress_(customerFolder, projectId, "interior"),
       acceptanceDesignProgress: readDesignProgress_(customerFolder, projectId, "acceptance"),
@@ -582,7 +633,7 @@ function customerIndexFromWorkbook_(file, projectId) {
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(projectId);
   return {
     id: "drive-" + projectId,
-    name: metadata.name || projectId,
+    name: metadata.name || metadata.houseId || projectId,
     houseId: metadata.houseId || "",
     projectId: metadata.projectId || projectId,
     createdAt: normalizeExcelDate_(metadata.createdAt) || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : ""),
@@ -631,8 +682,8 @@ function searchCustomerIndex_(customers, query) {
 
 function searchExactProjectId_(customers, projectId) {
   // Drive resolves an exact folder name from its index. This keeps a pasted
-  // project ID from triggering a month-by-month scan of every customer.
-  if (!/^GM\d{8}[A-Za-z0-9-]*$/i.test(projectId)) return [];
+  // house code from triggering a month-by-month scan of every customer.
+  if (!validCustomerFolderKey_(projectId)) return [];
   const resultsByPeriod = {};
   const folders = DriveApp.getFoldersByName(projectId);
   while (folders.hasNext()) {
@@ -676,6 +727,22 @@ function latestCustomerWorkbook_(customerFolder, projectId) {
   const consultingFolder = findFolder_(customerFolder, "T\u01b0 v\u1ea5n");
   const currentWorkbook = consultingFolder ? findFileByName_(consultingFolder, fileName) : null;
   if (currentWorkbook) return currentWorkbook;
+
+  // House-code folders may contain a workbook whose filename was generated
+  // with the house code, while older cached records still pass the internal
+  // GM project id. Keep both generations readable by selecting the newest
+  // customer workbook in the Tư vấn folder before falling back to the old
+  // project-id filename at the customer-folder root.
+  let latestHouseWorkbook = null;
+  if (consultingFolder) {
+    const files = consultingFolder.getFiles();
+    while (files.hasNext()) {
+      const candidate = files.next();
+      if (!/^Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng .*\.xlsx$/i.test(candidate.getName())) continue;
+      if (!latestHouseWorkbook || candidate.getLastUpdated().getTime() > latestHouseWorkbook.getLastUpdated().getTime()) latestHouseWorkbook = candidate;
+    }
+  }
+  if (latestHouseWorkbook) return latestHouseWorkbook;
 
   // Migrate the former project-root workbook exactly once, preserving the file
   // while putting it into the required T\u01b0 v\u1ea5n folder.
@@ -775,7 +842,7 @@ function recordFromWorkbook_(file, projectId, customerFolder, includeProgress) {
   const createdAt = normalizeExcelDate_(metadata.createdAt) || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
   const record = {
     id: "drive-" + projectId,
-    name: metadata.name || details.HVT || projectId,
+    name: metadata.name || details.HVT || metadata.houseId || projectId,
     houseId: metadata.houseId || "",
     customerShareToken: metadata.customerShareToken || "",
     projectId: metadata.projectId || projectId,
@@ -963,11 +1030,12 @@ function keyValueRows_(rows) {
 }
 
 function exportCustomerWorkbook_(record, year, month) {
-  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const folderKey = customerFolderKey_(record);
+  const customerFolder = customerFolderForRecord_(record, year, month, true);
   const consultingFolder = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
-  const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + record.projectId + ".xlsx";
+  const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + folderKey + ".xlsx";
 
-  const spreadsheet = SpreadsheetApp.create("GM-CRM temporary " + record.projectId);
+  const spreadsheet = SpreadsheetApp.create("GM-CRM temporary " + folderKey);
   try {
     writeWorkbook_(spreadsheet, record);
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
@@ -987,13 +1055,14 @@ function exportCustomerWorkbook_(record, year, month) {
 }
 
 function exportDesignProgressWorkbook_(record, year, month, progressKind) {
-  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const folderKey = customerFolderKey_(record);
+  const customerFolder = customerFolderForRecord_(record, year, month, true);
   const designFolder = getOrCreateFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
   const isInterior = progressKind === "interior";
   const isAcceptance = progressKind === "acceptance";
   const label = isInterior ? "n\u1ed9i th\u1ea5t" : isAcceptance ? "nghi\u1ec7m thu" : "ki\u1ebfn tr\u00fac";
-  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + label + " " + record.projectId + ".xlsx";
-  const spreadsheet = SpreadsheetApp.create("GM-CRM " + label + " design progress temporary " + record.projectId);
+  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + label + " " + folderKey + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM " + label + " design progress temporary " + folderKey);
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Ti\u1ebfn \u0111\u1ed9");
@@ -1022,10 +1091,11 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
 }
 
 function exportWarrantyWorkbook_(record, year, month) {
-  const customerFolder = getCustomerFolder_(year, month, record.projectId, true);
+  const folderKey = customerFolderKey_(record);
+  const customerFolder = customerFolderForRecord_(record, year, month, true);
   const warrantyFolder = getOrCreateFolder_(customerFolder, "B\u1ea3o h\u00e0nh");
-  const fileName = "Phi\u1ebfu th\u00f4ng tin b\u1ea3o h\u00e0nh " + record.projectId + ".xlsx";
-  const spreadsheet = SpreadsheetApp.create("GM-CRM warranty temporary " + record.projectId);
+  const fileName = "Phi\u1ebfu th\u00f4ng tin b\u1ea3o h\u00e0nh " + folderKey + ".xlsx";
+  const spreadsheet = SpreadsheetApp.create("GM-CRM warranty temporary " + folderKey);
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("B\u1ea3o h\u00e0nh");
@@ -1159,19 +1229,20 @@ function listWorkflowFiles_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const workflow = String(payload.workflow || "").trim();
   const allowedWorkflows = ["Ghi chú", "T\u01b0 v\u1ea5n", "Thi\u1ebft k\u1ebf", "D\u1ef1 to\u00e1n", "Thi c\u00f4ng", "Nghi\u1ec7m thu", "B\u1ea3o h\u00e0nh"];
   if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thi\u1ebfu th\u00f4ng tin th\u01b0 m\u1ee5c c\u1ea7n n\u1ea1p.");
 
-  const cacheKey = "gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
+  const cacheKey = "gmcrm-files-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow);
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
   if (cached) return cached;
 
   // Ghi chú was added after some existing projects were created. Opening it
   // creates just that missing folder, without rechecking every project folder.
-  const customerFolder = getCustomerFolder_(year, month, projectId, false);
+  const customerFolder = customerFolderForPayload_(payload, false);
   if (!customerFolder) return { ok: true, files: [] };
-  const workflowFolderCacheKey = "gmcrm-workflow-folder-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow);
+  const workflowFolderCacheKey = "gmcrm-workflow-folder-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow);
   const workflowFolder = getCachedFolder_(workflowFolderCacheKey) || findFolder_(customerFolder, workflow) || (workflow === "Ghi chú" ? getOrCreateFolder_(customerFolder, workflow) : null);
   if (!workflowFolder) return { ok: true, files: [] };
   cacheFolder_(workflowFolderCacheKey, workflowFolder);
@@ -1252,14 +1323,15 @@ function createWorkflowDateFolder_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const workflow = String(payload.workflow || "").trim();
   const allowedWorkflows = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
   if (!year || !month || !projectId || allowedWorkflows.indexOf(workflow) === -1) throw new Error("Thiếu thông tin thư mục cần tạo.");
-  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const customerFolder = customerFolderForPayload_(payload, true);
   const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
   const folderName = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd-MM-yyyy");
   const folder = getOrCreateFolder_(workflowFolder, folderName);
-  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow)));
+  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow)));
   return { ok: true, folderId: folder.getId(), folderName: folderName, folderUrl: folder.getUrl() };
 }
 
@@ -1267,6 +1339,7 @@ function uploadWorkflowFile_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const workflow = String(payload.workflow || "").trim();
   const upload = payload.file || {};
   const allowedWorkflows = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành"];
@@ -1277,14 +1350,14 @@ function uploadWorkflowFile_(payload) {
   const fileName = String(upload.fileName || "").replace(/[\\/]/g, "-").trim();
   if (!fileName) throw new Error("Tên tệp không hợp lệ.");
 
-  const customerFolder = getCustomerFolder_(year, month, projectId, true);
+  const customerFolder = customerFolderForPayload_(payload, true);
   const workflowFolder = getOrCreateFolder_(customerFolder, workflow);
   const bytes = Utilities.base64Decode(upload.data);
   if (bytes.length > 12 * 1024 * 1024) throw new Error("Mỗi tệp tải trực tiếp tối đa 12 MB.");
   trashFilesByName_(workflowFolder, fileName);
   const blob = Utilities.newBlob(bytes, String(upload.mimeType || "application/octet-stream"), fileName);
   const file = workflowFolder.createFile(blob);
-  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + projectId + "-" + Utilities.base64EncodeWebSafe(workflow)));
+  CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow)));
   return { ok: true, fileId: file.getId(), fileName: fileName, fileUrl: file.getUrl(), folderUrl: workflowFolder.getUrl() };
 }
 
@@ -1361,8 +1434,8 @@ function saveWorkspaceCache_(payload) {
   return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
 }
 
-function workNotesFolder_(year, month, projectId, createMissing) {
-  const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+function workNotesFolder_(year, month, projectId, createMissing, houseId) {
+  const customerFolder = customerFolderForPayload_({ year: year, month: month, projectId: projectId, houseId: houseId }, createMissing);
   if (!customerFolder) return null;
   return createMissing ? getOrCreateFolder_(customerFolder, "Ghi chú") : findFolder_(customerFolder, "Ghi chú");
 }
@@ -1371,8 +1444,9 @@ function workNotesPayload_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const houseId = String(payload.houseId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin hồ sơ ghi chú.");
-  return { year: year, month: month, projectId: projectId };
+  return { year: year, month: month, projectId: projectId, houseId: houseId };
 }
 
 function workNoteText_(value, maximum) {
@@ -1470,7 +1544,7 @@ function loadWorkNotes_(payload) {
   if (Array.isArray(shared)) return { ok: true, notes: normalizeWorkNotes_(shared), source: "script-properties" };
   const cached = readCachedJson_(cacheKey);
   if (cached) return { ok: true, notes: normalizeWorkNotes_(cached), source: "cache" };
-  const folder = workNotesFolder_(details.year, details.month, details.projectId, false);
+  const folder = workNotesFolder_(details.year, details.month, details.projectId, false, details.houseId);
   if (!folder) return { ok: true, notes: [] };
   const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
   if (!file) return { ok: true, notes: [] };
@@ -1497,7 +1571,7 @@ function syncWorkNotes_(payload) {
   cacheJson_(workNotesCacheKey_(details), notes, 21600);
   let driveSaved = false;
   try {
-    const folder = workNotesFolder_(details.year, details.month, details.projectId, true);
+    const folder = workNotesFolder_(details.year, details.month, details.projectId, true, details.houseId);
     const content = JSON.stringify(notes);
     const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
     if (file) file.setContent(content);
@@ -1540,12 +1614,13 @@ function completeWorkNote_(payload) {
   records.push({
     ...note,
     projectId: details.projectId,
+    houseId: details.houseId,
     savedAt: Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
   });
   const content = JSON.stringify(records);
   if (file) file.setContent(content);
   else folder.createFile(COMPLETED_WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
-  const workFolder = workNotesFolder_(details.year, details.month, details.projectId, true);
+  const workFolder = workNotesFolder_(details.year, details.month, details.projectId, true, details.houseId);
   const activeFile = findFileByName_(workFolder, WORK_NOTES_FILE_NAME);
   let projectNotes = [];
   if (activeFile) {
@@ -1952,12 +2027,13 @@ function documentSnapshotDate_(name) {
 
 function listDocumentSnapshots_(documentsFolder, projectId) {
   const snapshots = [];
-  const prefix = "-" + projectId;
   const folders = documentsFolder.getFolders();
   while (folders.hasNext()) {
     const folder = folders.next();
     const name = folder.getName();
-    if (name.length <= prefix.length || name.slice(-prefix.length) !== prefix || !documentSnapshotDate_(name)) continue;
+    // The folder itself already scopes snapshots to one house. Accept both
+    // legacy ...-GM... names and new ...-<mã nhà> names during migration.
+    if (!documentSnapshotDate_(name)) continue;
     snapshots.push({ folder: folder, id: folder.getId(), name: name, date: documentSnapshotDate_(name) });
   }
   snapshots.sort(function(a, b) {
@@ -2022,6 +2098,18 @@ function findDocumentMetaByKey_(manifest, documentKey) {
 
 function documentsFolderForProject_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  return documentsFolderForCustomerFolder_(customerFolder, createMissing);
+}
+
+function documentsFolderForPayload_(payload, createMissing) {
+  // Keep the original helper as the compatibility seam for older clients and
+  // unit tests that only provide the internal project id. New clients send a
+  // houseId and use the house-code aware lookup below.
+  if (!String(payload && payload.houseId || "").trim()) return documentsFolderForProject_(Number(payload.year), Number(payload.month), String(payload.projectId || "").trim(), createMissing);
+  return documentsFolderForCustomerFolder_(customerFolderForPayload_(payload, createMissing), createMissing);
+}
+
+function documentsFolderForCustomerFolder_(customerFolder, createMissing) {
   if (!customerFolder) return null;
   let documentsFolder = findFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
   if (documentsFolder) return documentsFolder;
@@ -2062,6 +2150,15 @@ function ensureThreeDFolders_(customerFolder) {
 
 function threeDFoldersForProject_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  return threeDFoldersForCustomerFolder_(customerFolder, createMissing);
+}
+
+function threeDFoldersForPayload_(payload, createMissing) {
+  if (!String(payload && payload.houseId || "").trim()) return threeDFoldersForProject_(Number(payload.year), Number(payload.month), String(payload.projectId || "").trim(), createMissing);
+  return threeDFoldersForCustomerFolder_(customerFolderForPayload_(payload, createMissing), createMissing);
+}
+
+function threeDFoldersForCustomerFolder_(customerFolder, createMissing) {
   if (!customerFolder) return null;
   if (createMissing) return ensureThreeDFolders_(customerFolder);
   const root = findFolder_(customerFolder, THREE_D_FOLDER_NAME);
@@ -2171,12 +2268,13 @@ function listDocuments_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
   // Listing must stay read-only. A new day is created only by the explicit
   // "Bản ngày mới" command, never when the user merely opens or switches days.
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, false);
+  const documentsFolder = documentsFolderForPayload_(payload, false);
   if (!documentsFolder) return { ok: true, snapshots: [], activeSnapshotId: "", files: [] };
-  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const snapshots = listDocumentSnapshots_(documentsFolder, folderKey);
   const requestedId = String(payload.snapshotId || "");
   const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
   const target = snapshots[snapshotIndex];
@@ -2254,7 +2352,7 @@ function list3DFiles_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin thư mục 3D.");
-  const structure = threeDFoldersForProject_(year, month, projectId, true);
+  const structure = threeDFoldersForPayload_(payload, true);
   return {
     ok: true,
     rootUrl: structure.root.getUrl(),
@@ -2290,10 +2388,11 @@ function createDocumentSnapshot_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin Tài liệu.");
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
-  const todayName = documentSnapshotName_(projectId);
-  const snapshots = listDocumentSnapshots_(documentsFolder, projectId);
+  const documentsFolder = documentsFolderForPayload_(payload, true);
+  const todayName = documentSnapshotName_(folderKey);
+  const snapshots = listDocumentSnapshots_(documentsFolder, folderKey);
   const sameDay = snapshots.filter(function(snapshot) { return snapshot.name === todayName; })[0];
   if (sameDay) return { ok: true, alreadyExists: true, snapshot: { id: sameDay.id, name: sameDay.name, date: sameDay.date, locked: !!((readDocumentManifest_(documentsFolder).snapshots || {})[sameDay.id] || {}).locked } };
   const targetFolder = documentsFolder.createFolder(todayName);
@@ -2314,11 +2413,12 @@ function setDocumentSnapshotLock_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const snapshotId = String(payload.snapshotId || "").trim();
   const locked = payload.locked === true;
   if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
-  documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
+  const documentsFolder = documentsFolderForPayload_(payload, true);
+  documentSnapshotForProject_(documentsFolder, folderKey, snapshotId);
   if (!locked && String(payload.passcode || "") !== DOCUMENT_SNAPSHOT_UNLOCK_CODE) throw new Error("Mã mở khóa không đúng.");
   const manifest = readDocumentManifest_(documentsFolder);
   manifest.snapshots = manifest.snapshots || {};
@@ -2332,11 +2432,12 @@ function deleteDocumentSnapshot_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const snapshotId = String(payload.snapshotId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId || !snapshotId) throw new Error("Thiếu thông tin bản Tài liệu.");
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, false);
+  const documentsFolder = documentsFolderForPayload_(payload, false);
   if (!documentsFolder) throw new Error("Không tìm thấy thư mục Tài liệu của hồ sơ này.");
-  const snapshot = documentSnapshotForProject_(documentsFolder, projectId, snapshotId);
+  const snapshot = documentSnapshotForProject_(documentsFolder, folderKey, snapshotId);
   const manifest = readDocumentManifest_(documentsFolder);
   if (!!((manifest.snapshots || {})[snapshotId] || {}).locked) throw new Error("Bản ngày đang khóa. Hãy mở khóa trước khi xóa.");
   manifest.files = manifest.files || {};
@@ -2354,13 +2455,14 @@ function updateDocumentMetadata_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
+  const folderKey = customerFolderKey_(payload);
   const fileId = String(payload.fileId || "").trim();
   const requestedSnapshotId = String(payload.snapshotId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId || !fileId) throw new Error("Thiếu thông tin tệp Tài liệu.");
-  const documentsFolder = documentsFolderForProject_(year, month, projectId, true);
+  const documentsFolder = documentsFolderForPayload_(payload, true);
   const manifest = readDocumentManifest_(documentsFolder);
   const file = DriveApp.getFileById(fileId);
-  const snapshot = documentSnapshotForProject_(documentsFolder, projectId, requestedSnapshotId);
+  const snapshot = documentSnapshotForProject_(documentsFolder, folderKey, requestedSnapshotId);
   const existing = manifest.files[fileId] || {};
   const current = normalizeDocumentMeta_({ ...existing, documentKey: fileId, sourceId: fileId, assigned: true }, file, "Chưa gắn");
   current.assigned = true;
@@ -2649,6 +2751,16 @@ function ensureProjectFolders_(customerFolder, createInitialDocumentSnapshot) {
 
 function getAudioFolder_(year, month, projectId, createMissing) {
   const customerFolder = getCustomerFolder_(year, month, projectId, createMissing);
+  if (!customerFolder) return null;
+  const consulting = createMissing ? getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n") : findFolder_(customerFolder, "T\u01b0 v\u1ea5n");
+  if (!consulting) return null;
+  const dataFolder = createMissing ? getOrCreateFolder_(consulting, "DataID") : findFolder_(consulting, "DataID");
+  if (!dataFolder) return null;
+  return createMissing ? getOrCreateFolder_(dataFolder, "Ghi \u00e2m") : findFolder_(dataFolder, "Ghi \u00e2m");
+}
+
+function getAudioFolderForPayload_(payload, createMissing) {
+  const customerFolder = customerFolderForPayload_(payload, createMissing);
   if (!customerFolder) return null;
   const consulting = createMissing ? getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n") : findFolder_(customerFolder, "T\u01b0 v\u1ea5n");
   if (!consulting) return null;
