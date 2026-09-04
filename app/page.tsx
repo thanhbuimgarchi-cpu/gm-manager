@@ -1971,9 +1971,11 @@ export default function Home() {
     const refreshWorkspace = (force = false) => {
       if (document.visibilityState === "visible") void loadWorkspaceFromDrive(config, true, { mode: "index", year: getVietnamDate().year, month: getVietnamDate().month, force });
     };
-    // The cached workspace is used immediately. Drive is contacted only after
-    // fifteen minutes (or from the explicit Nạp lại Drive button).
-    void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month });
+    // Render the cached workspace immediately, then verify the current month
+    // against Drive as soon as the app opens. This prevents folders deleted
+    // from Drive from lingering in a device's local/shared cache until the
+    // fifteen-minute refresh window expires.
+    void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month, force: true });
     const refreshTimer = window.setInterval(() => refreshWorkspace(true), DRIVE_INDEX_CACHE_MS);
     return () => window.clearInterval(refreshTimer);
   }, [driveScriptUrl, isCustomerPortal]);
