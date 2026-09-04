@@ -138,6 +138,16 @@ type WorkRecord = {
   functionalRows?: LegacyFunctionalRow[];
 };
 
+// projectId is kept only as an internal/cache key. Never use it as a visible
+// customer label; legacy records may still have their old GM… value in name.
+function customerDisplayName(record: Pick<WorkRecord, "name" | "houseId" | "projectId">) {
+  const name = String(record.name || "").trim();
+  const houseId = String(record.houseId || "").trim();
+  const projectId = String(record.projectId || "").trim();
+  if (name && name !== projectId) return name;
+  return houseId || (name && !/^GM\d{2}\d{2}\d{4}/i.test(name) ? name : "Chưa đặt tên");
+}
+
 type DesignProgressRow = {
   id: string;
   isCustom: boolean;
@@ -2861,13 +2871,13 @@ export default function Home() {
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
     setOpenMenuId(null);
     setProtectedAction({ type, record });
-    if (type === "rename") setRenameValue(record.name);
+    if (type === "rename") setRenameValue(record.name === record.projectId ? "" : record.name);
   };
 
   const confirmDeleteRecord = () => {
     if (!protectedAction || protectedAction.type !== "delete") return;
     deleteRecord(protectedAction.record.id);
-    setNotice(`Đã xóa ${protectedAction.record.houseId || protectedAction.record.name || "hồ sơ"}`);
+    setNotice(`Đã xóa ${customerDisplayName(protectedAction.record)}`);
     setProtectedAction(null);
   };
 
@@ -3040,7 +3050,7 @@ export default function Home() {
 
   const deleteAudioNote = async (record: WorkRecord) => {
     if (!record.audioNote || audioProcessingId) return;
-    if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${record.houseId || record.name || "hồ sơ này"}?`)) return;
+    if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${customerDisplayName(record)}?`)) return;
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
       setDriveConfigOpen(true);
@@ -3184,7 +3194,7 @@ export default function Home() {
         record: { ...record, details: record.details ?? {}, functionalFloors: normalizeFunctionalFloors(record) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo file Excel.");
-      setNotice(`Đã xuất ${(record.houseId || record.name || "hồ sơ")}.xlsx vào Drive`);
+      setNotice(`Đã xuất ${record.houseId || "chưa-có-mã-nhà"}.xlsx vào Drive`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể kết nối Drive.");
     } finally {
@@ -3208,7 +3218,7 @@ export default function Home() {
         record: { ...record, [designProgressDefinitions[kind].field]: normalizeDesignProgress(record, kind) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || `Không thể tạo Excel ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
-      setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${(record.houseId || record.name || "hồ sơ")}.xlsx`);
+      setNotice(`Đã cập nhật ${designProgressDefinitions[kind].title} ${record.houseId || "chưa-có-mã-nhà"}.xlsx`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : `Không thể đồng bộ ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")}.`);
     } finally {
@@ -3231,7 +3241,7 @@ export default function Home() {
         record: { ...record, warrantyProgress: normalizeWarrantyProgress(record) },
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo Excel Phiếu thông tin bảo hành.");
-      setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${(record.houseId || record.name || "hồ sơ")}.xlsx`);
+      setNotice(`Đã cập nhật Phiếu thông tin bảo hành ${record.houseId || "chưa-có-mã-nhà"}.xlsx`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể đồng bộ Phiếu thông tin bảo hành.");
     } finally {
@@ -3629,7 +3639,7 @@ export default function Home() {
         <h1 id="customer-login-title">Dự án của bạn</h1>
         <p>{customerPortalLoading ? "Đang mở thông tin dự án…" : customerPortalError || "Không thể mở thông tin dự án."}</p>
       </section> : <section className="customer-portal__project">
-        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerPortalRecord.name || customerPortalRecord.houseId || "Dự án"}</h1>{customerPortalRecord.houseId && <p>Mã nhà: <b>{customerPortalRecord.houseId}</b></p>}</header>
+        <header><p className="eyebrow">Dự án của bạn · Chỉ xem</p><h1>{customerDisplayName(customerPortalRecord)}</h1>{customerPortalRecord.houseId && <p>Mã nhà: <b>{customerPortalRecord.houseId}</b></p>}</header>
         {renderCustomerProgress("Tiến độ thiết kế kiến trúc", customerPortalRecord.designProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nội thất", customerPortalRecord.interiorDesignProgress)}
         {renderCustomerProgress("Tiến độ thiết kế nghiệm thu", customerPortalRecord.acceptanceDesignProgress)}
@@ -3774,7 +3784,7 @@ export default function Home() {
       {workflowSearch && <div className="workflow-customer-search__results">
         {workflowSearchResults.length ? workflowSearchResults.map((location) => (
           <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location)}>
-            <span><b>{location.record.name || location.record.houseId || "Chưa đặt tên"}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
+            <span><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
             <em>T{location.month} / {location.year} →</em>
           </button>
         )) : <p>Không tìm thấy khách hàng phù hợp.</p>}
@@ -3895,7 +3905,7 @@ export default function Home() {
       : customerMessages;
     return <section className="customer-messages" aria-label="Tin nhắn khách">
       <header className="customer-messages__heading">
-        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? selectedCustomerLocation.record.name : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Chỉ nhóm có dạng <b>Mã nhà-GM-Nội dung</b> mới được ghép với hồ sơ dự án.</p></div>
+        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Chỉ nhóm có dạng <b>Mã nhà-GM-Nội dung</b> mới được ghép với hồ sơ dự án.</p></div>
         <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Đồng bộ Pancake mỗi phút"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
       </header>
       <div className="customer-messages__list">
@@ -3917,7 +3927,7 @@ export default function Home() {
       {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
         return <button type="button" className={`sidebar-note ${note.assigneeEmail === loggedInEmployeeEmail && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {location.record.name || location.record.houseId || "Khách hàng"} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {customerDisplayName(location.record)} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
     </div>}
@@ -4025,7 +4035,7 @@ export default function Home() {
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder">▰</span>
-                    <span className="customer-result__identity"><b>{location.record.name || location.record.houseId || "Chưa đặt tên"}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
+                    <span className="customer-result__identity"><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
                     <span className="customer-result__date">T{location.month} / {location.year}</span>
                     <span className="customer-result__arrow">→</span>
                   </button>
@@ -4092,7 +4102,7 @@ export default function Home() {
 
             {selectedRecord && <section className="record-detail record-detail--inline">
               <header className="record-detail__heading">
-                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{selectedRecord.name || selectedRecord.houseId || "Khách hàng"}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
+                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
                   <div className="consulting-profile-actions">
                   <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id}>⇩ Export Excel</button></div>
                   <div className="project-actions">
@@ -4188,7 +4198,7 @@ export default function Home() {
             {renderWorkflowCustomerSearch()}
             <section className="coming-soon">
               <span>{activeDriveFolder?.icon}</span><p className="eyebrow">GM Manager</p><h1>{activeFolder}</h1>
-              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation?.record.name}</b>{selectedCustomerLocation?.record.houseId ? <> · Mã nhà {selectedCustomerLocation.record.houseId}</> : null}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
+              <p>Khu vực {activeFolder} của <b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "khách hàng"}</b>{selectedCustomerLocation?.record.houseId ? <> · Mã nhà {selectedCustomerLocation.record.houseId}</> : null}. Dữ liệu sẽ nằm trong thư mục <b>{activeFolder}</b> bên trong đúng hồ sơ khách hàng này.</p>
             </section>
           </section>
         )}
@@ -4299,7 +4309,7 @@ export default function Home() {
           {protectedAction.type === "delete" ? (
             <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>
               <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.record.houseId || protectedAction.record.name}</p>
+              <p className="eyebrow">{customerDisplayName(protectedAction.record)}</p>
               <h2>Xóa hồ sơ?</h2>
               <p>Thao tác này sẽ xóa hồ sơ khỏi danh sách hiện tại.</p>
               <div className="dialog-actions"><button type="button" onClick={() => setProtectedAction(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDeleteRecord}>Xóa hồ sơ</button></div>
@@ -4307,7 +4317,7 @@ export default function Home() {
           ) : (
             <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
               <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
-              <p className="eyebrow">{protectedAction.record.houseId || protectedAction.record.name}</p>
+              <p className="eyebrow">{customerDisplayName(protectedAction.record)}</p>
               <h2>Rename hồ sơ</h2>
               <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
               <button className="add-button" type="submit">Lưu tên mới</button>
@@ -4320,7 +4330,7 @@ export default function Home() {
         <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
           <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
             <header className="record-detail__heading">
-              <div className="record-detail__identity"><p className="eyebrow">Hồ sơ dự án</p><h2>{selectedRecord.name || selectedRecord.houseId || "Khách hàng"}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /></div>
+              <div className="record-detail__identity"><p className="eyebrow">Hồ sơ dự án</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /></div>
               <button className="dialog-close" onClick={() => setSelectedRecordId(null)} aria-label="Đóng">×</button>
             </header>
             <div className="detail-scroll">
