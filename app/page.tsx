@@ -1393,16 +1393,13 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             warrantyProgress: merged.warrantyProgress ?? createWarrantyProgress(),
           };
         });
-        // Keep customers created on this device even before their optional
-        // Excel export creates a matching Drive folder.
-        localRecords.filter((record) => !driveProjectIds.has(record.projectId)).forEach((record) => mergedRecords.unshift(record));
         return { label, records: mergedRecords };
       }),
     };
   });
 }
 
-function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFolder[]) {
+function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFolder[], driveIndexProjectIds?: Map<string, Set<string>>) {
   const sharedByYear = new Map(sharedYears.map((year) => [year.year, year]));
   const localByYear = new Map(localYears.map((year) => [year.year, year]));
   const mergedYearNumbers = Array.from(new Set([...sharedYears.map((year) => year.year), ...localYears.map((year) => year.year)])).sort((left, right) => left - right);
@@ -1414,11 +1411,15 @@ function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFo
       months: monthLabels.map((label, index) => {
         const sharedMonth = sharedYear?.months?.find((month) => month.label === label);
         const localMonth = localYear?.months?.find((month) => month.label === label) ?? localYear?.months?.[index] ?? { label, records: [] };
-        if (!sharedMonth) return localMonth;
-        const localRecords = localMonth.records ?? [];
+        const driveKey = `${yearNumber}-${index + 1}`;
+        const knownDriveIds = driveIndexProjectIds?.get(driveKey);
+        const driveIndexKnown = Boolean(knownDriveIds);
+        if (!sharedMonth && !driveIndexKnown) return localMonth;
+        const localRecords = (localMonth.records ?? []).filter((record) => !driveIndexKnown || knownDriveIds?.has(record.projectId));
         const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
-        const sharedProjectIds = new Set((sharedMonth.records ?? []).map((record) => record.projectId));
-        const records = (sharedMonth.records ?? []).map((record) => {
+        const sharedRecords = (sharedMonth?.records ?? []).filter((record) => !driveIndexKnown || knownDriveIds?.has(record.projectId));
+        const sharedProjectIds = new Set(sharedRecords.map((record) => record.projectId));
+        const records = sharedRecords.map((record) => {
           const localRecord = localByProjectId.get(record.projectId);
           const localUpdatedAt = Number(localRecord?.cacheUpdatedAt ?? 0);
           const sharedUpdatedAt = Number(record.cacheUpdatedAt ?? 0);
@@ -1535,6 +1536,10 @@ export default function Home() {
   const workspaceSyncPending = useRef<YearFolder[] | null>(null);
   const workspaceSyncInFlight = useRef(false);
   const sharedWorkspaceCacheEmpty = useRef(false);
+  // Drive index results are authoritative for a loaded year/month. This map
+  // prevents a deleted Drive folder from being reintroduced by the shared
+  // workspace cache on another device.
+  const driveIndexProjectIds = useRef(new Map<string, Set<string>>());
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   const promptForMobileNotifications = () => {
@@ -1940,9 +1945,14 @@ export default function Home() {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId, refresh: Boolean(options.force) });
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       if (cacheAge) writeDriveCache(cacheKey, result.years);
+      if (mode === "index") {
+        const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
+        driveIndexProjectIds.current.set(`${year}-${month}`, new Set((indexedMonth?.records ?? []).map((record) => record.projectId)));
+      }
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
         persist(driveYears, false);
+        if (mode === "index") queueWorkspaceCacheSync(driveYears);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
     } catch (error) {
@@ -1973,12 +1983,19 @@ export default function Home() {
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
-      if (result.years.some((year) => year.months?.some((month) => month.records?.length))) {
+      const mergedYears = mergeSharedWorkspaceYears(result.years, years, driveIndexProjectIds.current);
+      const mergedHasRecords = mergedYears.some((year) => year.months?.some((month) => month.records?.length));
+      if (mergedHasRecords) {
         sharedWorkspaceCacheEmpty.current = false;
-        const mergedYears = mergeSharedWorkspaceYears(result.years, years);
         persist(mergedYears, false);
         // Preserve records that only existed on this device and publish the
         // merged snapshot so the next device sees the same workspace.
+        queueWorkspaceCacheSync(mergedYears);
+      } else if (driveIndexProjectIds.current.size) {
+        // A loaded Drive index with no matching folder is authoritative. Do
+        // not resurrect deleted projects from the shared cache.
+        sharedWorkspaceCacheEmpty.current = false;
+        persist(mergedYears, false);
         queueWorkspaceCacheSync(mergedYears);
       } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = true;
@@ -3084,6 +3101,7 @@ export default function Home() {
       }
     }
     clearDriveClientCache();
+    driveIndexProjectIds.current.clear();
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
     setNotice(config.driveUrl ? "Đã lưu kết nối Google Apps Script và Link Drive trên thiết bị này." : "Đã kết nối Google Apps Script trên thiết bị này.");
