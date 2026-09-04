@@ -1952,7 +1952,6 @@ export default function Home() {
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
         persist(driveYears, false);
-        if (mode === "index") queueWorkspaceCacheSync(driveYears);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
     } catch (error) {
