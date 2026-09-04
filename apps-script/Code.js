@@ -169,6 +169,46 @@ function createCustomerFolder_(payload) {
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
 }
 
+/**
+ * Rename an existing customer folder when the user changes its house code.
+ * The internal projectId is retained in the cache and is used as a fallback
+ * for folders created before house codes were introduced.
+ */
+function renameCustomerFolder_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const oldHouseId = String(payload.oldHouseId || "").trim();
+  const houseId = String(payload.houseId || "").trim();
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !projectId || !validCustomerFolderKey_(houseId)) {
+    throw new Error("Thiếu thông tin mã nhà hợp lệ để lưu thay đổi.");
+  }
+
+  const root = rootFolder_();
+  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const yearFolder = customers && findFolder_(customers, String(year));
+  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
+  if (!monthFolder) throw new Error("Không tìm thấy thư mục tháng của hồ sơ trên Drive.");
+
+  // Prefer the previous user-facing code, then the internal project id for
+  // older folders, and finally the new code for an idempotent retry.
+  let folder = oldHouseId ? findFolder_(monthFolder, oldHouseId) : null;
+  if (!folder) folder = findFolder_(monthFolder, projectId);
+  if (!folder) folder = findFolder_(monthFolder, houseId);
+  if (!folder) throw new Error("Không tìm thấy thư mục hồ sơ cũ trên Drive.");
+
+  const duplicate = findFolder_(monthFolder, houseId);
+  if (duplicate && duplicate.getId() !== folder.getId()) {
+    throw new Error("Mã nhà đã tồn tại trong cùng tháng. Hãy chọn mã khác.");
+  }
+  if (folder.getName() !== houseId) folder.setName(houseId);
+  cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + houseId, folder);
+  if (oldHouseId && oldHouseId !== houseId) {
+    try { CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-customer-folder-" + year + "-" + month + "-" + oldHouseId)); } catch (error) { /* Cache is optional. */ }
+  }
+  return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
+}
+
 function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
@@ -217,6 +257,7 @@ function doPost(event) {
       if (payload.action === "reset-employee-password") return json_(resetEmployeePassword_(payload));
       if (payload.action === "set-drive-root") return json_(setDriveRootFolder_(payload));
       if (payload.action === "create-customer-folder") return json_(createCustomerFolder_(payload));
+      if (payload.action === "rename-customer-folder") return json_(renameCustomerFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));

@@ -1495,6 +1495,7 @@ export default function Home() {
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameHouseId, setRenameHouseId] = useState("");
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
   const [driveConfigOpen, setDriveConfigOpen] = useState(false);
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
@@ -2867,7 +2868,10 @@ export default function Home() {
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
     setOpenMenuId(null);
     setProtectedAction({ type, record });
-    if (type === "rename") setRenameValue(record.name === record.projectId ? "" : record.name);
+    if (type === "rename") {
+      setRenameValue(record.name === record.projectId ? "" : record.name);
+      setRenameHouseId(record.houseId ?? "");
+    }
   };
 
   const confirmDeleteRecord = () => {
@@ -2877,10 +2881,17 @@ export default function Home() {
     setProtectedAction(null);
   };
 
-  const renameRecord = (event: FormEvent<HTMLFormElement>) => {
+  const renameRecord = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!protectedAction || !renameValue.trim()) return;
-    const updatedRecord = { ...protectedAction.record, name: renameValue.trim(), cacheUpdatedAt: Date.now() };
+    if (!protectedAction) return;
+    const nextHouseId = renameHouseId.trim();
+    if (!nextHouseId) {
+      setNotice("Hãy nhập mã nhà trước khi lưu thay đổi.");
+      return;
+    }
+    const previousRecord = protectedAction.record;
+    const nextName = renameValue.trim() || previousRecord.name || previousRecord.projectId;
+    const updatedRecord = { ...previousRecord, name: nextName, houseId: nextHouseId, cacheUpdatedAt: Date.now() };
     const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
       ...yearFolder,
       months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
@@ -2890,7 +2901,23 @@ export default function Home() {
     });
     persist(nextYears);
     setProtectedAction(null);
-    setNotice("Đã đổi tên hồ sơ");
+    setNotice("Đã lưu tên và mã nhà trên thiết bị.");
+    if (driveScriptUrl.trim() && previousRecord.houseId?.trim() !== nextHouseId) {
+      try {
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+          action: "rename-customer-folder",
+          year: selectedYear,
+          month: selectedMonth,
+          projectId: previousRecord.projectId,
+          oldHouseId: previousRecord.houseId,
+          houseId: nextHouseId,
+        });
+        if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đổi tên thư mục Drive.");
+        setNotice("Đã lưu tên và mã nhà, đồng thời cập nhật thư mục Drive.");
+      } catch (error) {
+        setNotice(`Đã lưu mã nhà trên thiết bị nhưng chưa cập nhật Drive: ${error instanceof Error ? error.message : "lỗi kết nối"}`);
+      }
+    }
   };
 
   const updateRecordDetail = (key: string, value: string) => {
@@ -4316,7 +4343,8 @@ export default function Home() {
               <p className="eyebrow">{customerDisplayName(protectedAction.record)}</p>
               <h2>Rename hồ sơ</h2>
               <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
-              <button className="add-button" type="submit">Lưu tên mới</button>
+              <label>Mã nhà <span className="field-code">(dùng làm tên thư mục Drive)</span><input value={renameHouseId} onChange={(event) => setRenameHouseId(event.target.value)} required placeholder="Ví dụ: HP-587" /></label>
+              <button className="add-button" type="submit">Lưu thay đổi</button>
             </form>
           )}
         </div>

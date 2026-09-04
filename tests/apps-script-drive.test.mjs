@@ -50,6 +50,33 @@ test("Drive root links can be normalized and saved for all devices", () => {
   assert.equal(values.get("gmcrm-drive-root-folder-id"), "1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu");
 });
 
+test("house code changes rename the existing Drive customer folder", () => {
+  const cache = new Map();
+  const makeFolder = (name, id, children = []) => ({
+    name,
+    getId: () => id,
+    getUrl: () => `https://drive.google.com/drive/folders/${id}`,
+    getName() { return this.name; },
+    setName(value) { this.name = value; },
+    getDateCreated: () => new Date("2026-01-01T00:00:00Z"),
+    getFolders: () => iterator(children),
+    getFiles: () => iterator([]),
+  });
+  const customer = makeFolder("HP-587", "customer-id-123");
+  const month = makeFolder("T9", "month-id-123", [customer]);
+  const year = makeFolder("2026", "year-id-123", [month]);
+  const customers = makeFolder("Khách hàng", "customers-id-123", [year]);
+  const root = makeFolder("GM Manager", "root-id-123", [customers]);
+  const context = loadContext({
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => "root-id-123" }) },
+    CacheService: { getScriptCache: () => ({ get: (key) => cache.get(key) || "", put: (key, value) => cache.set(key, value), remove: (key) => cache.delete(key) }) },
+    DriveApp: { getFolderById: (id) => { if (id === "root-id-123" || id === "customer-id-123") return id === "root-id-123" ? root : customer; throw new Error("missing folder"); } },
+  });
+  const result = context.renameCustomerFolder_({ year: 2026, month: 9, projectId: "GM03092026V", oldHouseId: "HP-587", houseId: "HP-888" });
+  assert.equal(result.ok, true);
+  assert.equal(customer.getName(), "HP-888");
+});
+
 test("Drive listings exclude spreadsheet files", () => {
   const context = loadContext();
   assert.equal(context.isSpreadsheetFile_("Phiếu thông tin khách hàng.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), true);
