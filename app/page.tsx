@@ -2006,15 +2006,11 @@ export default function Home() {
       if (mergedHasRecords) {
         sharedWorkspaceCacheEmpty.current = false;
         persist(mergedYears, false);
-        // Preserve records that only existed on this device and publish the
-        // merged snapshot so the next device sees the same workspace.
-        queueWorkspaceCacheSync(mergedYears);
       } else if (driveIndexProjectIds.current.size) {
         // A loaded Drive index with no matching folder is authoritative. Do
         // not resurrect deleted projects from the shared cache.
         sharedWorkspaceCacheEmpty.current = false;
         persist(mergedYears, false);
-        queueWorkspaceCacheSync(mergedYears);
       } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = true;
         queueWorkspaceCacheSync(years);
