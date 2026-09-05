@@ -251,6 +251,8 @@ function doPost(event) {
     try {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
+      if (payload.action === "save-personnel-cache") return json_(savePersonnelCache_(payload.personnel || {}));
+      if (payload.action === "export-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "register-employee-account") return json_(registerEmployeeAccount_(payload));
       if (payload.action === "request-password-reset") return json_(requestEmployeePasswordReset_(payload));
@@ -2530,10 +2532,18 @@ function personnelFolder_() {
   return getOrCreateFolder_(rootFolder_(), "Nhân lực");
 }
 
-function loadPersonnel_() {
-  const folder = personnelFolder_();
-  const file = findFileByName_(folder, "Danh sách nhân lực.xlsx");
-  if (!file) return { ok: true, personnel: {} };
+const PERSONNEL_CACHE_PROPERTY_KEY = "gmcrm-personnel-state-v1";
+// Kept only for one-time migration of rosters created before the Drive root
+// was changed. New reads/writes never depend on this folder.
+const LEGACY_PERSONNEL_ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
+
+function savePersonnelCache_(personnel) {
+  const value = personnel && typeof personnel === "object" && !Array.isArray(personnel) ? personnel : {};
+  writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, value);
+  return { ok: true, storage: "script-properties", savedAt: Date.now() };
+}
+
+function personnelFromWorkbook_(file) {
   const sheets = readXlsxSheets_(file);
   const rows = sheets["Nhân lực"] || sheets[Object.keys(sheets)[0]] || [];
   const personnel = {};
@@ -2566,7 +2576,44 @@ function loadPersonnel_() {
       address: String(row[addressColumn] || ""),
     });
   });
-  return { ok: true, personnel: personnel };
+  return personnel;
+}
+
+function loadPersonnel_() {
+  // Personnel is a shared cache, not a Drive-backed record. This keeps all
+  // devices in sync even when the configured Drive root changes or is read-only.
+  const cached = readPropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY);
+  if (cached && typeof cached === "object" && !Array.isArray(cached)) {
+    return { ok: true, personnel: cached, source: "script-properties" };
+  }
+
+  // One-time migration for installations that still have the old workbook.
+  // A Drive permission error must not prevent the app from loading an empty
+  // (and subsequently writable) personnel cache.
+  try {
+    let file = null;
+    try {
+      const folder = personnelFolder_();
+      file = findFileByName_(folder, "Danh sách nhân lực.xlsx");
+    } catch (error) {
+      // Try the previous root below; a changed root may no longer be readable.
+    }
+    if (!file) {
+      try {
+        const legacyRoot = DriveApp.getFolderById(LEGACY_PERSONNEL_ROOT_FOLDER_ID);
+        const legacyFolder = findFolder_(legacyRoot, "Nhân lực");
+        file = findFileByName_(legacyFolder, "Danh sách nhân lực.xlsx");
+      } catch (error) {
+        // The old root is optional and may have been removed.
+      }
+    }
+    if (!file) return { ok: true, personnel: {}, source: "empty" };
+    const personnel = personnelFromWorkbook_(file);
+    try { writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, personnel); } catch (error) { /* Migration cache is best effort. */ }
+    return { ok: true, personnel: personnel, source: "drive-migrated" };
+  } catch (error) {
+    return { ok: true, personnel: {}, source: "empty", driveWarning: error && error.message ? error.message : "Không thể đọc danh sách nhân lực cũ." };
+  }
 }
 
 function syncPersonnelWorkbook_(personnel) {

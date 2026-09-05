@@ -247,6 +247,27 @@ test("workspace cache is shared without touching Drive", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), years);
 });
 
+test("personnel cache is shared without touching Drive", () => {
+  const values = new Map();
+  const properties = {
+    getProperty: (key) => values.get(key) || null,
+    setProperty: (key, value) => values.set(key, String(value)),
+    deleteProperty: (key) => values.delete(key),
+  };
+  const personnel = {
+    management: [{ id: "person-1", status: "Có", name: "Nguyễn An", email: "", permissions: [] }],
+    office: [{ id: "person-2", status: "Có", name: "Trần Bình", email: "binh@example.com", permissions: ["Ghi chú"] }],
+  };
+  const context = loadContext({
+    PropertiesService: { getScriptProperties: () => properties },
+    DriveApp: { getFolderById: () => { throw new Error("Drive must not be read when personnel cache exists."); } },
+  });
+  assert.equal(context.savePersonnelCache_(personnel).ok, true);
+  const loaded = context.loadPersonnel_({});
+  assert.equal(loaded.source, "script-properties");
+  assert.deepEqual(JSON.parse(JSON.stringify(loaded.personnel)), personnel);
+});
+
 test("admin receives the active work-note overview across every customer", () => {
   const context = loadContext();
   context.readActiveWorkNotes_ = () => [

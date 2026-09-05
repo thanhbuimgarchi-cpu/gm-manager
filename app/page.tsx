@@ -1521,6 +1521,7 @@ export default function Home() {
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
   const [syncingDesignId, setSyncingDesignId] = useState<string | null>(null);
   const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
+  const [exportingPersonnel, setExportingPersonnel] = useState(false);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
   const [workflowFilesByFolder, setWorkflowFilesByFolder] = useState<Record<string, WorkflowFile[]>>({});
   const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
@@ -3458,19 +3459,32 @@ export default function Home() {
     });
     return outstanding.sort((left, right) => dateValue(left.note.dueDate).localeCompare(dateValue(right.note.dueDate)) || priorityOrder[left.note.priority] - priorityOrder[right.note.priority]);
   }, [assignedWorkNotes, customerLocations, workNotesCacheRevision]);
-  const syncPersonnelToDrive = async (next: Record<string, PersonnelMember[]>) => {
+  const savePersonnelCache = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-personnel", personnel: next });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu danh sách nhân lực vào Drive.");
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "save-personnel-cache", personnel: next });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ danh sách nhân lực.");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể lưu danh sách nhân lực vào Drive.");
+      setNotice(error instanceof Error ? error.message : "Không thể đồng bộ danh sách nhân lực dùng chung.");
+    }
+  };
+  const exportPersonnelToDrive = async () => {
+    if (!driveScriptUrl.trim()) { setDriveConfigOpen(true); return; }
+    setExportingPersonnel(true);
+    try {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; fileUrl?: string; fileName?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "export-personnel", personnel: personnelByCategory });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xuất danh sách nhân lực.");
+      setNotice(`Đã xuất ${result.fileName || "Danh sách nhân lực.xlsx"} vào Drive.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Không thể xuất danh sách nhân lực vào Drive.");
+    } finally {
+      setExportingPersonnel(false);
     }
   };
   const persistPersonnel = (next: Record<string, PersonnelMember[]>) => {
     setPersonnelByCategory(next);
     try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Personnel remains available for this session. */ }
-    void syncPersonnelToDrive(next);
+    void savePersonnelCache(next);
   };
   const savePersonnel = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -3610,9 +3624,23 @@ export default function Home() {
     if (!needsPersonnel || !driveScriptUrl.trim()) return;
     let cancelled = false;
     setLoadingPersonnel(true);
-    void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
+    void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]>; source?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
       if (!response.ok || !result.ok || cancelled) return;
-      const next = normalizePersonnelMap(result.personnel ?? {});
+      let next = normalizePersonnelMap(result.personnel ?? {});
+      // Keep a device's existing local roster when an older deployment has no
+      // shared cache yet (for example immediately after changing the Drive
+      // link). Seed that roster into the shared cache on the next successful
+      // request instead of replacing it with an empty response.
+      if (result.source === "empty" && !Object.values(next).some((members) => members.length)) {
+        try {
+          const local = JSON.parse(window.localStorage.getItem(personnelStorageKey) ?? "") as Record<string, PersonnelMember[]>;
+          const localNext = normalizePersonnelMap(local);
+          if (Object.values(localNext).some((members) => members.length)) {
+            next = localNext;
+            void savePersonnelCache(localNext);
+          }
+        } catch { /* A malformed local cache is ignored. */ }
+      }
       setPersonnelByCategory(next);
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
     }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
@@ -4033,7 +4061,7 @@ export default function Home() {
               </aside>
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading personnel-workspace__heading--compact">
-                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← UI tổng</button></div>
+                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Export Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← UI tổng</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
