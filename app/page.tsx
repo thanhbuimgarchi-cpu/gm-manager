@@ -4138,7 +4138,9 @@ export default function Home() {
 
   return (
     <main className="crm-shell">
-      {!selectedCustomerProjectId && (
+      {/* Tin nhắn khách là màn hình tổng hợp, nên phải mở được ngay cả khi
+          chưa chọn một hồ sơ khách hàng cụ thể từ màn hình tổng. */}
+      {!selectedCustomerProjectId && activeFolder !== "Tin nhắn" && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
             <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
