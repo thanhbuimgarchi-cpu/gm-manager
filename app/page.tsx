@@ -3440,7 +3440,9 @@ export default function Home() {
     }
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      void loadCustomerMessages(selectedCustomerLocation);
+      // Keep the background feed global so an employee does not miss a new
+      // customer message while viewing another customer's workflow.
+      void loadCustomerMessages();
     };
     refresh();
     const timer = window.setInterval(refresh, 60 * 1000);
