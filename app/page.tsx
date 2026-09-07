@@ -645,6 +645,26 @@ function customerMessageDate(value: string) {
   return date.toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function customerMessagePlainText(value: unknown) {
+  const raw = String(value ?? "");
+  const withLineBreaks = raw
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:div|p|li|tr|h[1-6]|blockquote)>/gi, "\n");
+  const stripped = withLineBreaks.replace(/<[^>]*>/g, "");
+  return stripped
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_match, code: string) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
 function customerMessageNotificationBody(message: CustomerMessageGroup) {
   const lines = message.messages.map((line) => `${line.senderName}: ${line.content} (${customerMessageDate(line.sentAt)})`);
   return [
@@ -664,7 +684,7 @@ function normalizeCustomerMessageGroup(value: CustomerMessageGroup): CustomerMes
   return {
     ...value,
     status,
-    messages: Array.isArray(value.messages) ? value.messages.map((message) => ({ ...message, senderName: String(message.senderName ?? "Khách hàng"), content: String(message.content ?? ""), sentAt: String(message.sentAt ?? "") })) : [],
+    messages: Array.isArray(value.messages) ? value.messages.map((message) => ({ ...message, senderName: String(message.senderName ?? "Khách hàng"), content: customerMessagePlainText(message.content), sentAt: String(message.sentAt ?? "") })) : [],
   };
 }
 

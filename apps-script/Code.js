@@ -1828,11 +1828,29 @@ function pancakeDateIso_(value) {
   return isFinite(date.getTime()) ? date.toISOString() : "";
 }
 
+function pancakePlainText_(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(?:div|p|li|tr|h[1-6]|blockquote)>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, function(_match, code) { return String.fromCodePoint(Number(code)); })
+    .replace(/&#x([\da-f]+);/gi, function(_match, code) { return String.fromCodePoint(parseInt(code, 16)); })
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
 function pancakeNestedText_(value) {
-  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "string" || typeof value === "number") return pancakePlainText_(value);
   if (!value || typeof value !== "object") return "";
   const nested = value.text || value.message || value.content || value.body;
-  return (nested && typeof nested === "object" ? pancakeNestedText_(nested) : String(nested || value.name || ""));
+  return pancakePlainText_(nested && typeof nested === "object" ? pancakeNestedText_(nested) : String(nested || value.name || ""));
 }
 
 function pancakeMessageText_(message) {
@@ -1975,7 +1993,7 @@ function normalizePancakeMessageGroup_(group) {
     customerName: workNoteText_(group.customerName, 240),
     year: Number(group.year) || 0,
     month: Number(group.month) || 0,
-    messages: (Array.isArray(group.messages) ? group.messages : []).slice(0, 200).map(function(message) { return { id: workNoteText_(message && message.id, 180), senderName: workNoteText_(message && message.senderName, 160) || "Khách hàng", content: workNoteText_(message && message.content, 4000), sentAt: pancakeDateIso_(message && message.sentAt) }; }).filter(function(message) { return message.content && message.sentAt; }),
+    messages: (Array.isArray(group.messages) ? group.messages : []).slice(0, 200).map(function(message) { return { id: workNoteText_(message && message.id, 180), senderName: workNoteText_(message && message.senderName, 160) || "Khách hàng", content: pancakePlainText_(workNoteText_(message && message.content, 4000)), sentAt: pancakeDateIso_(message && message.sentAt) }; }).filter(function(message) { return message.content && message.sentAt; }),
     firstMessageAt: pancakeDateIso_(group.firstMessageAt),
     lastMessageAt: pancakeDateIso_(group.lastMessageAt),
     messageCount: Math.min(200, Number(group.messageCount) || 0),
@@ -1989,7 +2007,7 @@ function pancakeMessageExportRows_(group) {
     if (!sentAt) return null;
     const date = Utilities.formatDate(new Date(sentAt), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss");
     const sender = workNoteText_(message && message.senderName, 160);
-    const content = workNoteText_(message && message.content, 4000);
+    const content = pancakePlainText_(workNoteText_(message && message.content, 4000));
     return [date, (sender ? sender + ": " : "") + content];
   }).filter(function(row) { return row && row[1]; });
 }
