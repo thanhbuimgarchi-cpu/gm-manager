@@ -294,6 +294,22 @@ test("Pancake group names map to a house code only when the GM marker is present
   assert.equal(context.pancakeHouseIdFromGroupName_("HP-587-Tư vấn"), "");
 });
 
+test("only conversations containing Bùi Đức Thành are allowed as a Pancake test exception", () => {
+  const context = loadContext();
+  assert.equal(context.pancakeIsSpecialTestConversation_("Bùi Đức Thành"), true);
+  assert.equal(context.pancakeIsSpecialTestConversation_("Bùi Đức Thành - GM"), true);
+  assert.equal(context.pancakeIsSpecialTestConversation_("Nhóm Bùi Đức Thành"), true);
+  assert.equal(context.pancakeIsSpecialTestConversation_("bc thi công dv 75 - GM"), false);
+  const target = context.pancakeSpecialTestTarget_({});
+  assert.deepEqual(JSON.parse(JSON.stringify(target)), {
+    houseId: "Bùi Đức Thành",
+    projectId: "",
+    customerName: "Bùi Đức Thành",
+    year: target.year,
+    month: target.month,
+  });
+});
+
 test("Pancake customer messages are grouped into two-hour windows", () => {
   const context = loadContext();
   const groups = context.groupPancakeMessages_(

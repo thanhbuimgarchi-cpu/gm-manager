@@ -1779,11 +1779,11 @@ export default function Home() {
     const projectId = url.searchParams.get("gmcrmProject");
     const noteId = url.searchParams.get("gmcrmNote");
     const messageId = url.searchParams.get("gmcrmMessage");
-    if (projectId && messageId) {
-      const location = customerLocations.find(({ record }) => record.projectId === projectId);
-      if (!location) return;
+    if (messageId) {
+      const location = projectId ? customerLocations.find(({ record }) => record.projectId === projectId) : null;
+      if (projectId && !location) return;
       setActiveFolder("Tin nhắn");
-      selectCustomerForWorkflow(location, "Tin nhắn");
+      if (location) selectCustomerForWorkflow(location, "Tin nhắn");
       url.searchParams.delete("gmcrmProject");
       url.searchParams.delete("gmcrmMessage");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);

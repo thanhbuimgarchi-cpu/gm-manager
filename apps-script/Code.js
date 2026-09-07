@@ -1782,6 +1782,28 @@ function pancakeHouseIdFromGroupName_(groupName) {
   return match ? match[1].trim() : "";
 }
 
+function pancakeIsSpecialTestConversation_(groupName, conversation) {
+  const expected = "bùi đức thành";
+  const names = [
+    groupName,
+    conversation && conversation.from && conversation.from.name,
+    conversation && conversation.page_customer && conversation.page_customer.name,
+  ];
+  return names.some(function(name) {
+    return workNoteText_(name, 400).trim().toLocaleLowerCase().indexOf(expected) >= 0;
+  });
+}
+
+function pancakeSpecialTestTarget_(targets) {
+  const expectedName = "bùi đức thành";
+  const matchingTarget = Object.keys(targets || {}).map(function(key) { return targets[key]; }).find(function(target) {
+    return workNoteText_(target && target.customerName, 240).trim().toLocaleLowerCase() === expectedName;
+  });
+  if (matchingTarget) return matchingTarget;
+  const today = new Date();
+  return { houseId: "Bùi Đức Thành", projectId: "", customerName: "Bùi Đức Thành", year: today.getFullYear(), month: today.getMonth() + 1 };
+}
+
 function normalizePancakeHouseId_(value) {
   return workNoteText_(value, 160).toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -1902,14 +1924,18 @@ function loadCustomerMessages_(payload) {
   conversations.forEach(function(conversation) {
     const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
     const houseKey = normalizePancakeHouseId_(pancakeHouseIdFromGroupName_(groupName));
+    const isSpecialTestConversation = pancakeIsSpecialTestConversation_(groupName, conversation);
     // A Pancake group is useful to GM-CRM only when its name contains the
     // GM marker and the extracted house code matches a loaded customer.
     // Never surface an unassigned group in the all-customer overview.
-    if (!/\bGM\b/i.test(groupName) || !targets[houseKey]) return;
-    const target = targets[houseKey];
+    // The exact Bùi Đức Thành conversation is a temporary test exception. It
+    // is allowed without a GM marker and is kept unassigned when no matching
+    // customer record exists; every other conversation keeps the strict rule.
+    if (!isSpecialTestConversation && (!/\bGM\b/i.test(groupName) || !targets[houseKey])) return;
+    const target = isSpecialTestConversation ? (targets[houseKey] || pancakeSpecialTestTarget_(targets)) : targets[houseKey];
     let messages;
     try { messages = pancakeConversationMessages_(context, conversation); } catch (error) { return; }
-    groupPancakeMessages_(conversation, messages.filter(function(message) { return !pancakeIsPageMessage_(message, context.pageId); }), target).forEach(function(group) { groups.push(group); });
+    groupPancakeMessages_(conversation, messages.filter(function(message) { return isSpecialTestConversation || !pancakeIsPageMessage_(message, context.pageId); }), target).forEach(function(group) { groups.push(group); });
   });
   const states = readPancakeMessageStates_();
   const stateById = {};
