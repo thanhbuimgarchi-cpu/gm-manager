@@ -4044,17 +4044,29 @@ export default function Home() {
     <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Bảo hành</span></footer>
   </section>;
 
+  const openAllCustomerMessages = () => {
+    setPersonnelView(false);
+    setSelectedCustomerProjectId(null);
+    setSelectedRecordId(null);
+    setOpenMenuId(null);
+    setActiveFolder("Tin nhắn");
+    setSidebarNotesOpen(true);
+  };
   const openCustomerMessage = (message: CustomerMessageGroup) => {
     if (activeFolder !== "Tin nhắn") customerMessageReturnFolder.current = activeFolder;
     const location = customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
       ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
     if (location) selectCustomerForWorkflow(location, "Tin nhắn");
-    else setActiveFolder("Tin nhắn");
+    else {
+      setSelectedCustomerProjectId(null);
+      setSelectedRecordId(null);
+      setActiveFolder("Tin nhắn");
+    }
   };
   const messageStatusClass = (status: CustomerMessageStatus) => status === "processing" ? "customer-message--processing" : status === "resolved" ? "customer-message--resolved" : "customer-message--alert";
   const renderCustomerMessagesSummary = (className = "") => canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary " + className + (sidebarNotesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
-    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
-      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+    <button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages} aria-expanded={sidebarNotesOpen}>
+      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em role="button" tabIndex={0} aria-label={sidebarNotesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} onClick={(event) => { event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); } }}>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
     </button>
     {sidebarNotesOpen && <div className="sidebar-notes__list">
       {loadingCustomerMessages && !customerMessages.length ? <p className="sidebar-notes__empty">Đang nạp Tin nhắn khách…</p>
