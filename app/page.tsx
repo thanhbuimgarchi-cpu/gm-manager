@@ -320,7 +320,7 @@ type AssignedDesignTask = DesignProgressRow & {
   houseId?: string;
 };
 
-type CustomerMessageStatus = "new" | "deferred" | "processing" | "resolved";
+type CustomerMessageStatus = "new" | "processing" | "resolved";
 
 type CustomerMessageLine = {
   id: string;
@@ -655,11 +655,12 @@ function customerMessageNotificationBody(message: CustomerMessageGroup) {
 }
 
 function customerMessageStatusLabel(status: CustomerMessageStatus) {
-  return ({ new: "Mới", deferred: "Để sau", processing: "Đang xử lý", resolved: "Đã xử lý" } as Record<CustomerMessageStatus, string>)[status];
+  return ({ new: "Chưa xem", processing: "Đang xử lý", resolved: "Đã hoàn thành" } as Record<CustomerMessageStatus, string>)[status];
 }
 
 function normalizeCustomerMessageGroup(value: CustomerMessageGroup): CustomerMessageGroup {
-  const status = (["new", "deferred", "processing", "resolved"] as CustomerMessageStatus[]).includes(value.status) ? value.status : "new";
+  const rawStatus = String(value.status ?? "").toLowerCase();
+  const status: CustomerMessageStatus = rawStatus === "processing" ? "processing" : rawStatus === "resolved" ? "resolved" : "new";
   return {
     ...value,
     status,
@@ -1579,6 +1580,7 @@ export default function Home() {
   const workspaceSyncInFlight = useRef(false);
   const sharedWorkspaceCacheEmpty = useRef(false);
   const customerMessageNotificationInFlight = useRef(new Set<string>());
+  const customerMessageReturnFolder = useRef("Tư vấn");
   // Drive index results are authoritative for a loaded year/month. This map
   // prevents a deleted Drive folder from being reintroduced by the shared
   // workspace cache on another device.
@@ -2209,14 +2211,24 @@ export default function Home() {
   const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
     if (customerMessageStatusBusyId) return;
     const previous = customerMessages;
-    const next = previous.map((item) => item.id === message.id ? { ...item, status, resolvedAt: status === "resolved" ? new Date().toISOString() : "" } : item);
+    const next = status === "resolved"
+      ? previous.filter((item) => item.id !== message.id)
+      : previous.map((item) => item.id === message.id ? { ...item, status, resolvedAt: "" } : item);
     setCustomerMessages(next);
     setCustomerMessageStatusBusyId(message.id);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "update-customer-message-status", message: { ...message, status }, status });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; exported?: boolean }>({ scriptUrl: driveScriptUrl.trim() }, { action: "update-customer-message-status", message: { ...message, status }, status });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật trạng thái tin nhắn.");
-      writeDriveCache(customerMessagesCacheKey(selectedCustomerLocation), next);
-      setNotice(status === "resolved" ? "Đã lưu Tin nhắn khách vào Drive. Tin nhắn sẽ tự ẩn sau 1 ngày." : "Đã chuyển Tin nhắn khách sang “" + customerMessageStatusLabel(status) + "”.");
+      writeDriveCache(customerMessagesCacheKey(), next);
+      if (selectedCustomerLocation) writeDriveCache(customerMessagesCacheKey(selectedCustomerLocation), next);
+      if (status === "resolved") {
+        setNotice(result.exported ? "Đã lưu Tin nhắn khách vào Excel trong Tài liệu của khách và xoá khỏi web." : "Đã hoàn thành tin nhắn test; không xuất Drive.");
+      } else if (status === "new") {
+        setActiveFolder(customerMessageReturnFolder.current || "Tư vấn");
+        setNotice("Đã chuyển về Chưa xem; Tin nhắn khách vẫn nhấp đỏ.");
+      } else {
+        setNotice("Đã chuyển Tin nhắn khách sang “Đang xử lý”; tin nhắn sẽ nhấp xanh.");
+      }
     } catch (error) {
       setCustomerMessages(previous);
       setNotice(error instanceof Error ? error.message : "Không thể cập nhật trạng thái tin nhắn.");
@@ -4033,6 +4045,7 @@ export default function Home() {
   </section>;
 
   const openCustomerMessage = (message: CustomerMessageGroup) => {
+    if (activeFolder !== "Tin nhắn") customerMessageReturnFolder.current = activeFolder;
     const location = customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
       ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
     if (location) selectCustomerForWorkflow(location, "Tin nhắn");
@@ -4048,7 +4061,7 @@ export default function Home() {
         : customerMessagesError && !customerMessages.length ? <p className="sidebar-notes__empty">{customerMessagesError}</p>
           : customerMessages.length ? customerMessages.slice().sort((left, right) => Number(right.status === "resolved") - Number(left.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => (
             <button type="button" className={"sidebar-note customer-message-summary__item " + messageStatusClass(message.status)} key={message.id} onClick={() => openCustomerMessage(message)}>
-              <i className={message.status === "processing" ? "sidebar-notes__dot--orange" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.customerName || message.houseId || message.groupName}</b><small>{message.groupName} · {message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
+              <i className={message.status === "processing" ? "sidebar-notes__dot--blue" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.customerName || message.houseId || message.groupName}</b><small>{message.groupName} · {message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
             </button>
           )) : <p className="sidebar-notes__empty">Chưa có tin nhắn khách phù hợp.</p>}
     </div>}
@@ -4068,7 +4081,7 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "deferred" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "deferred")} disabled={customerMessageStatusBusyId === message.id}>Để sau</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã xử lý</button></div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button></div>
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>
     </section>;

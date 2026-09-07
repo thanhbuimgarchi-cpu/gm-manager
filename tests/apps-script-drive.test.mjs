@@ -310,6 +310,23 @@ test("only conversations containing Bùi Đức Thành are allowed as a Pancake 
   });
 });
 
+test("customer message statuses expose only Chưa xem, Đang xử lý and Đã hoàn thành", () => {
+  const context = loadContext();
+  assert.equal(context.normalizePancakeMessageStatus_("deferred"), "new");
+  assert.equal(context.normalizePancakeMessageStatus_("Chưa xem"), "new");
+  assert.equal(context.normalizePancakeMessageStatus_("Đang xử lý"), "processing");
+  assert.equal(context.normalizePancakeMessageStatus_("Đã hoàn thành"), "resolved");
+});
+
+test("message export rows keep one date and one content column per customer message", () => {
+  const context = loadContext({ Utilities: { formatDate: () => "07/09/2026 09:00:00" } });
+  const rows = context.pancakeMessageExportRows_({ messages: [
+    { senderName: "Bùi Đức Thành", content: "Xin chào", sentAt: "2026-09-07T02:00:00.000Z" },
+    { senderName: "", content: "", sentAt: "2026-09-07T02:01:00.000Z" },
+  ] });
+  assert.deepEqual(JSON.parse(JSON.stringify(rows)), [["07/09/2026 09:00:00", "Bùi Đức Thành: Xin chào"]]);
+});
+
 test("Pancake customer messages are grouped into two-hour windows", () => {
   const context = loadContext();
   const groups = context.groupPancakeMessages_(

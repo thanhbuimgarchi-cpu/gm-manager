@@ -211,3 +211,13 @@
 
 /* Return to the overview is intentionally prominent in both personnel and customer views. */
 .customer-context--back, .personnel-back { border-color: #d8847d; background: #fff4f3; color: #a13e38; }.customer-context--back:hover, .personnel-back:hover { border-color: #b94a43; background: #fce4e2; color: #842f2a; }
+
+/* Customer-message processing is blue; the red alert remains reserved for
+   messages that are still marked “Chưa xem”. */
+.sidebar-notes__dot--blue { width: 7px; height: 7px; margin-top: 3px; border-radius: 50%; background: #4d82c7; }
+.customer-message--processing { border-color: #76a5df; animation: customer-message-processing-blue 1.2s ease-in-out infinite; }
+.customer-message--processing .customer-message__state { background: #eaf2ff; color: #3267a8; }
+.customer-message--processing .customer-message__status-actions button.is-selected { border-color: #5f91d3; background: #edf5ff; color: #3267a8; }
+.customer-message-summary__item.customer-message--processing { animation: customer-message-sidebar-processing-blue 1.2s ease-in-out infinite; }
+@keyframes customer-message-processing-blue { 50% { border-color: #4d82c7; background: #f1f7ff; box-shadow: 0 0 0 3px rgba(77, 130, 199, .14); } }
+@keyframes customer-message-sidebar-processing-blue { 50% { background: #e5f0ff; } }

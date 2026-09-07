@@ -1696,7 +1696,17 @@ const PANCAKE_PAGE_ID_PROPERTY = "PANCAKE_PAGE_ID";
 const PANCAKE_PAGE_NAME_PROPERTY = "PANCAKE_PAGE_NAME";
 const PANCAKE_MESSAGE_STATE_FILE_NAME = "_gmcrm_tin_nhan_khach_trang_thai.json";
 const PANCAKE_MESSAGE_EXPORT_FILE_NAME = "Tin nhắn khách.xlsx";
-const PANCAKE_MESSAGE_STATUSES = ["new", "deferred", "processing", "resolved"];
+const PANCAKE_MESSAGE_STATUSES = ["new", "processing", "resolved"];
+
+function normalizePancakeMessageStatus_(value) {
+  const status = String(value || "").trim().toLocaleLowerCase();
+  if (status === "processing" || status === "đang xử lý") return "processing";
+  if (status === "resolved" || status === "đã xử lý" || status === "đã hoàn thành") return "resolved";
+  // "deferred" was the old label for the first state. Keep old state files
+  // readable, but expose the new three-choice UI as "Chưa xem".
+  if (status === "deferred" || status === "new" || status === "chưa xem" || !status) return "new";
+  return "new";
+}
 
 function pancakeProperty_(key) {
   return String(PropertiesService.getScriptProperties().getProperty(key) || "").trim();
@@ -1939,7 +1949,9 @@ function loadCustomerMessages_(payload) {
   });
   const states = readPancakeMessageStates_();
   const stateById = {};
-  states.forEach(function(state) { stateById[String(state.id || "")] = state; });
+  states.forEach(function(state) {
+    stateById[String(state.id || "")] = { ...state, status: normalizePancakeMessageStatus_(state.status) };
+  });
   const now = Date.now();
   const active = groups.map(function(group) {
     const state = stateById[group.id];
@@ -1968,26 +1980,72 @@ function normalizePancakeMessageGroup_(group) {
   };
 }
 
-function exportPancakeMessageWorkbook_(records) {
-  const root = rootFolder_();
-  const temporary = SpreadsheetApp.create("GM-CRM Tin nhắn khách temporary");
+function pancakeMessageExportRows_(group) {
+  const messages = Array.isArray(group && group.messages) ? group.messages : [];
+  return messages.map(function(message) {
+    const sentAt = pancakeDateIso_(message && message.sentAt);
+    if (!sentAt) return null;
+    const date = Utilities.formatDate(new Date(sentAt), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss");
+    const sender = workNoteText_(message && message.senderName, 160);
+    const content = workNoteText_(message && message.content, 4000);
+    return [date, (sender ? sender + ": " : "") + content];
+  }).filter(function(row) { return row && row[1]; });
+}
+
+function appendPancakeMessageWorkbook_(group) {
+  if (!group || !/\bGM\b/i.test(workNoteText_(group.groupName, 400)) || !workNoteText_(group.houseId, 160)) {
+    throw new Error("Tin nhắn chưa gắn được với nhóm GM và mã nhà hợp lệ.");
+  }
+  const year = Number(group.year);
+  const month = Number(group.month);
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12) throw new Error("Thiếu năm/tháng của hồ sơ khách hàng.");
+  const customerFolder = customerFolderForRecord_(group, year, month, true);
+  const documentsFolder = documentsFolderForCustomerFolder_(customerFolder, true);
+  if (!documentsFolder) throw new Error("Không tìm thấy thư mục Tài liệu của khách hàng.");
+  const existingFile = findFileByName_(documentsFolder, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+  let rows = [["Ngày", "Nội dung tin nhắn"]];
+  if (existingFile) {
+    try {
+      const sheets = readXlsxSheets_(existingFile);
+      const source = sheets["Tin nhắn khách"] || sheets[Object.keys(sheets)[0]] || [];
+      if (source.length) {
+        const header = source[0] || [];
+        if (String(header[0] || "").trim() === "Ngày" && String(header[1] || "").trim()) {
+          rows = source.map(function(row, index) { return index === 0 ? ["Ngày", "Nội dung tin nhắn"] : [String(row[0] || ""), String(row[1] || "")]; });
+        } else {
+          // Migrate the old nine-column export format into the requested
+          // two-column sheet instead of creating a second workbook.
+          rows = [["Ngày", "Nội dung tin nhắn"]].concat(source.slice(1).map(function(row) {
+            return [String(row[6] || row[0] || ""), String(row[5] || row[1] || "")];
+          }).filter(function(row) { return row[0] || row[1]; }));
+        }
+      }
+    } catch (error) {
+      // A malformed/locked old workbook is replaced with a clean two-column
+      // workbook below; the live message remains available if Drive fails.
+    }
+  }
+  const existingKeys = {};
+  rows.slice(1).forEach(function(row) { existingKeys[String(row[0]) + "\n" + String(row[1])] = true; });
+  pancakeMessageExportRows_(group).forEach(function(row) {
+    const key = String(row[0]) + "\n" + String(row[1]);
+    if (!existingKeys[key]) { rows.push(row); existingKeys[key] = true; }
+  });
+  const temporary = SpreadsheetApp.create("GM-CRM Tin nhắn khách temporary " + workNoteText_(group.houseId, 100));
   try {
     const sheet = temporary.getSheets()[0];
     sheet.setName("Tin nhắn khách");
-    const rows = [["Nhóm Pancake", "Mã nhà", "ID dự án", "Khách hàng", "Người nhắn", "Nội dung", "Ngày giờ khách nhắn", "Ngày giờ hoàn thiện", "Trạng thái"]];
-    records.filter(function(record) { return record && record.status === "resolved"; }).forEach(function(record) {
-      const messages = Array.isArray(record.messages) ? record.messages : [];
-      const content = messages.map(function(message) { return message.senderName + ": " + message.content; }).join("\n");
-      const times = messages.map(function(message) { return message.sentAt; }).filter(Boolean).join("\n");
-      rows.push([record.groupName, record.houseId, record.projectId, record.customerName, messages.map(function(message) { return message.senderName; }).filter(Boolean).join(", "), content, times, record.resolvedAt || "", "Đã xử lý"]);
-    });
-    if (rows.length) sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+    sheet.getRange(1, 1, rows.length, 2).setValues(rows).setVerticalAlignment("top").setWrap(true).setFontFamily("Roboto");
+    sheet.getRange(1, 1, 1, 2).setFontWeight("bold").setBackground("#eeeae5");
     sheet.setFrozenRows(1);
-    sheet.getRange(1, 1, 1, rows[0].length).setFontWeight("bold");
+    sheet.setColumnWidth(1, 155);
+    sheet.setColumnWidth(2, 520);
+    sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     SpreadsheetApp.flush();
     const blob = DriveApp.getFileById(temporary.getId()).getBlob().getAs(EXCEL_MIME).setName(PANCAKE_MESSAGE_EXPORT_FILE_NAME);
-    trashFilesByName_(root, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
-    root.createFile(blob);
+    trashFilesByName_(documentsFolder, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+    const file = documentsFolder.createFile(blob);
+    return { fileId: file.getId(), fileUrl: file.getUrl(), folderUrl: documentsFolder.getUrl(), fileName: PANCAKE_MESSAGE_EXPORT_FILE_NAME };
   } finally {
     DriveApp.getFileById(temporary.getId()).setTrashed(true);
   }
@@ -1995,15 +2053,19 @@ function exportPancakeMessageWorkbook_(records) {
 
 function updateCustomerMessageStatus_(payload) {
   const group = normalizePancakeMessageGroup_(payload.message);
-  const status = workNoteText_(payload.status, 20);
+  const status = normalizePancakeMessageStatus_(payload.status);
   if (!group.id || PANCAKE_MESSAGE_STATUSES.indexOf(status) === -1) throw new Error("Trạng thái tin nhắn không hợp lệ.");
   const states = readPancakeMessageStates_();
+  const previous = states.find(function(item) { return String(item.id || "") === group.id; });
   const next = states.filter(function(item) { return String(item.id || "") !== group.id; });
+  const isSpecialTest = pancakeIsSpecialTestConversation_(group.groupName, { page_customer: { name: group.customerName } });
+  if (status === "resolved" && !isSpecialTest && (!previous || normalizePancakeMessageStatus_(previous.status) !== "resolved")) {
+    appendPancakeMessageWorkbook_(group);
+  }
   const state = { ...group, status: status, resolvedAt: status === "resolved" ? new Date().toISOString() : "", statusUpdatedAt: new Date().toISOString() };
   next.push(state);
-  if (status === "resolved") exportPancakeMessageWorkbook_(next);
   savePancakeMessageStates_(next);
-  return { ok: true, id: group.id, status: status, resolvedAt: state.resolvedAt };
+  return { ok: true, id: group.id, status: status, resolvedAt: state.resolvedAt, exported: status === "resolved" && !isSpecialTest };
 }
 
 // Published design rows live in one small registry at the root.  This is the
