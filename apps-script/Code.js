@@ -1818,6 +1818,12 @@ function normalizePancakeHouseId_(value) {
   return workNoteText_(value, 160).toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function normalizePancakeGroupName_(value) {
+  const text = workNoteText_(value, 400);
+  const decomposed = text.normalize ? text.normalize("NFD") : text;
+  return decomposed.replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
 function pancakeDateIso_(value) {
   if (value === null || value === undefined || value === "") return "";
   let date;
@@ -1912,9 +1918,20 @@ function pancakeTargetMap_(payload) {
     const houseId = workNoteText_(target && target.houseId, 160);
     const key = normalizePancakeHouseId_(houseId);
     if (!key) return;
-    map[key] = { houseId: houseId, projectId: workNoteText_(target.projectId, 160), customerName: workNoteText_(target.customerName, 240), year: Number(target.year) || 0, month: Number(target.month) || 0 };
+    map[key] = { houseId: houseId, projectId: workNoteText_(target.projectId, 160), customerName: workNoteText_(target.customerName, 240), zaloGroupName: workNoteText_(target.zaloGroupName, 400), year: Number(target.year) || 0, month: Number(target.month) || 0 };
   });
   return map;
+}
+
+function pancakeTargetForGroupName_(targets, groupName) {
+  const expected = normalizePancakeGroupName_(groupName);
+  if (!expected) return null;
+  const keys = Object.keys(targets || {});
+  for (let index = 0; index < keys.length; index += 1) {
+    const target = targets[keys[index]];
+    if (target && target.zaloGroupName && normalizePancakeGroupName_(target.zaloGroupName) === expected) return target;
+  }
+  return null;
 }
 
 function groupPancakeMessages_(conversation, rawMessages, target) {
@@ -1944,7 +1961,8 @@ function loadCustomerMessages_(payload) {
   if (!pancakeProperty_(PANCAKE_USER_TOKEN_PROPERTY) || !pancakeProperty_(PANCAKE_PAGE_TOKEN_PROPERTY)) return { ok: true, configured: false, messages: [] };
   const targets = pancakeTargetMap_(payload);
   const context = pancakePageContext_();
-  const cacheKey = "gmcrm-pancake-messages-" + Utilities.base64EncodeWebSafe(JSON.stringify(Object.keys(targets).sort())).slice(0, 100);
+  const targetFingerprint = Object.keys(targets).sort().map(function(key) { return key + ":" + normalizePancakeGroupName_(targets[key].zaloGroupName || ""); });
+  const cacheKey = "gmcrm-pancake-messages-" + Utilities.base64EncodeWebSafe(JSON.stringify(targetFingerprint)).slice(0, 100);
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
   if (cached) return cached;
   const conversations = pancakeConversationPages_(context);
@@ -1953,14 +1971,15 @@ function loadCustomerMessages_(payload) {
     const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
     const houseKey = normalizePancakeHouseId_(pancakeHouseIdFromGroupName_(groupName));
     const isSpecialTestConversation = pancakeIsSpecialTestConversation_(groupName, conversation);
+    const overrideTarget = pancakeTargetForGroupName_(targets, groupName);
     // A Pancake group is useful to GM-CRM only when its name contains the
     // GM marker and the extracted house code matches a loaded customer.
     // Never surface an unassigned group in the all-customer overview.
     // The exact Bùi Đức Thành conversation is a temporary test exception. It
     // is allowed without a GM marker and is kept unassigned when no matching
     // customer record exists; every other conversation keeps the strict rule.
-    if (!isSpecialTestConversation && (!/\bGM\b/i.test(groupName) || !targets[houseKey])) return;
-    const target = isSpecialTestConversation ? (targets[houseKey] || pancakeSpecialTestTarget_(targets)) : targets[houseKey];
+    if (!isSpecialTestConversation && !overrideTarget && (!/\bGM\b/i.test(groupName) || !targets[houseKey])) return;
+    const target = isSpecialTestConversation ? (targets[houseKey] || pancakeSpecialTestTarget_(targets)) : (overrideTarget || targets[houseKey]);
     let messages;
     try { messages = pancakeConversationMessages_(context, conversation); } catch (error) { return; }
     groupPancakeMessages_(conversation, messages.filter(function(message) { return isSpecialTestConversation || !pancakeIsPageMessage_(message, context.pageId); }), target).forEach(function(group) { groups.push(group); });

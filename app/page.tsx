@@ -2205,6 +2205,7 @@ export default function Home() {
       houseId: item.record.houseId,
       projectId: item.record.projectId,
       customerName: item.record.name,
+      zaloGroupName: item.record.details?.ZALO_GROUP_NAME?.trim() || "",
       year: item.year,
       month: item.month,
     }));
@@ -3030,6 +3031,10 @@ export default function Home() {
       return;
     }
     persistRecord({ ...selectedRecord, details: { ...(selectedRecord.details ?? {}), [key]: nextValue } }, selectedYear, selectedMonth);
+    if (key === "ZALO_GROUP_NAME") {
+      removeDriveCache(customerMessagesCacheKey());
+      if (selectedCustomerLocation) removeDriveCache(customerMessagesCacheKey(selectedCustomerLocation));
+    }
   };
 
   const updateRecordName = (value: string) => {
@@ -4303,7 +4308,7 @@ export default function Home() {
 
             {selectedRecord && <section className="record-detail record-detail--inline">
               <header className="record-detail__heading">
-                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span></div>
+                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span><label className="record-detail__zalo-group"><span>Tên nhóm Zalo (tuỳ chọn)</span><input value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(event) => updateRecordDetail("ZALO_GROUP_NAME", event.target.value)} placeholder="Nhập đúng tên nhóm Zalo" aria-label="Tên nhóm Zalo" /></label></div>
                   <div className="consulting-profile-actions">
                   <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id}>⇩ Export Excel</button></div>
                   <div className="project-actions">

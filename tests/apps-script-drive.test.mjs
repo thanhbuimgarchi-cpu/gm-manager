@@ -294,6 +294,16 @@ test("Pancake group names map to a house code only when the GM marker is present
   assert.equal(context.pancakeHouseIdFromGroupName_("HP-587-Tư vấn"), "");
 });
 
+test("configured Zalo group names bypass the GM group-name rule", () => {
+  const context = loadContext();
+  const targets = {
+    "hp587": { houseId: "HP-587", customerName: "Nguyễn Tùng", zaloGroupName: "Nhà HP-587 - Zalo" },
+  };
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Nhà HP-587 - Zalo").houseId, "HP-587");
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Nha HP-587 - Zalo").houseId, "HP-587");
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Nhà khác"), null);
+});
+
 test("only conversations containing Bùi Đức Thành are allowed as a Pancake test exception", () => {
   const context = loadContext();
   assert.equal(context.pancakeIsSpecialTestConversation_("Bùi Đức Thành"), true);
