@@ -327,6 +327,23 @@ test("message export rows keep one date and one content column per customer mess
   assert.deepEqual(JSON.parse(JSON.stringify(rows)), [["07/09/2026 09:00:00", "Bùi Đức Thành: Xin chào"]]);
 });
 
+test("completed normal groups export once while Bùi Đức Thành stays a test-only exception", () => {
+  const context = loadContext();
+  let states = [];
+  let exports = 0;
+  context.readPancakeMessageStates_ = () => states;
+  context.savePancakeMessageStates_ = (next) => { states = next; };
+  context.appendPancakeMessageWorkbook_ = () => { exports += 1; };
+  const normal = { id: "normal-group", groupName: "HP-587-GM-Tư vấn", houseId: "HP-587", customerName: "Nguyễn Tùng", year: 2026, month: 9, messages: [] };
+  const testOnly = { id: "test-group", groupName: "Bùi Đức Thành", houseId: "Bùi Đức Thành", customerName: "Bùi Đức Thành", year: 2026, month: 9, messages: [] };
+  assert.equal(context.updateCustomerMessageStatus_({ message: normal, status: "resolved" }).exported, true);
+  assert.equal(exports, 1);
+  assert.equal(context.updateCustomerMessageStatus_({ message: normal, status: "resolved" }).exported, false);
+  assert.equal(exports, 1);
+  assert.equal(context.updateCustomerMessageStatus_({ message: testOnly, status: "resolved" }).exported, false);
+  assert.equal(exports, 1);
+});
+
 test("Pancake customer messages are grouped into two-hour windows", () => {
   const context = loadContext();
   const groups = context.groupPancakeMessages_(

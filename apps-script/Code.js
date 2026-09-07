@@ -1952,11 +1952,13 @@ function loadCustomerMessages_(payload) {
   states.forEach(function(state) {
     stateById[String(state.id || "")] = { ...state, status: normalizePancakeMessageStatus_(state.status) };
   });
-  const now = Date.now();
   const active = groups.map(function(group) {
     const state = stateById[group.id];
     return state ? { ...group, status: state.status, resolvedAt: state.resolvedAt || "", statusUpdatedAt: state.statusUpdatedAt || "" } : { ...group, status: "new", resolvedAt: "", statusUpdatedAt: "" };
-  }).filter(function(group) { return group.status !== "resolved" || !group.resolvedAt || now - new Date(group.resolvedAt).getTime() < 24 * 60 * 60 * 1000; });
+  // A completed group is archived in the customer's Excel workbook and is
+  // removed from the live web feed immediately. Its state file remains only
+  // to prevent the same Pancake history from being exported twice.
+  }).filter(function(group) { return group.status !== "resolved"; });
   const result = { ok: true, configured: true, pageName: context.pageName, messages: active };
   cacheJson_(cacheKey, result, 30);
   return result;
@@ -2059,13 +2061,15 @@ function updateCustomerMessageStatus_(payload) {
   const previous = states.find(function(item) { return String(item.id || "") === group.id; });
   const next = states.filter(function(item) { return String(item.id || "") !== group.id; });
   const isSpecialTest = pancakeIsSpecialTestConversation_(group.groupName, { page_customer: { name: group.customerName } });
+  let exported = false;
   if (status === "resolved" && !isSpecialTest && (!previous || normalizePancakeMessageStatus_(previous.status) !== "resolved")) {
     appendPancakeMessageWorkbook_(group);
+    exported = true;
   }
   const state = { ...group, status: status, resolvedAt: status === "resolved" ? new Date().toISOString() : "", statusUpdatedAt: new Date().toISOString() };
   next.push(state);
   savePancakeMessageStates_(next);
-  return { ok: true, id: group.id, status: status, resolvedAt: state.resolvedAt, exported: status === "resolved" && !isSpecialTest };
+  return { ok: true, id: group.id, status: status, resolvedAt: state.resolvedAt, exported: exported };
 }
 
 // Published design rows live in one small registry at the root.  This is the
