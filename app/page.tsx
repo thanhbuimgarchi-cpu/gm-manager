@@ -645,6 +645,15 @@ function customerMessageDate(value: string) {
   return date.toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function customerMessageNotificationBody(message: CustomerMessageGroup) {
+  const lines = message.messages.map((line) => `${line.senderName}: ${line.content} (${customerMessageDate(line.sentAt)})`);
+  return [
+    `Khách hàng: ${message.customerName || message.houseId || "Chưa ghép hồ sơ"}`,
+    `Nhóm: ${message.groupName || "Tin nhắn khách"}`,
+    ...lines,
+  ].join("\n");
+}
+
 function customerMessageStatusLabel(status: CustomerMessageStatus) {
   return ({ new: "Mới", deferred: "Để sau", processing: "Đang xử lý", resolved: "Đã xử lý" } as Record<CustomerMessageStatus, string>)[status];
 }
@@ -1569,6 +1578,7 @@ export default function Home() {
   const workspaceSyncPending = useRef<YearFolder[] | null>(null);
   const workspaceSyncInFlight = useRef(false);
   const sharedWorkspaceCacheEmpty = useRef(false);
+  const customerMessageNotificationInFlight = useRef(new Set<string>());
   // Drive index results are authoritative for a loaded year/month. This map
   // prevents a deleted Drive folder from being reintroduced by the shared
   // workspace cache on another device.
@@ -1768,6 +1778,17 @@ export default function Home() {
     const url = new URL(window.location.href);
     const projectId = url.searchParams.get("gmcrmProject");
     const noteId = url.searchParams.get("gmcrmNote");
+    const messageId = url.searchParams.get("gmcrmMessage");
+    if (projectId && messageId) {
+      const location = customerLocations.find(({ record }) => record.projectId === projectId);
+      if (!location) return;
+      setActiveFolder("Tin nhắn");
+      selectCustomerForWorkflow(location, "Tin nhắn");
+      url.searchParams.delete("gmcrmProject");
+      url.searchParams.delete("gmcrmMessage");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      return;
+    }
     if (!projectId || !noteId) return;
     const location = customerLocations.find(({ record }) => record.projectId === projectId);
     if (!location) return;
@@ -1847,6 +1868,36 @@ export default function Home() {
     url.searchParams.set("gmcrmProject", task.projectId);
     url.searchParams.set("gmcrmDesignTask", task.id);
     return url.toString();
+  };
+
+  const customerMessageNotificationUrl = (message: CustomerMessageGroup) => {
+    const url = new URL(window.location.href);
+    if (message.projectId) url.searchParams.set("gmcrmProject", message.projectId);
+    url.searchParams.set("gmcrmMessage", message.id);
+    return url.toString();
+  };
+
+  const showCustomerMessageNotification = async (message: CustomerMessageGroup) => {
+    const title = "GM-CRM · Tin nhắn khách mới";
+    const body = customerMessageNotificationBody(message);
+    const url = customerMessageNotificationUrl(message);
+    const desktop = desktopBridge();
+    if (desktop?.isDesktop) return desktop.showNotification({ title, body, url });
+    if (!("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator)) return false;
+    try {
+      const registration = serviceWorkerRegistration.current ?? await navigator.serviceWorker.ready;
+      await registration.showNotification(title, {
+        body,
+        icon: `${import.meta.env.BASE_URL}gm-logo.png`,
+        badge: `${import.meta.env.BASE_URL}gm-logo.png`,
+        tag: `gmcrm-customer-message-${message.id}`,
+        renotify: true,
+        data: { url },
+      });
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   const openDesktopDocuments = async () => {
@@ -3395,6 +3446,31 @@ export default function Home() {
     const timer = window.setInterval(refresh, 60 * 1000);
     return () => window.clearInterval(timer);
   }, [canViewCustomerMessages, driveScriptUrl, selectedCustomerProjectId, customerLocations.length]);
+  useEffect(() => {
+    if (!canViewCustomerMessages || !driveScriptUrl.trim() || !customerMessages.length) return;
+    const now = Date.now();
+    customerMessages
+      .filter((message) => message.status !== "resolved")
+      .filter((message) => {
+        const sentAt = new Date(message.lastMessageAt).getTime();
+        return Number.isFinite(sentAt) && now - sentAt <= 24 * 60 * 60 * 1000;
+      })
+      .sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt))
+      .forEach((message) => {
+        const seenKey = `gm-manager-customer-message-alert:${message.id}`;
+        let seenAt = "";
+        try { seenAt = window.localStorage.getItem(seenKey) || ""; } catch { /* Notifications are best effort. */ }
+        if (seenAt === message.lastMessageAt) return;
+        const inFlightKey = `${message.id}:${message.lastMessageAt}`;
+        if (customerMessageNotificationInFlight.current.has(inFlightKey)) return;
+        customerMessageNotificationInFlight.current.add(inFlightKey);
+        void showCustomerMessageNotification(message).then((shown) => {
+          if (shown) {
+            try { window.localStorage.setItem(seenKey, message.lastMessageAt); } catch { /* Optional notification history. */ }
+          }
+        }).finally(() => customerMessageNotificationInFlight.current.delete(inFlightKey));
+      });
+  }, [canViewCustomerMessages, customerMessages, driveScriptUrl]);
   useEffect(() => {
     if (!canViewDesignSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedDesignTasks([]); return; }
     let cancelled = false;

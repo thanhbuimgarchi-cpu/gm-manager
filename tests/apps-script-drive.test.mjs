@@ -301,12 +301,13 @@ test("Pancake customer messages are grouped into two-hour windows", () => {
     [
       { id: "m-2", text: "Tin thứ hai", inserted_at: "2026-09-03T10:20:00.000Z", from: { name: "Nguyễn Tùng" } },
       { id: "m-1", text: "Tin thứ nhất", inserted_at: "2026-09-03T09:00:00.000Z", from: { name: "Nguyễn Tùng" } },
-      { id: "m-3", text: "Tin mới", inserted_at: "2026-09-03T13:00:01.000Z", from: { name: "Nguyễn Tùng" } },
+      { id: "m-3", text: "Tin đúng hai giờ", inserted_at: "2026-09-03T12:20:00.000Z", from: { name: "Nguyễn Tùng" } },
+      { id: "m-4", text: "Tin mới", inserted_at: "2026-09-03T14:20:01.000Z", from: { name: "Nguyễn Tùng" } },
     ],
     { houseId: "HP-587", projectId: "GM09092026NT", customerName: "Nguyễn Tùng", year: 2026, month: 9 },
   );
   assert.equal(groups.length, 2);
-  assert.equal(groups[0].messageCount, 2);
+  assert.equal(groups[0].messageCount, 3);
   assert.equal(groups[0].messages[0].content, "Tin thứ nhất");
   assert.equal(groups[1].messages[0].content, "Tin mới");
 });
