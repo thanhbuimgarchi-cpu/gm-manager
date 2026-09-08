@@ -599,21 +599,29 @@ function loadMonthCustomerIndex_(customers, year, month) {
     const customerFolder = customerFolders.next();
     const projectId = customerFolder.getName();
     if (projectId.indexOf("-") === 0) continue;
-    const record = fastCustomerIndexFromFolder_(projectId);
+    const record = fastCustomerIndexFromFolder_(projectId, customerFolder);
     if (record) records.push(record);
   }
   return monthResult_(year, month, records);
 }
 
-function fastCustomerIndexFromFolder_(folderName) {
+function fastCustomerIndexFromFolder_(folderName, customerFolder) {
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(folderName);
   const isLegacyProjectFolder = Boolean(dateMatch);
+  let driveUpdatedAt = "";
+  try {
+    if (customerFolder && customerFolder.getLastUpdated) driveUpdatedAt = customerFolder.getLastUpdated().toISOString();
+  } catch (error) {
+    // Folder timestamps are an optional hint; the customer index remains
+    // usable on deployments where Drive does not expose them.
+  }
   return {
     id: "drive-" + folderName,
     name: "",
     houseId: isLegacyProjectFolder ? "" : folderName,
     projectId: folderName,
     createdAt: dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "",
+    driveUpdatedAt: driveUpdatedAt,
     details: {},
     isHydrated: false,
   };

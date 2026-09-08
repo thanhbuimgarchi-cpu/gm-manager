@@ -125,6 +125,7 @@ type WorkRecord = {
   customerShareToken?: string;
   projectId: string;
   createdAt: string;
+  driveUpdatedAt?: string;
   cacheUpdatedAt?: number;
   details: Record<string, string>;
   audioNote?: AudioNote;
@@ -1271,6 +1272,7 @@ function driveIndexFingerprint(years: YearFolder[], year: number, month: number)
     record.houseId ?? "",
     record.name ?? "",
     record.createdAt ?? "",
+    record.driveUpdatedAt ?? "",
     record.cacheUpdatedAt ?? "",
   ].join("\u001f")).sort().join("\u001e");
 }
