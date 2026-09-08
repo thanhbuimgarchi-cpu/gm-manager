@@ -2528,6 +2528,10 @@ export default function Home() {
     : customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
       ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
   const openCustomerMessageTask = (message: CustomerMessageGroup) => {
+    if (!canAssignCustomerMessages) {
+      setNotice("Bạn có thể xem Tin nhắn khách, nhưng chỉ Admin và Quản lý chung được dùng để giao việc.");
+      return;
+    }
     if (!loggedInEmployee) {
       setNotice("Hãy đăng nhập trước khi giao việc từ tin nhắn khách.");
       setLoginOpen(true);
@@ -2558,6 +2562,11 @@ export default function Home() {
     event.preventDefault();
     const draft = customerMessageTaskDraft;
     if (!draft || customerMessageTaskBusy) return;
+    if (!canAssignCustomerMessages) {
+      setCustomerMessageTaskDraft(null);
+      setNotice("Chỉ Admin và Quản lý chung được giao việc từ Tin nhắn khách.");
+      return;
+    }
     const location = customerLocationForMessage(draft.message);
     const selectedLines = draft.message.messages.filter((line) => draft.selectedLineIds.includes(line.id));
     if (!location) { setNotice("Tin nhắn chưa ghép với hồ sơ khách hàng."); return; }
@@ -3815,7 +3824,11 @@ export default function Home() {
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
-  const canViewCustomerMessages = canViewAllNotesAndMessages;
+  // Tin nhắn khách là luồng thông tin chung: mọi nhân viên đã đăng nhập đều
+  // được xem. Quyền giao việc từ một tin nhắn vẫn tách riêng bên dưới và chỉ
+  // dành cho Admin / Quản lý chung.
+  const canViewCustomerMessages = Boolean(loggedInEmployee);
+  const canAssignCustomerMessages = canViewAllNotesAndMessages;
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (folder.label === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = activeFolder === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   useEffect(() => {
@@ -4541,7 +4554,7 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!loggedInEmployee || customerMessageTaskBusy}>Giao việc</button></div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>
     </section>;
