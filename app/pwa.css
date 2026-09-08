@@ -29,6 +29,18 @@
   color: #fff;
 }
 
+.pwa-action--notifications-enabled {
+  border-color: #63a572;
+  background: #edf8ef;
+  color: #2d7540;
+}
+
+.pwa-action--notifications-enabled:hover {
+  border-color: #3f8e54;
+  background: #e0f2e4;
+  color: #225e32;
+}
+
 .workflow-files__actions {
   display: flex;
   flex: 0 0 auto;
