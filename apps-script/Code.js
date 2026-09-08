@@ -636,6 +636,17 @@ function customerIndexPriority_(record) {
   return score;
 }
 
+function dedupeCustomerIndexRecords_(records) {
+  const recordsByHouse = {};
+  (records || []).forEach(function(record) {
+    if (!record) return;
+    const key = normalizeDriveName_(record.houseId || record.projectId);
+    const previous = recordsByHouse[key];
+    if (!previous || customerIndexPriority_(record) > customerIndexPriority_(previous)) recordsByHouse[key] = record;
+  });
+  return Object.keys(recordsByHouse).map(function(key) { return recordsByHouse[key]; });
+}
+
 function fastCustomerIndexFromFolder_(folderName, customerFolder) {
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(folderName);
   const isLegacyProjectFolder = Boolean(dateMatch);
@@ -771,7 +782,11 @@ function searchCustomerIndex_(customers, query) {
       }
     }
   }
-  return Object.keys(resultsByPeriod).map(function(key) { return resultsByPeriod[key]; }).sort(function(a, b) {
+  return Object.keys(resultsByPeriod).map(function(key) {
+    const result = resultsByPeriod[key];
+    result.months[0].records = dedupeCustomerIndexRecords_(result.months[0].records);
+    return result;
+  }).sort(function(a, b) {
     return b.year - a.year || Number(b.months[0].label.slice(1)) - Number(a.months[0].label.slice(1));
   });
 }
