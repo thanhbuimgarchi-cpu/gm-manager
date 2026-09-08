@@ -4508,7 +4508,11 @@ export default function Home() {
     }
   };
   const messageStatusClass = (status: CustomerMessageStatus) => status === "processing" ? "customer-message--processing" : status === "resolved" ? "customer-message--resolved" : "customer-message--alert";
-  const renderCustomerMessagesSummary = (className = "") => canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary " + className + (sidebarNotesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
+  const renderCustomerMessagesSummary = (className = "") => !canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary customer-message-summary--locked " + className} aria-label="Tin nhắn khách bị giới hạn quyền">
+    <button type="button" className="sidebar-notes__toggle" onClick={() => loggedInEmployee ? setNotice("Chỉ Admin và Quản lý chung được xem toàn bộ Tin nhắn khách.") : setLoginOpen(true)}>
+      <span><b>Tin nhắn khách</b><small>Chỉ Admin / Quản lý chung</small></span><em aria-hidden="true">🔒</em>
+    </button>
+  </section> : <section className={"sidebar-notes customer-message-summary " + className + (sidebarNotesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
     <button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages} aria-expanded={sidebarNotesOpen}>
       <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em role="button" tabIndex={0} aria-label={sidebarNotesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} onClick={(event) => { event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); } }}>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
     </button>
@@ -4521,7 +4525,7 @@ export default function Home() {
             </button>
           )) : <p className="sidebar-notes__empty">Chưa có tin nhắn khách phù hợp.</p>}
     </div>}
-  </section> : null;
+  </section>;
   const renderCustomerMessages = () => {
     const visibleMessages = selectedCustomerLocation
       ? customerMessages.filter((message) => (message.projectId && message.projectId === selectedCustomerLocation.record.projectId) || customerMessageHouseKey(message.houseId) === customerMessageHouseKey(selectedCustomerLocation.record.houseId ?? ""))

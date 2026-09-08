@@ -236,3 +236,5 @@
 @media (max-width: 620px) { .message-task-dialog { padding: 18px; }.message-task-dialog__grid { grid-template-columns: 1fr; }.message-task-lines { max-height: 190px; } }
 /* Employees only see assigned notes; keep the workflow notice compact. */
 .workflow-customer-search--assigned { padding: 12px 16px; color: #77736c; font-size: 10px; }
+.customer-message-summary--locked { opacity: .82; }
+.customer-message-summary--locked .sidebar-notes__toggle { cursor: pointer; }
