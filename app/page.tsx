@@ -1262,12 +1262,91 @@ const normalizeSearchText = (value: string) => value
   .replaceAll("đ", "d")
   .trim();
 
+// A house code is the only user-facing identity of a customer. Older cache
+// entries can still contain both the internal GM project id and the newer
+// house-code folder, so collapse those rows before rendering or persisting
+// the workspace. This also makes a stale Drive index unable to create a
+// second card for the same house.
+function normalizeHouseCode(value: unknown) {
+  return normalizeSearchText(String(value ?? "")).replace(/\s+/g, "");
+}
+
+function workRecordKey(record: WorkRecord) {
+  const houseKey = normalizeHouseCode(record.houseId);
+  return houseKey ? `house:${houseKey}` : `project:${normalizeSearchText(record.projectId)}`;
+}
+
+function workRecordQuality(record: WorkRecord) {
+  const name = String(record.name ?? "").trim();
+  const projectId = String(record.projectId ?? "").trim();
+  const houseId = String(record.houseId ?? "").trim();
+  let score = 0;
+  if (houseId) score += 100;
+  if (record.isHydrated) score += 30;
+  if (record.progressHydrated) score += 10;
+  if (record.pendingDriveSync) score += 8;
+  if (name && name !== projectId && name !== houseId && !/^GM\d{2}\d{2}\d{4}/i.test(name)) score += 25;
+  if (Object.values(record.details ?? {}).some((value) => String(value ?? "").trim())) score += 15;
+  if (record.functionalFloors?.some((floor) => floor.rooms?.some((room) => room.room || room.quantity || room.description))) score += 5;
+  if (record.designProgress?.length || record.interiorDesignProgress?.length || record.acceptanceDesignProgress?.length || record.warrantyProgress?.length) score += 5;
+  score += Math.min(5, Math.max(0, Number(record.cacheUpdatedAt ?? 0) / 1e13));
+  return score;
+}
+
+function mergeDuplicateWorkRecords(primary: WorkRecord, secondary: WorkRecord) {
+  const primaryWins = workRecordQuality(primary) >= workRecordQuality(secondary);
+  const winner = primaryWins ? primary : secondary;
+  const other = primaryWins ? secondary : primary;
+  return {
+    ...other,
+    ...winner,
+    details: { ...(other.details ?? {}), ...(winner.details ?? {}) },
+    designProgress: winner.designProgress?.length ? winner.designProgress : other.designProgress,
+    interiorDesignProgress: winner.interiorDesignProgress?.length ? winner.interiorDesignProgress : other.interiorDesignProgress,
+    acceptanceDesignProgress: winner.acceptanceDesignProgress?.length ? winner.acceptanceDesignProgress : other.acceptanceDesignProgress,
+    warrantyProgress: winner.warrantyProgress?.length ? winner.warrantyProgress : other.warrantyProgress,
+    functionalFloors: winner.functionalFloors?.length ? winner.functionalFloors : other.functionalFloors,
+    functionalRows: winner.functionalRows?.length ? winner.functionalRows : other.functionalRows,
+    audioNote: winner.audioNote ?? other.audioNote,
+    customerShareToken: winner.customerShareToken || other.customerShareToken,
+    pendingDriveSync: Boolean(primary.pendingDriveSync || secondary.pendingDriveSync),
+    cacheUpdatedAt: Math.max(Number(primary.cacheUpdatedAt ?? 0), Number(secondary.cacheUpdatedAt ?? 0)) || undefined,
+  };
+}
+
+function dedupeMonthRecords(records: WorkRecord[]) {
+  const deduped: WorkRecord[] = [];
+  const indexByKey = new Map<string, number>();
+  (records ?? []).forEach((record) => {
+    if (!record || typeof record !== "object") return;
+    const key = workRecordKey(record);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex === undefined) {
+      indexByKey.set(key, deduped.length);
+      deduped.push(record);
+    } else {
+      deduped[existingIndex] = mergeDuplicateWorkRecords(deduped[existingIndex], record);
+    }
+  });
+  return deduped;
+}
+
+function dedupeWorkspaceYears(sourceYears: YearFolder[]) {
+  return (sourceYears ?? []).map((yearFolder) => ({
+    ...yearFolder,
+    months: (yearFolder.months ?? []).map((monthFolder) => ({
+      ...monthFolder,
+      records: dedupeMonthRecords(monthFolder.records ?? []),
+    })),
+  }));
+}
+
 // The index endpoint is intentionally lightweight, so compare only the
 // visible customer metadata. This gives the reload control a stable signal
 // when a folder is added, removed, renamed, or its indexed workbook changes.
 function driveIndexFingerprint(years: YearFolder[], year: number, month: number) {
-  const records = years.find((yearFolder) => yearFolder.year === year)?.months
-    ?.find((monthFolder) => monthFolder.label === `T${month}`)?.records ?? [];
+  const records = dedupeMonthRecords(years.find((yearFolder) => yearFolder.year === year)?.months
+    ?.find((monthFolder) => monthFolder.label === `T${month}`)?.records ?? []);
   return records.filter((record) => !record.pendingDriveSync).map((record) => [
     record.projectId,
     record.houseId ?? "",
@@ -1436,9 +1515,11 @@ function isDriveCacheFresh(key: string, maxAgeMs: number) {
 }
 
 function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
-  const driveByYear = new Map(driveYears.map((year) => [year.year, year]));
-  const localByYear = new Map(localYears.map((year) => [year.year, year]));
-  const mergedYears = Array.from(new Set([...localYears.map((year) => year.year), ...driveYears.map((year) => year.year)])).sort((a, b) => a - b);
+  const normalizedDriveYears = dedupeWorkspaceYears(driveYears);
+  const normalizedLocalYears = dedupeWorkspaceYears(localYears);
+  const driveByYear = new Map(normalizedDriveYears.map((year) => [year.year, year]));
+  const localByYear = new Map(normalizedLocalYears.map((year) => [year.year, year]));
+  const mergedYears = Array.from(new Set([...normalizedLocalYears.map((year) => year.year), ...normalizedDriveYears.map((year) => year.year)])).sort((a, b) => a - b);
   return mergedYears.map((yearNumber) => {
     const driveYear = driveByYear.get(yearNumber);
     const localYear = localByYear.get(yearNumber);
@@ -1475,17 +1556,19 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
         });
         const mergedProjectIds = new Set(mergedRecords.map((record) => record.projectId));
         const pendingLocalRecords = localRecords.filter((record) => record.pendingDriveSync && !mergedProjectIds.has(record.projectId));
-        return { label, records: [...mergedRecords, ...pendingLocalRecords] };
+        return { label, records: dedupeMonthRecords([...mergedRecords, ...pendingLocalRecords]) };
       }),
     };
-  });
+  }).map((yearFolder) => ({ ...yearFolder, months: yearFolder.months.map((monthFolder) => ({ ...monthFolder, records: dedupeMonthRecords(monthFolder.records) })) }));
 }
 
 function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFolder[], driveIndexProjectIds?: Map<string, Set<string>>) {
-  const sharedByYear = new Map(sharedYears.map((year) => [year.year, year]));
-  const localByYear = new Map(localYears.map((year) => [year.year, year]));
-  const mergedYearNumbers = Array.from(new Set([...sharedYears.map((year) => year.year), ...localYears.map((year) => year.year)])).sort((left, right) => left - right);
-  return mergedYearNumbers.map((yearNumber) => {
+  const normalizedSharedYears = dedupeWorkspaceYears(sharedYears);
+  const normalizedLocalYears = dedupeWorkspaceYears(localYears);
+  const sharedByYear = new Map(normalizedSharedYears.map((year) => [year.year, year]));
+  const localByYear = new Map(normalizedLocalYears.map((year) => [year.year, year]));
+  const mergedYearNumbers = Array.from(new Set([...normalizedSharedYears.map((year) => year.year), ...normalizedLocalYears.map((year) => year.year)])).sort((left, right) => left - right);
+  return dedupeWorkspaceYears(mergedYearNumbers.map((yearNumber) => {
     const sharedYear = sharedByYear.get(yearNumber);
     const localYear = localByYear.get(yearNumber);
     return {
@@ -1511,10 +1594,10 @@ function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFo
           return isKnownDriveRecord(merged) ? { ...merged, pendingDriveSync: false } : merged;
         });
         localRecords.filter((record) => !sharedProjectIds.has(record.projectId)).forEach((record) => records.unshift(record));
-        return { label, records };
+        return { label, records: dedupeMonthRecords(records) };
       }),
     };
-  });
+  }));
 }
 
 export default function Home() {
@@ -1668,7 +1751,7 @@ export default function Home() {
     const savedWorkspace = window.localStorage.getItem("gm-manager-consulting");
     if (savedWorkspace) {
       try {
-        setYears(JSON.parse(savedWorkspace) as YearFolder[]);
+        setYears(dedupeWorkspaceYears(JSON.parse(savedWorkspace) as YearFolder[]));
       } catch {
         window.localStorage.removeItem("gm-manager-consulting");
       }
@@ -1786,7 +1869,7 @@ export default function Home() {
     return Array.from(new Set([...years.map((folder) => folder.year), ...Array.from({ length: 9 }, (_, index) => currentYear - 3 + index)])).sort((a, b) => a - b);
   }, [years]);
   const customerLocations = useMemo<CustomerLocation[]>(() => years.flatMap((yearFolder) => yearFolder.months.flatMap((monthFolder, monthIndex) => (
-    monthFolder.records.map((record) => ({ record, year: yearFolder.year, month: monthIndex + 1 }))
+    dedupeMonthRecords(monthFolder.records).map((record) => ({ record, year: yearFolder.year, month: monthIndex + 1 }))
   ))).sort((a, b) => b.year - a.year || b.month - a.month || a.record.name.localeCompare(b.record.name, "vi")), [years]);
   const customerSearchResults = useMemo(() => {
     const term = normalizeSearchText(search.trim());
@@ -2071,11 +2154,12 @@ export default function Home() {
     workspaceSyncTimer.current = window.setTimeout(() => { workspaceSyncTimer.current = null; void flushWorkspaceCacheSync(); }, 700);
   };
   const persist = (nextYears: YearFolder[], syncRemote = true) => {
-    setYears(nextYears);
-    saveWorkspace(nextYears);
+    const normalizedYears = dedupeWorkspaceYears(nextYears);
+    setYears(normalizedYears);
+    saveWorkspace(normalizedYears);
     // If the shared store was empty, the first Drive index loaded on this
     // device also becomes the seed for the web/desktop shared cache.
-    if (syncRemote || sharedWorkspaceCacheEmpty.current) queueWorkspaceCacheSync(nextYears);
+    if (syncRemote || sharedWorkspaceCacheEmpty.current) queueWorkspaceCacheSync(normalizedYears);
   };
 
   const persistRecord = (record: WorkRecord, year: number, month: number) => {
@@ -2089,9 +2173,10 @@ export default function Home() {
           records: monthFolder.records.map((currentRecord) => currentRecord.projectId === updatedRecord.projectId ? updatedRecord : currentRecord),
         }),
       });
-      saveWorkspace(nextYears);
-      queueWorkspaceCacheSync(nextYears);
-      return nextYears;
+      const normalizedYears = dedupeWorkspaceYears(nextYears);
+      saveWorkspace(normalizedYears);
+      queueWorkspaceCacheSync(normalizedYears);
+      return normalizedYears;
     });
   };
 
@@ -2835,8 +2920,9 @@ export default function Home() {
     const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
     const creationKey = `${modalYear}-${modalMonth}-${normalizeSearchText(normalizedHouseId)}`;
     if (customerCreateRequestsInFlight.current.has(creationKey)) return;
-    const targetMonthRecords = years.find((yearFolder) => yearFolder.year === modalYear)?.months?.[modalMonth - 1]?.records ?? [];
-    const existingRecord = targetMonthRecords.find((record) => record.projectId === projectId || normalizeSearchText(record.houseId ?? "") === normalizeSearchText(normalizedHouseId));
+    const targetMonthRecords = dedupeMonthRecords(years.find((yearFolder) => yearFolder.year === modalYear)?.months?.[modalMonth - 1]?.records ?? []);
+    const normalizedHouseKey = normalizeHouseCode(normalizedHouseId);
+    const existingRecord = targetMonthRecords.find((record) => record.projectId === projectId || normalizeHouseCode(record.houseId) === normalizedHouseKey);
     if (existingRecord && !existingRecord.pendingDriveSync) {
       setSelectedYear(modalYear);
       setSelectedMonth(modalMonth);

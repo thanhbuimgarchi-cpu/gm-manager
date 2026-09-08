@@ -164,8 +164,28 @@ function createCustomerFolder_(payload) {
   }
   // Creating a project only establishes the folder tree. A blank document day
   // must not appear until the user explicitly creates a day or uploads files.
-  const folder = getCustomerFolder_(year, month, folderKey, true, false);
+  const root = rootFolder_();
+  const customers = getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const yearFolder = getOrCreateFolder_(customers, String(year));
+  const monthFolder = getOrCreateFolder_(yearFolder, "T" + month);
+  let folder = findFolder_(monthFolder, houseId || projectId);
+  const legacyFolder = projectId && houseId && projectId !== houseId ? findFolder_(monthFolder, projectId) : null;
+
+  // Before house codes became the Drive folder key, the same customer was
+  // created as GM.... If that legacy folder exists, rename/reuse it instead
+  // of creating a second folder named after the house code. If both versions
+  // already exist, merge the legacy content into the house-code folder.
+  if (!folder && legacyFolder) {
+    legacyFolder.setName(houseId);
+    folder = legacyFolder;
+  } else if (folder && legacyFolder && folder.getId() !== legacyFolder.getId()) {
+    mergeFolderInto_(folder, legacyFolder);
+    legacyFolder.setTrashed(true);
+  }
+  folder = getOrCreateFolder_(monthFolder, houseId || projectId);
   if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
+  ensureProjectFolders_(folder, false);
+  cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + folderKey, folder);
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
 }
 
@@ -593,21 +613,33 @@ function loadMonthCustomerIndex_(customers, year, month) {
   const yearFolder = findFolder_(customers, String(year));
   const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
   if (!monthFolder) return monthResult_(year, month, []);
-  const records = [];
+  const recordsByHouse = {};
   const customerFolders = monthFolder.getFolders();
   while (customerFolders.hasNext()) {
     const customerFolder = customerFolders.next();
     const projectId = customerFolder.getName();
     if (projectId.indexOf("-") === 0) continue;
     const record = fastCustomerIndexFromFolder_(projectId, customerFolder);
-    if (record) records.push(record);
+    if (!record) continue;
+    const key = normalizeDriveName_(record.houseId || record.projectId);
+    const previous = recordsByHouse[key];
+    if (!previous || customerIndexPriority_(record) > customerIndexPriority_(previous)) recordsByHouse[key] = record;
   }
-  return monthResult_(year, month, records);
+  return monthResult_(year, month, Object.keys(recordsByHouse).map(function(key) { return recordsByHouse[key]; }));
+}
+
+function customerIndexPriority_(record) {
+  let score = 0;
+  if (record && record.houseId) score += 100;
+  if (record && record.projectId && record.projectId === record.houseId) score += 20;
+  if (record && record.projectId && !/^GM\d{2}\d{2}\d{4}/i.test(record.projectId)) score += 10;
+  return score;
 }
 
 function fastCustomerIndexFromFolder_(folderName, customerFolder) {
   const dateMatch = /^GM(\d{2})(\d{2})(\d{4})/.exec(folderName);
   const isLegacyProjectFolder = Boolean(dateMatch);
+  const houseId = isLegacyProjectFolder ? customerHouseIdFromFolder_(customerFolder, folderName) : folderName;
   let driveUpdatedAt = "";
   try {
     if (customerFolder && customerFolder.getLastUpdated) driveUpdatedAt = customerFolder.getLastUpdated().toISOString();
@@ -618,13 +650,26 @@ function fastCustomerIndexFromFolder_(folderName, customerFolder) {
   return {
     id: "drive-" + folderName,
     name: "",
-    houseId: isLegacyProjectFolder ? "" : folderName,
+    houseId: houseId,
     projectId: folderName,
     createdAt: dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "",
     driveUpdatedAt: driveUpdatedAt,
     details: {},
     isHydrated: false,
   };
+}
+
+function customerHouseIdFromFolder_(customerFolder, projectId) {
+  if (!customerFolder || !/^GM\d{2}\d{2}\d{4}/i.test(String(projectId || ""))) return "";
+  try {
+    const workbook = latestCustomerWorkbook_(customerFolder, projectId);
+    if (!workbook) return "";
+    const sheets = readXlsxSheets_(workbook);
+    const metadata = keyValueRows_(sheets["0. GM-CRM"] || []);
+    return String(metadata.houseId || "").trim();
+  } catch (error) {
+    return "";
+  }
 }
 
 function loadCustomerDetail_(customers, payload) {
