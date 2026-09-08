@@ -127,6 +127,7 @@ type WorkRecord = {
   createdAt: string;
   driveUpdatedAt?: string;
   cacheUpdatedAt?: number;
+  pendingDriveSync?: boolean;
   details: Record<string, string>;
   audioNote?: AudioNote;
   isHydrated?: boolean;
@@ -1267,7 +1268,7 @@ const normalizeSearchText = (value: string) => value
 function driveIndexFingerprint(years: YearFolder[], year: number, month: number) {
   const records = years.find((yearFolder) => yearFolder.year === year)?.months
     ?.find((monthFolder) => monthFolder.label === `T${month}`)?.records ?? [];
-  return records.map((record) => [
+  return records.filter((record) => !record.pendingDriveSync).map((record) => [
     record.projectId,
     record.houseId ?? "",
     record.name ?? "",
@@ -1450,13 +1451,14 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
         const localRecords = localMonth.records ?? [];
         const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
         const localByHouseId = new Map(localRecords.filter((record) => record.houseId?.trim()).map((record) => [record.houseId!.trim().toLocaleLowerCase("vi"), record]));
-        const driveProjectIds = new Set((driveMonth.records ?? []).map((record) => record.projectId));
+        const driveProjectIds = new Set((driveMonth.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]);
         const mergedRecords = (driveMonth.records ?? []).map((record) => {
           // Local cache is authoritative once a customer has been opened or
           // edited. Drive index rows are only a discovery list and must not
           // overwrite cached form/progress data.
           const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const merged = localRecord ? { ...record, ...localRecord } : { ...record };
+          const driveRecordKnown = driveProjectIds.has(record.projectId) || Boolean(record.houseId?.trim() && driveProjectIds.has(record.houseId.trim()));
           return {
             ...merged,
             id: merged.id || `drive-${record.projectId}`,
@@ -1464,13 +1466,16 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
             houseId: merged.houseId || "",
             details: merged.details ?? {},
             isHydrated: merged.isHydrated ?? false,
+            pendingDriveSync: driveRecordKnown ? false : merged.pendingDriveSync,
             designProgress: merged.designProgress ?? createDesignProgress(),
             interiorDesignProgress: merged.interiorDesignProgress ?? createDesignProgress("interior"),
             acceptanceDesignProgress: merged.acceptanceDesignProgress ?? createDesignProgress("acceptance"),
             warrantyProgress: merged.warrantyProgress ?? createWarrantyProgress(),
           };
         });
-        return { label, records: mergedRecords };
+        const mergedProjectIds = new Set(mergedRecords.map((record) => record.projectId));
+        const pendingLocalRecords = localRecords.filter((record) => record.pendingDriveSync && !mergedProjectIds.has(record.projectId));
+        return { label, records: [...mergedRecords, ...pendingLocalRecords] };
       }),
     };
   });
@@ -1493,16 +1498,17 @@ function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFo
         const driveIndexKnown = Boolean(knownDriveIds);
         const isKnownDriveRecord = (record: WorkRecord) => Boolean(knownDriveIds?.has(record.projectId) || (record.houseId && knownDriveIds?.has(record.houseId.trim())));
         if (!sharedMonth && !driveIndexKnown) return localMonth;
-        const localRecords = (localMonth.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record));
+        const localRecords = (localMonth.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record) || record.pendingDriveSync);
         const localByProjectId = new Map(localRecords.map((record) => [record.projectId, record]));
         const localByHouseId = new Map(localRecords.filter((record) => record.houseId?.trim()).map((record) => [record.houseId!.trim().toLocaleLowerCase("vi"), record]));
-        const sharedRecords = (sharedMonth?.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record));
+        const sharedRecords = (sharedMonth?.records ?? []).filter((record) => !driveIndexKnown || isKnownDriveRecord(record) || record.pendingDriveSync);
         const sharedProjectIds = new Set(sharedRecords.map((record) => record.projectId));
         const records = sharedRecords.map((record) => {
           const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const localUpdatedAt = Number(localRecord?.cacheUpdatedAt ?? 0);
           const sharedUpdatedAt = Number(record.cacheUpdatedAt ?? 0);
-          return localRecord && localUpdatedAt > sharedUpdatedAt ? { ...record, ...localRecord } : { ...localRecord, ...record };
+          const merged = localRecord && localUpdatedAt > sharedUpdatedAt ? { ...record, ...localRecord } : { ...localRecord, ...record };
+          return isKnownDriveRecord(merged) ? { ...merged, pendingDriveSync: false } : merged;
         });
         localRecords.filter((record) => !sharedProjectIds.has(record.projectId)).forEach((record) => records.unshift(record));
         return { label, records };
@@ -1517,6 +1523,8 @@ export default function Home() {
   const appVersionLabel = APP_VERSION === "development" ? "dev" : APP_VERSION.slice(0, 7);
   const [activeFolder, setActiveFolder] = useState("Tư vấn");
   const [years, setYears] = useState<YearFolder[]>(initialYears);
+  const yearsRef = useRef<YearFolder[]>(initialYears);
+  yearsRef.current = years;
   const [workspaceStorageReady, setWorkspaceStorageReady] = useState(false);
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
@@ -1612,6 +1620,7 @@ export default function Home() {
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const customerSearchTimer = useRef<number | null>(null);
+  const customerCreateRequestsInFlight = useRef(new Set<string>());
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
   const locallyDeletedWorkNoteIds = useRef(new Set<string>());
@@ -1628,6 +1637,9 @@ export default function Home() {
   const driveIndexFingerprints = useRef(new Map<string, string>());
   const driveRefreshRequested = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
+  const pendingWorkNotesSync = useRef(new Map<string, WorkNote[]>());
+  const personnelLoadRevision = useRef(0);
+  const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
 
   const promptForMobileNotifications = () => {
     if (!isMobileDevice()) return;
@@ -2091,7 +2103,7 @@ export default function Home() {
     const month = options.month ?? selectedMonth;
     const indexKey = `${year}-${month}`;
     if (mode === "index" && !driveIndexFingerprints.current.has(indexKey)) {
-      const localFingerprint = driveIndexFingerprint(years, year, month);
+      const localFingerprint = driveIndexFingerprint(yearsRef.current, year, month);
       if (localFingerprint) driveIndexFingerprints.current.set(indexKey, localFingerprint);
     }
     const cacheKey = `workspace:${mode}:${year}:${month}:${options.projectId ?? ""}:${normalizeSearchText(options.query ?? "")}`;
@@ -2100,7 +2112,7 @@ export default function Home() {
       const cachedYears = readDriveCache<YearFolder[]>(cacheKey, cacheAge);
       if (cachedYears) {
         if (mode === "index") driveIndexFingerprints.current.set(indexKey, driveIndexFingerprint(cachedYears, year, month));
-        persist(preserveDriveRecordMetadata(cachedYears, years), false);
+        persist(preserveDriveRecordMetadata(cachedYears, yearsRef.current), false);
         return true;
       }
     }
@@ -2119,7 +2131,7 @@ export default function Home() {
         const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
         driveIndexProjectIds.current.set(indexKey, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
       }
-      const driveYears = preserveDriveRecordMetadata(result.years, years);
+      const driveYears = preserveDriveRecordMetadata(result.years, yearsRef.current);
       if (driveYears.length) {
         persist(driveYears, false);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
@@ -2172,7 +2184,7 @@ export default function Home() {
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
-      const mergedYears = mergeSharedWorkspaceYears(result.years, years, driveIndexProjectIds.current);
+      const mergedYears = mergeSharedWorkspaceYears(result.years, yearsRef.current, driveIndexProjectIds.current);
       const mergedHasRecords = mergedYears.some((year) => year.months?.some((month) => month.records?.length));
       if (mergedHasRecords) {
         sharedWorkspaceCacheEmpty.current = false;
@@ -2182,9 +2194,9 @@ export default function Home() {
         // not resurrect deleted projects from the shared cache.
         sharedWorkspaceCacheEmpty.current = false;
         persist(mergedYears, false);
-      } else if (years.some((year) => year.months?.some((month) => month.records?.length))) {
+      } else if (yearsRef.current.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = true;
-        queueWorkspaceCacheSync(years);
+        queueWorkspaceCacheSync(yearsRef.current);
       } else {
         sharedWorkspaceCacheEmpty.current = true;
       }
@@ -2200,10 +2212,20 @@ export default function Home() {
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
+  const rememberPendingWorkNotes = (notes: WorkNote[], location = selectedCustomerLocation) => {
+    const cacheKey = workNotesCacheKey(location);
+    if (cacheKey) {
+      pendingWorkNotesSync.current.set(cacheKey, notes);
+      // Ignore an older Drive read that started before this local mutation.
+      workNotesLoadRevision.current += 1;
+    }
+  };
   const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
     if (!location || !driveScriptUrl.trim()) return;
+    const cacheKey = workNotesCacheKey(location);
     const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; storage?: string; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes });
     if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ghi chú được giao.");
+    if (pendingWorkNotesSync.current.get(cacheKey) === notes) pendingWorkNotesSync.current.delete(cacheKey);
     return result;
   };
   const loadWorkNotes = async () => {
@@ -2225,7 +2247,8 @@ export default function Home() {
       if (response.ok && result.ok && Array.isArray(result.notes)) {
         const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
         const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId && !locallyDeletedWorkNoteIds.current.has(note.id));
-        const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
+        const pendingNotes = pendingWorkNotesSync.current.get(cacheKey) ?? [];
+        const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject, ...pendingNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
         setWorkNotes(mergedNotes);
         writeDriveCache(cacheKey, mergedNotes);
         setWorkNotesCacheRevision((revision) => revision + 1);
@@ -2361,6 +2384,7 @@ export default function Home() {
     if (!parseDesignDate(newWorkNote.dueDate) || isPastVietnamDate(newWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
     const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
     persistWorkNotes(next);
+    rememberPendingWorkNotes(next);
     setNewWorkNote(null);
     try {
       const result = await syncWorkNotesToSharedStore(next);
@@ -2382,6 +2406,7 @@ export default function Home() {
     if (!parseDesignDate(editingWorkNote.dueDate) || isPastVietnamDate(editingWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
     const next = workNotes.map((note) => note.id === editingWorkNote.id ? { ...editingWorkNote, status: workNoteStatus(editingWorkNote) } : note);
     persistWorkNotes(next);
+    rememberPendingWorkNotes(next);
     setEditingWorkNote(null);
     try { await syncWorkNotesToSharedStore(next); setNotice("Đã lưu thay đổi và đồng bộ người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ thay đổi."); }
   };
@@ -2392,6 +2417,7 @@ export default function Home() {
     workNotesLoadRevision.current += 1;
     const next = workNotes.filter((item) => item.id !== id);
     persistWorkNotes(next);
+    rememberPendingWorkNotes(next);
     setAssignedWorkNotes((current) => current.filter((item) => item.id !== id));
     if (editingWorkNote?.id === id) setEditingWorkNote(null);
     setWorkNoteMenuId(null);
@@ -2415,6 +2441,7 @@ export default function Home() {
     const accepted = { ...note, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail, status: workNoteStatus({ ...note, acceptedAt: new Date().toISOString() }) };
     const next = workNotes.map((item) => item.id === note.id ? accepted : item);
     persistWorkNotes(next);
+    rememberPendingWorkNotes(next, location);
     try { await syncWorkNotesToSharedStore(next, location); setNotice("Đã xác nhận nhận việc."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận nhận việc."); }
   };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
@@ -2806,31 +2833,35 @@ export default function Home() {
 
     const created = getVietnamDate();
     const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
-    setCreatingCustomer(true);
-    try {
-      const config = { scriptUrl: driveScriptUrl.trim() };
-      if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
-        action: "create-customer-folder",
-        year: modalYear,
-        month: modalMonth,
-        projectId,
-        houseId: normalizedHouseId,
-      });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể tạo thư mục hồ sơ trên Drive.");
+    const creationKey = `${modalYear}-${modalMonth}-${normalizeSearchText(normalizedHouseId)}`;
+    if (customerCreateRequestsInFlight.current.has(creationKey)) return;
+    const targetMonthRecords = years.find((yearFolder) => yearFolder.year === modalYear)?.months?.[modalMonth - 1]?.records ?? [];
+    const existingRecord = targetMonthRecords.find((record) => record.projectId === projectId || normalizeSearchText(record.houseId ?? "") === normalizeSearchText(normalizedHouseId));
+    if (existingRecord && !existingRecord.pendingDriveSync) {
+      setSelectedYear(modalYear);
+      setSelectedMonth(modalMonth);
+      setSelectedCustomerProjectId(existingRecord.projectId);
+      setPersonnelView(false);
+      setActiveFolder("Tư vấn");
+      setAddOpen(false);
+      setNotice(`Hồ sơ ${normalizedHouseId} đã có trong cache, không tạo thêm bản trùng.`);
       return;
-    } finally {
-      setCreatingCustomer(false);
     }
-    const record: WorkRecord = {
+
+    const record: WorkRecord = existingRecord ? {
+      ...existingRecord,
+      name,
+      houseId: normalizedHouseId,
+      pendingDriveSync: true,
+      cacheUpdatedAt: Date.now(),
+    } : {
       id: `${Date.now()}-${projectId}`,
       name,
       houseId: normalizedHouseId,
       projectId,
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       cacheUpdatedAt: Date.now(),
+      pendingDriveSync: true,
       details: {},
       isHydrated: true,
       progressHydrated: true,
@@ -2844,17 +2875,44 @@ export default function Home() {
     const nextYears = hasTargetYear
       ? years.map((yearFolder) => yearFolder.year !== modalYear ? yearFolder : {
         ...yearFolder,
-        months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : { ...monthFolder, records: [record, ...monthFolder.records] }),
+        months: yearFolder.months.map((monthFolder, index) => index !== modalMonth - 1 ? monthFolder : {
+          ...monthFolder,
+          records: existingRecord ? monthFolder.records.map((currentRecord) => currentRecord.projectId === existingRecord.projectId ? record : currentRecord) : [record, ...monthFolder.records],
+        }),
       })
       : [...years, { year: modalYear, months: buildMonths().map((monthFolder, index) => index === modalMonth - 1 ? { ...monthFolder, records: [record] } : monthFolder) }].sort((left, right) => left.year - right.year);
+
+    // Make the local/shared cache authoritative before any Drive request. A
+    // background index refresh can therefore never make a just-created card
+    // disappear while the folder request is still in flight.
     persist(nextYears);
     setSelectedYear(modalYear);
     setSelectedMonth(modalMonth);
-    setSelectedCustomerProjectId(projectId);
+    setSelectedCustomerProjectId(record.projectId);
     setPersonnelView(false);
     setActiveFolder("Tư vấn");
     setAddOpen(false);
-    setNotice(`Đã tạo thư mục ${normalizedHouseId} trên Drive và hồ sơ cache trên thiết bị.`);
+    setNotice(`Đã lưu hồ sơ ${normalizedHouseId} vào cache. Đang đồng bộ Drive…`);
+    customerCreateRequestsInFlight.current.add(creationKey);
+    setCreatingCustomer(true);
+    try {
+      const config = { scriptUrl: driveScriptUrl.trim() };
+      if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
+        action: "create-customer-folder",
+        year: modalYear,
+        month: modalMonth,
+        projectId,
+        houseId: normalizedHouseId,
+      });
+      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
+      setNotice(`Đã tạo thư mục ${normalizedHouseId} trên Drive và giữ hồ sơ trong cache.`);
+    } catch (error) {
+      setNotice(`Hồ sơ đã lưu trong cache; Drive chưa đồng bộ (${error instanceof Error ? error.message : "lỗi kết nối"}). Có thể nạp lại để thử lại.`);
+    } finally {
+      customerCreateRequestsInFlight.current.delete(creationKey);
+      setCreatingCustomer(false);
+    }
   };
 
   const deleteRecord = (id: string) => {
@@ -3663,6 +3721,7 @@ export default function Home() {
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "save-personnel-cache", personnel: next });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ danh sách nhân lực.");
+      if (pendingPersonnelCache.current === next) pendingPersonnelCache.current = null;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể đồng bộ danh sách nhân lực dùng chung.");
     }
@@ -3681,6 +3740,8 @@ export default function Home() {
     }
   };
   const persistPersonnel = (next: Record<string, PersonnelMember[]>) => {
+    personnelLoadRevision.current += 1;
+    pendingPersonnelCache.current = next;
     setPersonnelByCategory(next);
     try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Personnel remains available for this session. */ }
     void savePersonnelCache(next);
@@ -3822,10 +3883,12 @@ export default function Home() {
     const needsPersonnel = personnelView || loginOpen || Boolean(loggedInEmployeeEmail) || activeFolder === "Ghi chú" || activeFolder === "Thiết kế" || activeFolder === "Bảo hành";
     if (!needsPersonnel || !driveScriptUrl.trim()) return;
     let cancelled = false;
+    const loadRevision = ++personnelLoadRevision.current;
     setLoadingPersonnel(true);
     void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]>; source?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
-      if (!response.ok || !result.ok || cancelled) return;
+      if (!response.ok || !result.ok || cancelled || loadRevision !== personnelLoadRevision.current) return;
       let next = normalizePersonnelMap(result.personnel ?? {});
+      if (pendingPersonnelCache.current) next = pendingPersonnelCache.current;
       // Keep a device's existing local roster when an older deployment has no
       // shared cache yet (for example immediately after changing the Drive
       // link). Seed that roster into the shared cache on the next successful
