@@ -2517,15 +2517,25 @@ export default function Home() {
     };
     const cacheKey = workNotesCacheKey(location);
     const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? [];
-    const baseNotes = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId
+    let baseNotes = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId
       ? workNotes
       : cachedNotes;
-    const nextNotes = [...baseNotes.filter((item) => item.id !== note.id), note];
     setCustomerMessageTaskBusy(true);
-    persistWorkNotes(nextNotes, location);
-    rememberPendingWorkNotes(nextNotes, location);
-    setCustomerMessageTaskDraft(null);
     try {
+      const isOpenedLocation = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId;
+      if (!isOpenedLocation && driveScriptUrl.trim()) {
+        // The overview may not have loaded this customer's notes yet. Read
+        // them once before replacing the shared array so a new assignment
+        // cannot erase older notes that are not in this device cache.
+        try {
+          const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId });
+          if (response.ok && result.ok && Array.isArray(result.notes)) baseNotes = Array.from(new Map([...result.notes, ...baseNotes].map((item) => [item.id, item])).values());
+        } catch { /* The local cache remains the safe fallback while offline. */ }
+      }
+      const nextNotes = [...baseNotes.filter((item) => item.id !== note.id), note];
+      persistWorkNotes(nextNotes, location);
+      rememberPendingWorkNotes(nextNotes, location);
+      setCustomerMessageTaskDraft(null);
       const result = await syncWorkNotesToSharedStore(nextNotes, location);
       setNotice(result?.driveWarning ? `Đã phát hành giao việc. ${result.driveWarning}` : "Đã phát hành giao việc và thông báo cho Người phụ trách.");
     } catch (error) {
