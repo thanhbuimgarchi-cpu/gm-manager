@@ -415,6 +415,7 @@ const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
 const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
+const notificationEnabledStorageKey = "gm-manager-notifications-enabled-v1";
 const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // The currently deployed Apps Script still verifies its historical token. It is
 // supplied automatically for compatibility, so users only ever enter the URL.
@@ -1259,6 +1260,21 @@ const normalizeSearchText = (value: string) => value
   .replaceAll("đ", "d")
   .trim();
 
+// The index endpoint is intentionally lightweight, so compare only the
+// visible customer metadata. This gives the reload control a stable signal
+// when a folder is added, removed, renamed, or its indexed workbook changes.
+function driveIndexFingerprint(years: YearFolder[], year: number, month: number) {
+  const records = years.find((yearFolder) => yearFolder.year === year)?.months
+    ?.find((monthFolder) => monthFolder.label === `T${month}`)?.records ?? [];
+  return records.map((record) => [
+    record.projectId,
+    record.houseId ?? "",
+    record.name ?? "",
+    record.createdAt ?? "",
+    record.cacheUpdatedAt ?? "",
+  ].join("\u001f")).sort().join("\u001e");
+}
+
 const getRoomSuggestions = (query: string) => {
   const normalizedQuery = normalizeSearchText(query);
   if (normalizedQuery.length < 2 || query.trim().startsWith("@")) return [];
@@ -1537,6 +1553,7 @@ export default function Home() {
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -1553,6 +1570,7 @@ export default function Home() {
   const [syncingWarrantyId, setSyncingWarrantyId] = useState<string | null>(null);
   const [exportingPersonnel, setExportingPersonnel] = useState(false);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
+  const [driveRefreshAvailable, setDriveRefreshAvailable] = useState(false);
   const [workflowFilesByFolder, setWorkflowFilesByFolder] = useState<Record<string, WorkflowFile[]>>({});
   const [loadingWorkflowFiles, setLoadingWorkflowFiles] = useState(false);
   const [workflowFilesError, setWorkflowFilesError] = useState("");
@@ -1605,6 +1623,8 @@ export default function Home() {
   // prevents a deleted Drive folder from being reintroduced by the shared
   // workspace cache on another device.
   const driveIndexProjectIds = useRef(new Map<string, Set<string>>());
+  const driveIndexFingerprints = useRef(new Map<string, string>());
+  const driveRefreshRequested = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
 
   const promptForMobileNotifications = () => {
@@ -1616,6 +1636,11 @@ export default function Home() {
   const dismissMobileNotificationSetup = () => {
     try { window.localStorage.setItem(mobileNotificationSetupKey, "dismissed"); } catch { /* Optional prompt state. */ }
     setNotificationSetupOpen(false);
+  };
+
+  const markNotificationsEnabled = (enabled: boolean) => {
+    setNotificationsEnabled(enabled);
+    try { window.localStorage.setItem(notificationEnabledStorageKey, enabled ? "enabled" : "disabled"); } catch { /* Optional preference persistence. */ }
   };
 
   useEffect(() => {
@@ -1678,6 +1703,14 @@ export default function Home() {
       promptForMobileNotifications();
     };
     updateInstallState();
+    let savedNotificationState = "";
+    try { savedNotificationState = window.localStorage.getItem(notificationEnabledStorageKey) ?? ""; } catch { /* Optional preference persistence. */ }
+    const browserNotificationsGranted = "Notification" in window && Notification.permission === "granted";
+    const desktopNotificationsEnabled = Boolean(desktopBridge()?.isDesktop && savedNotificationState === "enabled");
+    if (browserNotificationsGranted || desktopNotificationsEnabled) {
+      setNotificationsEnabled(true);
+      try { window.localStorage.setItem(notificationEnabledStorageKey, "enabled"); } catch { /* Optional preference persistence. */ }
+    }
     if ("Notification" in window) setNotificationPermission(Notification.permission);
     let reloadingForWorker = false;
     const markWorkerUpdate = () => {
@@ -1904,7 +1937,11 @@ export default function Home() {
     const body = customerMessageNotificationBody(message);
     const url = customerMessageNotificationUrl(message);
     const desktop = desktopBridge();
-    if (desktop?.isDesktop) return desktop.showNotification({ title, body, url });
+    if (desktop?.isDesktop) {
+      const shown = await desktop.showNotification({ title, body, url });
+      if (shown) markNotificationsEnabled(true);
+      return shown;
+    }
     if (!("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator)) return false;
     try {
       const registration = serviceWorkerRegistration.current ?? await navigator.serviceWorker.ready;
@@ -1916,6 +1953,7 @@ export default function Home() {
         renotify: true,
         data: { url },
       });
+      markNotificationsEnabled(true);
       return true;
     } catch {
       return false;
@@ -1944,12 +1982,14 @@ export default function Home() {
       });
       if (shown) {
         setNotificationPermission("granted");
+        markNotificationsEnabled(true);
         setNotice("Đã bật và gửi thông báo thử trên Windows.");
         return;
       }
     }
     if (!("Notification" in window) || !("serviceWorker" in navigator)) {
       setNotificationPermission("unsupported");
+      markNotificationsEnabled(false);
       setNotice("Trình duyệt này chưa hỗ trợ thông báo ứng dụng.");
       return;
     }
@@ -1957,17 +1997,25 @@ export default function Home() {
     if (permission === "default") permission = await Notification.requestPermission();
     setNotificationPermission(permission);
     if (permission !== "granted") {
+      markNotificationsEnabled(false);
       setNotice("Bạn cần cho phép thông báo trong cài đặt trình duyệt.");
       return;
     }
-    const registration = await navigator.serviceWorker.ready;
-    await registration.showNotification("GM-CRM", {
-      body: "Thông báo trên điện thoại đã được bật thành công.",
-      icon: `${import.meta.env.BASE_URL}gm-logo.png`,
-      badge: `${import.meta.env.BASE_URL}gm-logo.png`,
-      tag: "gm-crm-notification-test",
-      data: { url: `${import.meta.env.BASE_URL}` },
-    });
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      await registration.showNotification("GM-CRM", {
+        body: "Thông báo trên điện thoại đã được bật thành công.",
+        icon: `${import.meta.env.BASE_URL}gm-logo.png`,
+        badge: `${import.meta.env.BASE_URL}gm-logo.png`,
+        tag: "gm-crm-notification-test",
+        data: { url: `${import.meta.env.BASE_URL}` },
+      });
+      markNotificationsEnabled(true);
+    } catch {
+      markNotificationsEnabled(false);
+      setNotice("Không thể bật thông báo trên thiết bị này.");
+      return;
+    }
     try { if (isMobileDevice()) window.localStorage.setItem(mobileNotificationSetupKey, "complete"); } catch { /* Optional prompt state. */ }
     setNotice("Đã gửi thông báo thử đến thiết bị này.");
   };
@@ -1977,7 +2025,7 @@ export default function Home() {
     {renderUpdateAction()}
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeResetCode(""); setEmployeeAuthMode("login"); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
-    <button type="button" className="pwa-action" onClick={() => void sendTestNotification()}>◌ Bật thông báo</button>
+    <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()}>{notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
   </>;
 
   const flushWorkspaceCacheSync = async () => {
@@ -2035,20 +2083,26 @@ export default function Home() {
 
   const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string; force?: boolean } = {}) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
-    if (!config.scriptUrl) return;
+    if (!config.scriptUrl) return false;
     const mode = options.mode ?? "index";
     const year = options.year ?? selectedYear;
     const month = options.month ?? selectedMonth;
+    const indexKey = `${year}-${month}`;
+    if (mode === "index" && !driveIndexFingerprints.current.has(indexKey)) {
+      const localFingerprint = driveIndexFingerprint(years, year, month);
+      if (localFingerprint) driveIndexFingerprints.current.set(indexKey, localFingerprint);
+    }
     const cacheKey = `workspace:${mode}:${year}:${month}:${options.projectId ?? ""}:${normalizeSearchText(options.query ?? "")}`;
     const cacheAge = mode === "index" ? DRIVE_INDEX_CACHE_MS : mode === "search" ? DRIVE_SEARCH_CACHE_MS : 0;
     if (!options.force && cacheAge) {
       const cachedYears = readDriveCache<YearFolder[]>(cacheKey, cacheAge);
       if (cachedYears) {
+        if (mode === "index") driveIndexFingerprints.current.set(indexKey, driveIndexFingerprint(cachedYears, year, month));
         persist(preserveDriveRecordMetadata(cachedYears, years), false);
-        return;
+        return true;
       }
     }
-    if (driveRequestsInFlight.current.has(cacheKey)) return;
+    if (driveRequestsInFlight.current.has(cacheKey)) return false;
     driveRequestsInFlight.current.add(cacheKey);
     setIsLoadingDrive(true);
     try {
@@ -2056,21 +2110,43 @@ export default function Home() {
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       if (cacheAge) writeDriveCache(cacheKey, result.years);
       if (mode === "index") {
+        const fingerprint = driveIndexFingerprint(result.years, year, month);
+        const previousFingerprint = driveIndexFingerprints.current.get(indexKey);
+        if (driveIndexFingerprints.current.has(indexKey) && previousFingerprint !== fingerprint && !driveRefreshRequested.current) setDriveRefreshAvailable(true);
+        driveIndexFingerprints.current.set(indexKey, fingerprint);
         const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
-        driveIndexProjectIds.current.set(`${year}-${month}`, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
+        driveIndexProjectIds.current.set(indexKey, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
       }
       const driveYears = preserveDriveRecordMetadata(result.years, years);
       if (driveYears.length) {
         persist(driveYears, false);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
+      return true;
     } catch (error) {
       if (!quietly) setNotice(error instanceof Error ? error.message : "Không thể nạp dữ liệu Excel từ Drive.");
+      return false;
     } finally {
       driveRequestsInFlight.current.delete(cacheKey);
       setIsLoadingDrive(false);
     }
   };
+
+  const refreshDriveNow = async () => {
+    driveRefreshRequested.current = true;
+    const hadRefreshAvailable = driveRefreshAvailable;
+    setDriveRefreshAvailable(false);
+    try {
+      const refreshed = await loadWorkspaceFromDrive(undefined, false, { force: true });
+      if (!refreshed && hadRefreshAvailable) setDriveRefreshAvailable(true);
+    } finally {
+      driveRefreshRequested.current = false;
+    }
+  };
+
+  useEffect(() => {
+    setDriveRefreshAvailable(false);
+  }, [selectedYear, selectedMonth]);
 
   useEffect(() => {
     if (isCustomerPortal) return;
@@ -3461,7 +3537,10 @@ export default function Home() {
             await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url } });
             shown = true;
           }
-          if (shown) window.localStorage.setItem(key, String(now));
+          if (shown) {
+            markNotificationsEnabled(true);
+            window.localStorage.setItem(key, String(now));
+          }
         }
       } catch { /* The next poll retries while the app remains usable offline. */ }
     };
@@ -3533,7 +3612,10 @@ export default function Home() {
             await serviceWorkerRegistration.current.showNotification("GM Manager · Có hạng mục thiết kế mới", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-design-${task.kind}-${task.id}`, data: { url } });
             shown = true;
           }
-          if (shown) window.localStorage.setItem(key, String(now));
+          if (shown) {
+            markNotificationsEnabled(true);
+            window.localStorage.setItem(key, String(now));
+          }
         }
       } catch { /* Retry on the next poll without blocking the design page. */ }
     };
@@ -4173,7 +4255,7 @@ export default function Home() {
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
               <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
-              <button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
+              <button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
             </div>
           </header>
 
@@ -4283,7 +4365,7 @@ export default function Home() {
             {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
           </div>
-          <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className="reload-drive" onClick={() => void loadWorkspaceFromDrive(undefined, false, { force: true })} disabled={isLoadingDrive}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {!hasActiveFolderAccess ? (
