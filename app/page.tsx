@@ -4366,6 +4366,7 @@ export default function Home() {
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
           </div>
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
 
         {!hasActiveFolderAccess ? (
