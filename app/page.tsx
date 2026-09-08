@@ -2394,7 +2394,8 @@ export default function Home() {
     setEditingWorkNote(null);
     setWorkNoteMenuId(null);
     const cacheKey = workNotesCacheKey();
-    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note));
+    const canSeeNote = (note: WorkNote) => canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail);
+    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note) && canSeeNote(note));
     setWorkNotes(cachedNotes);
     if (cachedNotes.length) writeDriveCache(cacheKey, cachedNotes);
     else removeDriveCache(cacheKey);
@@ -2404,7 +2405,7 @@ export default function Home() {
       const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId });
       if (loadRevision !== workNotesLoadRevision.current) return;
       if (response.ok && result.ok && Array.isArray(result.notes)) {
-        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
+        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id) && canSeeNote(note));
         const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId && !locallyDeletedWorkNoteIds.current.has(note.id));
         const pendingNotes = pendingWorkNotesSync.current.get(cacheKey) ?? [];
         const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject, ...pendingNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
@@ -3809,11 +3810,12 @@ export default function Home() {
     return Boolean(loggedInEmployeeEmail && key && (key === loggedInEmployeeEmail || key === loggedInEmployeeAssignmentKey || key === loggedInEmployeeLegacyAssignmentKey));
   };
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
+  const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || loggedInEmployee.role === "Quản lý chung"));
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
-  const canViewCustomerMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || employeePermissions.includes("Ghi chú")));
+  const canViewCustomerMessages = canViewAllNotesAndMessages;
   const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (folder.label === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
   const hasActiveFolderAccess = activeFolder === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
   useEffect(() => {
@@ -3942,6 +3944,7 @@ export default function Home() {
     if (typeof window === "undefined") return [];
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
     const locationsByKey = new Map(customerLocations.map((location) => [`${location.year}-${location.month}-${location.record.projectId}`, location]));
+    const canSeeNote = (note: WorkNote) => canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail);
     const outstanding: OutstandingWorkNote[] = [];
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const storageKey = window.localStorage.key(index);
@@ -3953,7 +3956,7 @@ export default function Home() {
         const virtualKey = new RegExp(`^(\\d+)-(\\d+)-${VIRTUAL_PANCAKE_TEST_PROJECT_ID}$`).exec(locationKey);
         const location = locationsByKey.get(locationKey) ?? (virtualKey ? createVirtualPancakeLocation(Number(virtualKey[1]), Number(virtualKey[2])) : null);
         if (!location) continue;
-        cached.value.filter((note) => note && !note.actualDate).forEach((note) => outstanding.push({ note, location }));
+        cached.value.filter((note) => note && !note.actualDate && canSeeNote(note)).forEach((note) => outstanding.push({ note, location }));
       } catch {
         // Ignore a malformed cache item and keep the sidebar usable.
       }
@@ -3966,13 +3969,13 @@ export default function Home() {
     assignedWorkNotes.forEach((note) => {
       const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`)
         ?? (note.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? createVirtualPancakeLocation(note.year, note.month) : null);
-      if (!location || note.actualDate) return;
+      if (!location || note.actualDate || !canSeeNote(note)) return;
       const existing = outstanding.findIndex((item) => item.note.id === note.id);
       if (existing >= 0) outstanding[existing] = { note, location };
       else outstanding.push({ note, location });
     });
     return outstanding.sort((left, right) => dateValue(left.note.dueDate).localeCompare(dateValue(right.note.dueDate)) || priorityOrder[left.note.priority] - priorityOrder[right.note.priority]);
-  }, [assignedWorkNotes, customerLocations, workNotesCacheRevision]);
+  }, [assignedWorkNotes, canViewAllNotesAndMessages, customerLocations, loggedInEmployeeEmail, workNotesCacheRevision]);
   const savePersonnelCache = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
@@ -4168,7 +4171,7 @@ export default function Home() {
   useEffect(() => {
     if (activeFolder !== "Ghi chú" || !selectedCustomerLocation) return;
     loadWorkNotes();
-  }, [activeFolder, selectedCustomerProjectId, selectedMonth, selectedYear]);
+  }, [activeFolder, canViewAllNotesAndMessages, loggedInEmployeeEmail, selectedCustomerProjectId, selectedMonth, selectedYear]);
   const customerPortalShareToken = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("share")?.trim() ?? "";
   const customerPortalLink = (shareToken: string) => typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
   const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
@@ -4268,7 +4271,7 @@ export default function Home() {
     const assignedForLocation = selectedCustomerLocation
       ? assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId)
       : [];
-    const visibleWorkNotes = Array.from(new Map([...assignedForLocation, ...workNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
+    const visibleWorkNotes = Array.from(new Map([...assignedForLocation, ...workNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note) && (canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail)));
     const renderWorkNote = (note: WorkNote, isNew = false, isEditing = false) => {
       const selectedStatus = workNoteStatus(note);
       const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green", "Tím": "work-note__status--purple" } as Record<WorkNoteStatus, string>)[selectedStatus];
@@ -4301,14 +4304,14 @@ export default function Home() {
       </article>;
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
-      <header className="work-notes__heading">
-        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>Nhập ghi chú mới rồi bấm Phát hành để lưu vào cache của thiết bị. Khi hoàn thành, công việc mới được lưu vào Drive.</p></div>
-        <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu về Drive…" : "Nháp trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>
+          <header className="work-notes__heading">
+        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Nhập ghi chú mới rồi bấm Phát hành để lưu vào cache của thiết bị. Khi hoàn thành, công việc mới được lưu vào Drive." : "Chỉ hiển thị những công việc đã giao cho tài khoản này. Xác nhận nhận việc trước khi hoàn thành thực tế."}</p></div>
+        {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu về Drive…" : "Nháp trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
-          : visibleWorkNotes.length ? [...visibleWorkNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</p>}
+          : visibleWorkNotes.length ? [...visibleWorkNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">{canViewAllNotesAndMessages ? <>Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</> : "Chưa có công việc nào được giao cho tài khoản này."}</p>}
       </div>
     </section>;
   };
@@ -4378,8 +4381,11 @@ export default function Home() {
       </section>)}
     </div>
   </section>;
-  const renderWorkflowCustomerSearch = () => (
-    <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
+  const renderWorkflowCustomerSearch = () => {
+    if (activeFolder === "Ghi chú" && !canViewAllNotesAndMessages) {
+      return <section className="workflow-customer-search workflow-customer-search--assigned" aria-label="Ghi chú được giao"><p>Danh sách ghi chú chỉ hiển thị công việc đã giao cho tài khoản này. Mở một mục ở thanh bên để xem chi tiết.</p></section>;
+    }
+    return <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
         <span>⌕</span>
         <input value={workflowSearch} onChange={(event) => { setWorkflowSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Search khách hàng, mã nhà hoặc ID dự án…" aria-label="Search khách hàng" />
@@ -4393,8 +4399,8 @@ export default function Home() {
           </button>
         )) : <p>Không tìm thấy khách hàng phù hợp.</p>}
       </div>}
-    </section>
-  );
+    </section>;
+  };
   const renderDesignSchedule = (kind: DesignProgressKind) => {
     const definition = designProgressDefinitions[kind];
     const rows = progressRowsFor(kind);
