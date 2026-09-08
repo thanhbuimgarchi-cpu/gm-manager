@@ -1486,6 +1486,13 @@ const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
 const WORK_NOTES_PROPERTY_PREFIX = "gmcrm-work-notes-state-";
 const ACTIVE_WORK_NOTES_PROPERTY_KEY = "gmcrm-active-work-notes-state";
 const SCRIPT_PROPERTY_CHUNK_SIZE = 8000;
+const VIRTUAL_PANCAKE_TEST_PROJECT_ID = "GMCRM-VIRTUAL-BUI-DUC-THANH";
+
+function isVirtualPancakeTestProject_(details) {
+  const projectId = workNoteText_(details && details.projectId, 160);
+  const houseId = workNoteText_(details && details.houseId, 160);
+  return projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID || normalizeDriveName_(houseId) === normalizeDriveName_("Bùi Đức Thành");
+}
 
 function workNotesCacheKey_(details) {
   return "gmcrm-work-notes-" + details.year + "-" + details.month + "-" + details.projectId;
@@ -1691,19 +1698,22 @@ function syncWorkNotes_(payload) {
   writePropertyJson_(propertyKey, notes);
   cacheJson_(workNotesCacheKey_(details), notes, 21600);
   let driveSaved = false;
-  try {
-    const folder = workNotesFolder_(details.year, details.month, details.projectId, true, details.houseId);
-    const content = JSON.stringify(notes);
-    const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
-    if (file) file.setContent(content);
-    else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
-    driveSaved = true;
-  } catch (error) {
-    // Publishing must not fail just because the connected Drive folder is
-    // read-only. The shared property store still reaches every employee.
+  const virtualTest = isVirtualPancakeTestProject_(details);
+  if (!virtualTest) {
+    try {
+      const folder = workNotesFolder_(details.year, details.month, details.projectId, true, details.houseId);
+      const content = JSON.stringify(notes);
+      const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
+      if (file) file.setContent(content);
+      else folder.createFile(WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
+      driveSaved = true;
+    } catch (error) {
+      // Publishing must not fail just because the connected Drive folder is
+      // read-only. The shared property store still reaches every employee.
+    }
   }
   syncActiveWorkNotes_(details, notes, payload);
-  return { ok: true, savedCount: notes.length, storage: driveSaved ? "drive" : "script-properties", driveWarning: driveSaved ? "" : "Drive hiện chỉ có quyền xem; ghi chú đã lưu vào kho dùng chung Apps Script." };
+  return { ok: true, savedCount: notes.length, storage: driveSaved ? "drive" : "script-properties", driveWarning: virtualTest ? "Bùi Đức Thành đang ở chế độ khách ảo; giao việc chỉ lưu kho dùng chung, không tạo Drive." : driveSaved ? "" : "Drive hiện chỉ có quyền xem; ghi chú đã lưu vào kho dùng chung Apps Script." };
 }
 
 function completedWorkNotesFolder_(details) {
@@ -1720,6 +1730,22 @@ function completeWorkNote_(payload) {
   const actorEmail = workNoteText_(payload.actorEmail, 240).toLowerCase();
   const actorMember = /^member:/i.test(workNoteText_(note.assigneeEmail, 240)) ? employeeRosterMember_(actorEmail) : null;
   if (!note.assigneeEmail || !assignmentMatchesEmployee_(note.assigneeEmail, actorEmail, actorMember)) throw new Error("Chỉ người được giao việc mới có thể xác nhận hoàn thành.");
+
+  // The Pancake test conversation is intentionally not backed by a customer
+  // folder. Keep completion in the shared property/cache store so the test
+  // exercises the same UI while never creating an Excel file or Drive folder.
+  if (isVirtualPancakeTestProject_(details)) {
+    const completedNote = { ...note, completedAt: workNoteText_(payload.note && payload.note.completedAt, 40) || new Date().toISOString() };
+    let projectNotes = readPropertyJson_(workNotesPropertyKey_(details));
+    projectNotes = Array.isArray(projectNotes) ? normalizeWorkNotes_(projectNotes) : [];
+    const noteIndex = projectNotes.findIndex(function(item) { return item.id === completedNote.id; });
+    if (noteIndex >= 0) projectNotes[noteIndex] = completedNote;
+    else projectNotes.push(completedNote);
+    writePropertyJson_(workNotesPropertyKey_(details), projectNotes);
+    cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
+    saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
+    return { ok: true, savedCount: 0, storage: "script-properties", virtual: true, driveWarning: "Bùi Đức Thành là khách ảo; không tạo tệp Drive." };
+  }
 
   const folder = completedWorkNotesFolder_(details);
   const file = findFileByName_(folder, COMPLETED_WORK_NOTES_FILE_NAME);
@@ -1878,11 +1904,6 @@ function pancakeIsSpecialTestConversation_(groupName, conversation) {
 }
 
 function pancakeSpecialTestTarget_(targets) {
-  const expectedName = "bùi đức thành";
-  const matchingTarget = Object.keys(targets || {}).map(function(key) { return targets[key]; }).find(function(target) {
-    return workNoteText_(target && target.customerName, 240).trim().toLocaleLowerCase() === expectedName;
-  });
-  if (matchingTarget) return matchingTarget;
   const today = new Date();
   return { houseId: "Bùi Đức Thành", projectId: "", customerName: "Bùi Đức Thành", year: today.getFullYear(), month: today.getMonth() + 1 };
 }

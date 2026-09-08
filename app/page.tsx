@@ -1274,6 +1274,45 @@ const normalizeSearchText = (value: string) => value
   .replaceAll("đ", "d")
   .trim();
 
+// Bùi Đức Thành is a Pancake test conversation without a real customer
+// folder. Keep one stable internal project key so assignments, cache and
+// notifications can still use the normal workflow without creating a Drive
+// customer profile or an Excel workbook.
+const VIRTUAL_PANCAKE_TEST_PROJECT_ID = "GMCRM-VIRTUAL-BUI-DUC-THANH";
+const VIRTUAL_PANCAKE_TEST_HOUSE_ID = "Bùi Đức Thành";
+const VIRTUAL_PANCAKE_TEST_NAME = "Bùi Đức Thành (khách ảo)";
+
+function isVirtualPancakeTestMessage(message: Pick<CustomerMessageGroup, "groupName" | "houseId" | "projectId" | "customerName">) {
+  const haystack = normalizeSearchText([
+    message.groupName,
+    message.houseId,
+    message.projectId,
+    message.customerName,
+  ].filter(Boolean).join(" "));
+  return haystack.includes(normalizeSearchText(VIRTUAL_PANCAKE_TEST_HOUSE_ID));
+}
+
+function createVirtualPancakeLocation(year = getVietnamDate().year, month = getVietnamDate().month): CustomerLocation {
+  return {
+    year: Number(year) || getVietnamDate().year,
+    month: Number(month) || getVietnamDate().month,
+    record: {
+      id: "virtual-pancake-bui-duc-thanh",
+      name: VIRTUAL_PANCAKE_TEST_NAME,
+      houseId: VIRTUAL_PANCAKE_TEST_HOUSE_ID,
+      projectId: VIRTUAL_PANCAKE_TEST_PROJECT_ID,
+      createdAt: "",
+      details: {},
+      isHydrated: true,
+      progressHydrated: true,
+    },
+  };
+}
+
+function isVirtualPancakeLocation(location: CustomerLocation | null | undefined) {
+  return location?.record.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID;
+}
+
 // A house code is the only user-facing identity of a customer. Older cache
 // entries can still contain both the internal GM project id and the newer
 // house-code folder, so collapse those rows before rendering or persisting
@@ -1635,6 +1674,9 @@ export default function Home() {
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
+  // Kept outside customerLocations so the Bùi Đức Thành test case never
+  // appears as a real customer or a Drive-backed customer folder.
+  const [virtualPancakeLocation, setVirtualPancakeLocation] = useState<CustomerLocation | null>(null);
   const [personnelView, setPersonnelView] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [modalMonth, setModalMonth] = useState(now.month);
@@ -1898,8 +1940,9 @@ export default function Home() {
   const selectedCustomerLocation = customerLocations.find(({ record }) =>
     record.projectId === selectedCustomerProjectId ||
     (record.houseId && record.houseId === selectedCustomerProjectId)
-  ) ?? null;
+  ) ?? (virtualPancakeLocation?.record.projectId === selectedCustomerProjectId ? virtualPancakeLocation : null);
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
+    setVirtualPancakeLocation(null);
     setSelectedCustomerProjectId(record.projectId);
     setSelectedYear(year);
     setSelectedMonth(month);
@@ -1920,6 +1963,7 @@ export default function Home() {
   };
 
   const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation, targetFolder = "Tư vấn") => {
+    setVirtualPancakeLocation(record.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? { record, year, month } : null);
     setSelectedCustomerProjectId(record.projectId);
     setSelectedYear(year);
     setSelectedMonth(month);
@@ -1946,28 +1990,37 @@ export default function Home() {
     const noteId = url.searchParams.get("gmcrmNote");
     const messageId = url.searchParams.get("gmcrmMessage");
     if (messageId) {
-      const location = projectId ? customerLocations.find(({ record }) => record.projectId === projectId) : null;
+      const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID
+        ? createVirtualPancakeLocation(Number(url.searchParams.get("gmcrmYear")) || undefined, Number(url.searchParams.get("gmcrmMonth")) || undefined)
+        : projectId ? customerLocations.find(({ record }) => record.projectId === projectId) : null;
       if (projectId && !location) return;
       setActiveFolder("Tin nhắn");
       if (location) selectCustomerForWorkflow(location, "Tin nhắn");
       url.searchParams.delete("gmcrmProject");
       url.searchParams.delete("gmcrmMessage");
+      url.searchParams.delete("gmcrmYear");
+      url.searchParams.delete("gmcrmMonth");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
       return;
     }
     if (!projectId || !noteId) return;
-    const location = customerLocations.find(({ record }) => record.projectId === projectId);
+    const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID
+      ? createVirtualPancakeLocation(Number(url.searchParams.get("gmcrmYear")) || undefined, Number(url.searchParams.get("gmcrmMonth")) || undefined)
+      : customerLocations.find(({ record }) => record.projectId === projectId);
     if (!location) return;
     setHighlightWorkNoteId(noteId);
     setActiveFolder("Ghi chú");
     selectCustomerForWorkflow(location, "Ghi chú");
     url.searchParams.delete("gmcrmProject");
     url.searchParams.delete("gmcrmNote");
+    url.searchParams.delete("gmcrmYear");
+    url.searchParams.delete("gmcrmMonth");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
   }, [customerLocations]);
 
   const returnToCustomerSearch = () => {
     const currentDate = getVietnamDate();
+    setVirtualPancakeLocation(null);
     setSelectedCustomerProjectId(null);
     setSelectedRecordId(null);
     setOpenMenuId(null);
@@ -2026,6 +2079,8 @@ export default function Home() {
     const url = new URL(window.location.href);
     url.searchParams.set("gmcrmProject", note.projectId);
     url.searchParams.set("gmcrmNote", note.id);
+    url.searchParams.set("gmcrmYear", String(note.year));
+    url.searchParams.set("gmcrmMonth", String(note.month));
     return url.toString();
   };
 
@@ -2038,7 +2093,12 @@ export default function Home() {
 
   const customerMessageNotificationUrl = (message: CustomerMessageGroup) => {
     const url = new URL(window.location.href);
-    if (message.projectId) url.searchParams.set("gmcrmProject", message.projectId);
+    const virtualMessage = isVirtualPancakeTestMessage(message);
+    if (virtualMessage) {
+      url.searchParams.set("gmcrmProject", VIRTUAL_PANCAKE_TEST_PROJECT_ID);
+      url.searchParams.set("gmcrmYear", String(message.year || getVietnamDate().year));
+      url.searchParams.set("gmcrmMonth", String(message.month || getVietnamDate().month));
+    } else if (message.projectId) url.searchParams.set("gmcrmProject", message.projectId);
     url.searchParams.set("gmcrmMessage", message.id);
     return url.toString();
   };
@@ -2145,7 +2205,7 @@ export default function Home() {
     workspaceSyncPending.current = null;
     workspaceSyncInFlight.current = true;
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; virtual?: boolean; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "save-workspace-cache",
         updatedAt: Date.now(),
         years: nextYears,
@@ -2373,7 +2433,7 @@ export default function Home() {
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu công việc hoàn thành vào Drive.");
       persistWorkNotes(workNotes.map((item) => item.id === note.id ? note : item));
-      setNotice("Đã xuất công việc hoàn thành vào Drive. Việc sẽ nằm cuối danh sách trong 2 ngày.");
+      setNotice(result.virtual ? (result.driveWarning || "Đã hoàn thành công việc khách ảo; không tạo tệp Drive.") : "Đã xuất công việc hoàn thành vào Drive. Việc sẽ nằm cuối danh sách trong 2 ngày.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Không thể lưu công việc hoàn thành vào Drive.");
     } finally {
@@ -2401,7 +2461,11 @@ export default function Home() {
     if (!driveScriptUrl.trim()) return;
     setLoadingCustomerMessages(!cached || refresh);
     setCustomerMessagesError("");
-    const targets = (location ? [location] : customerLocations).filter((item) => item.record.houseId?.trim()).map((item) => ({
+    // The Bùi Đức Thành test conversation has no customer folder. Do not
+    // send the synthetic location as a real Pancake target; Apps Script will
+    // keep that conversation on its dedicated virtual target instead.
+    const targetLocations = location && isVirtualPancakeLocation(location) ? [] : (location ? [location] : customerLocations);
+    const targets = targetLocations.filter((item) => item.record.houseId?.trim()).map((item) => ({
       houseId: item.record.houseId,
       projectId: item.record.projectId,
       customerName: item.record.name,
@@ -2457,8 +2521,10 @@ export default function Home() {
       setCustomerMessageStatusBusyId("");
     }
   };
-  const customerLocationForMessage = (message: CustomerMessageGroup) => customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
-    ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
+  const customerLocationForMessage = (message: CustomerMessageGroup) => isVirtualPancakeTestMessage(message)
+    ? createVirtualPancakeLocation(message.year, message.month)
+    : customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
+      ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
   const openCustomerMessageTask = (message: CustomerMessageGroup) => {
     if (!loggedInEmployee) {
       setNotice("Hãy đăng nhập trước khi giao việc từ tin nhắn khách.");
@@ -3883,7 +3949,8 @@ export default function Home() {
         const cached = JSON.parse(window.localStorage.getItem(storageKey) ?? "") as { savedAt?: number; value?: WorkNote[] };
         if (!cached.savedAt || Date.now() - cached.savedAt > DRIVE_FILE_LIST_CACHE_MS || !Array.isArray(cached.value)) continue;
         const locationKey = storageKey.slice(notesKeyPrefix.length);
-        const location = locationsByKey.get(locationKey);
+        const virtualKey = new RegExp(`^(\\d+)-(\\d+)-${VIRTUAL_PANCAKE_TEST_PROJECT_ID}$`).exec(locationKey);
+        const location = locationsByKey.get(locationKey) ?? (virtualKey ? createVirtualPancakeLocation(Number(virtualKey[1]), Number(virtualKey[2])) : null);
         if (!location) continue;
         cached.value.filter((note) => note && !note.actualDate).forEach((note) => outstanding.push({ note, location }));
       } catch {
@@ -3896,7 +3963,8 @@ export default function Home() {
       return `${year.padStart(4, "9")}${month.padStart(2, "9")}${day.padStart(2, "9")}`;
     };
     assignedWorkNotes.forEach((note) => {
-      const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`);
+      const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`)
+        ?? (note.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? createVirtualPancakeLocation(note.year, note.month) : null);
       if (!location || note.actualDate) return;
       const existing = outstanding.findIndex((item) => item.note.id === note.id);
       if (existing >= 0) outstanding[existing] = { note, location };
@@ -4407,6 +4475,7 @@ export default function Home() {
 
   const openAllCustomerMessages = () => {
     setPersonnelView(false);
+    setVirtualPancakeLocation(null);
     setSelectedCustomerProjectId(null);
     setSelectedRecordId(null);
     setOpenMenuId(null);
