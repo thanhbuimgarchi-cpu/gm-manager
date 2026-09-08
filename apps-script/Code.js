@@ -1580,7 +1580,7 @@ function normalizeWorkNotes_(notes) {
     const actualDate = normalizeWorkNoteDate_(note && note.actualDate);
     const completedAt = workNoteText_(note && note.completedAt, 40);
     const acceptedAt = workNoteText_(note && note.acceptedAt, 40);
-    return {
+    const normalized = {
       id: workNoteText_(note && note.id, 100) || "work-note-" + index + "-" + new Date().getTime(),
       priority: WORK_NOTE_PRIORITIES.indexOf(priority) >= 0 ? priority : "Bình thường",
       workType: WORK_NOTE_TYPES.indexOf(workType) >= 0 ? workType : "Tư vấn",
@@ -1598,6 +1598,11 @@ function normalizeWorkNotes_(notes) {
       // flow explicitly records acceptedAt.
       status: workNoteStatus_(acceptedAt, dueDate),
     };
+    const messageContext = workNoteText_(note && note.messageContext, 8000);
+    const sourceMessageId = workNoteText_(note && note.sourceMessageId, 180);
+    if (messageContext) normalized.messageContext = messageContext;
+    if (sourceMessageId) normalized.sourceMessageId = sourceMessageId;
+    return normalized;
   });
 }
 

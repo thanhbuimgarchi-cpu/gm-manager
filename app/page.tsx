@@ -302,6 +302,8 @@ type WorkNote = {
   creatorName: string;
   assigneeEmail: string;
   status: WorkNoteStatus;
+  messageContext?: string;
+  sourceMessageId?: string;
 };
 
 type AssignedWorkNote = WorkNote & {
@@ -347,6 +349,16 @@ type CustomerMessageGroup = {
   status: CustomerMessageStatus;
   resolvedAt?: string;
   statusUpdatedAt?: string;
+};
+
+type CustomerMessageTaskDraft = {
+  message: CustomerMessageGroup;
+  selectedLineIds: string[];
+  priority: WorkNotePriority;
+  workType: string;
+  assigneeEmail: string;
+  request: string;
+  dueDate: string;
 };
 
 type OutstandingWorkNote = {
@@ -1676,6 +1688,8 @@ export default function Home() {
   const [loadingCustomerMessages, setLoadingCustomerMessages] = useState(false);
   const [customerMessagesError, setCustomerMessagesError] = useState("");
   const [customerMessageStatusBusyId, setCustomerMessageStatusBusyId] = useState("");
+  const [customerMessageTaskDraft, setCustomerMessageTaskDraft] = useState<CustomerMessageTaskDraft | null>(null);
+  const [customerMessageTaskBusy, setCustomerMessageTaskBusy] = useState(false);
   const [pancakeUserAccessToken, setPancakeUserAccessToken] = useState("");
   const [pancakePageAccessToken, setPancakePageAccessToken] = useState("");
   const [pancakePageName, setPancakePageName] = useState("Gm Manager");
@@ -2366,9 +2380,9 @@ export default function Home() {
       setSavingWorkNotes(false);
     }
   };
-  const persistWorkNotes = (nextNotes: WorkNote[]) => {
+  const persistWorkNotes = (nextNotes: WorkNote[], location = selectedCustomerLocation) => {
     setWorkNotes(nextNotes);
-    const cacheKey = workNotesCacheKey();
+    const cacheKey = workNotesCacheKey(location);
     if (!cacheKey) return;
     if (nextNotes.length) writeDriveCache(cacheKey, nextNotes);
     else removeDriveCache(cacheKey);
@@ -2441,6 +2455,83 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : "Không thể cập nhật trạng thái tin nhắn.");
     } finally {
       setCustomerMessageStatusBusyId("");
+    }
+  };
+  const customerLocationForMessage = (message: CustomerMessageGroup) => customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
+    ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
+  const openCustomerMessageTask = (message: CustomerMessageGroup) => {
+    if (!loggedInEmployee) {
+      setNotice("Hãy đăng nhập trước khi giao việc từ tin nhắn khách.");
+      setLoginOpen(true);
+      return;
+    }
+    if (!customerLocationForMessage(message)) {
+      setNotice("Tin nhắn này chưa ghép được với hồ sơ khách hàng nên chưa thể giao việc.");
+      return;
+    }
+    if (!message.messages.length) {
+      setNotice("Tin nhắn không có dòng nội dung để chọn.");
+      return;
+    }
+    setCustomerMessageTaskDraft({
+      message,
+      selectedLineIds: [],
+      priority: "Bình thường",
+      workType: "Tư vấn",
+      assigneeEmail: "",
+      request: "",
+      dueDate: "",
+    });
+  };
+  const updateCustomerMessageTaskDraft = (changes: Partial<CustomerMessageTaskDraft>) => {
+    setCustomerMessageTaskDraft((draft) => draft ? { ...draft, ...changes } : draft);
+  };
+  const publishCustomerMessageTask = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const draft = customerMessageTaskDraft;
+    if (!draft || customerMessageTaskBusy) return;
+    const location = customerLocationForMessage(draft.message);
+    const selectedLines = draft.message.messages.filter((line) => draft.selectedLineIds.includes(line.id));
+    if (!location) { setNotice("Tin nhắn chưa ghép với hồ sơ khách hàng."); return; }
+    if (!selectedLines.length) { setNotice("Hãy chọn ít nhất một dòng tin nhắn."); return; }
+    const assignee = assignablePersonnel.find((member) => personnelAssignmentKey(member) === draft.assigneeEmail);
+    if (!assignee) { setNotice("Hãy chọn Người phụ trách."); return; }
+    if (!draft.request.trim()) { setNotice("Hãy nhập yêu cầu giao việc."); return; }
+    if (!parseDesignDate(draft.dueDate) || isPastVietnamDate(draft.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
+
+    const messageContext = selectedLines.map((line) => `${line.senderName}: ${line.content} (${customerMessageDate(line.sentAt)})`).join("\n");
+    const note: WorkNote = {
+      id: `work-note-message-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      priority: draft.priority,
+      workType: draft.workType,
+      assignee: assignee.name,
+      content: draft.request.trim(),
+      dueDate: draft.dueDate,
+      actualDate: "",
+      creatorEmail: loggedInEmployeeEmail,
+      creatorName: loggedInEmployee?.name ?? loggedInEmployeeEmail,
+      assigneeEmail: personnelAssignmentKey(assignee),
+      status: "Đen",
+      messageContext,
+      sourceMessageId: draft.message.id,
+    };
+    const cacheKey = workNotesCacheKey(location);
+    const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? [];
+    const baseNotes = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId
+      ? workNotes
+      : cachedNotes;
+    const nextNotes = [...baseNotes.filter((item) => item.id !== note.id), note];
+    setCustomerMessageTaskBusy(true);
+    persistWorkNotes(nextNotes, location);
+    rememberPendingWorkNotes(nextNotes, location);
+    setCustomerMessageTaskDraft(null);
+    try {
+      const result = await syncWorkNotesToSharedStore(nextNotes, location);
+      setNotice(result?.driveWarning ? `Đã phát hành giao việc. ${result.driveWarning}` : "Đã phát hành giao việc và thông báo cho Người phụ trách.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Đã lưu giao việc vào cache; chưa thể đồng bộ dùng chung.");
+    } finally {
+      setCustomerMessageTaskBusy(false);
     }
   };
   const addWorkNote = () => {
@@ -3674,7 +3765,8 @@ export default function Home() {
             `Công việc: ${note.workType} · Ưu tiên: ${note.priority}`,
             note.dueDate ? `Hoàn thành dự kiến: ${note.dueDate}` : "Hoàn thành dự kiến: Chưa có",
             `Nội dung: ${note.content.trim() || "(Chưa có nội dung)"}`,
-          ].join("\n");
+            note.messageContext ? `Tin nhắn khách đã chọn:\n${note.messageContext}` : "",
+          ].filter(Boolean).join("\n");
           const url = workNoteNotificationUrl(note);
           const desktop = desktopBridge();
           let shown = false;
@@ -4118,6 +4210,7 @@ export default function Home() {
           {!isNew && !isEditing && isCreator && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
         </div>
         <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" readOnly={!canEdit} /></label>
+        {note.messageContext && <div className="work-note__message-context"><b>Tin nhắn khách đã chọn</b><p>{note.messageContext}</p></div>}
       </article>;
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
@@ -4312,8 +4405,7 @@ export default function Home() {
   };
   const openCustomerMessage = (message: CustomerMessageGroup) => {
     if (activeFolder !== "Tin nhắn") customerMessageReturnFolder.current = activeFolder;
-    const location = customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
-      ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
+    const location = customerLocationForMessage(message);
     if (location) selectCustomerForWorkflow(location, "Tin nhắn");
     else {
       setSelectedCustomerProjectId(null);
@@ -4351,7 +4443,7 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button></div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!loggedInEmployee || customerMessageTaskBusy}>Giao việc</button></div>
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>
     </section>;
@@ -4655,6 +4747,29 @@ export default function Home() {
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>
             <label>Mã nhà <span className="field-code">(bắt buộc)</span><input required value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
             <button className="add-button" type="submit" disabled={creatingCustomer}>{creatingCustomer ? "Đang tạo trên Drive…" : "Tạo thư mục"}</button>
+          </form>
+        </div>
+      )}
+
+      {customerMessageTaskDraft && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => !customerMessageTaskBusy && setCustomerMessageTaskDraft(null)}>
+          <form className="security-dialog message-task-dialog" onSubmit={publishCustomerMessageTask} onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => !customerMessageTaskBusy && setCustomerMessageTaskDraft(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Tin nhắn khách · Giao việc</p>
+            <h2>Giao việc cho Người phụ trách</h2>
+            <p className="message-task-dialog__hint">Chọn một hoặc nhiều dòng tin nhắn làm nội dung tham chiếu, sau đó nhập yêu cầu và phát hành.</p>
+            <fieldset className="message-task-lines">
+              <legend>Dòng tin nhắn cần xử lý</legend>
+              {customerMessageTaskDraft.message.messages.map((line) => <label key={line.id} className={`message-task-line ${customerMessageTaskDraft.selectedLineIds.includes(line.id) ? "is-selected" : ""}`}><input type="checkbox" checked={customerMessageTaskDraft.selectedLineIds.includes(line.id)} onChange={(event) => updateCustomerMessageTaskDraft({ selectedLineIds: event.target.checked ? [...customerMessageTaskDraft.selectedLineIds, line.id] : customerMessageTaskDraft.selectedLineIds.filter((id) => id !== line.id) })} disabled={customerMessageTaskBusy} /><span><b>{line.senderName}</b> · {line.content}<small>{customerMessageDate(line.sentAt)}</small></span></label>)}
+            </fieldset>
+            <div className="message-task-dialog__grid">
+              <label>Công việc<select value={customerMessageTaskDraft.workType} onChange={(event) => updateCustomerMessageTaskDraft({ workType: event.target.value })} disabled={customerMessageTaskBusy}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
+              <label>Ưu tiên<select value={customerMessageTaskDraft.priority} onChange={(event) => updateCustomerMessageTaskDraft({ priority: event.target.value as WorkNotePriority })} disabled={customerMessageTaskBusy}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
+              <label>Người phụ trách<select value={customerMessageTaskDraft.assigneeEmail} onChange={(event) => updateCustomerMessageTaskDraft({ assigneeEmail: event.target.value })} disabled={customerMessageTaskBusy}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></label>
+              <label>Hoàn thành dự kiến<input value={customerMessageTaskDraft.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } updateCustomerMessageTaskDraft({ dueDate: value }); }} placeholder="dd/mm/yyyy" inputMode="numeric" disabled={customerMessageTaskBusy} /></label>
+            </div>
+            <label>Yêu cầu giao việc<textarea className="growing-textarea" rows={3} value={customerMessageTaskDraft.request} onChange={(event) => updateCustomerMessageTaskDraft({ request: event.target.value })} placeholder="Nhập công việc và yêu cầu cần thực hiện" disabled={customerMessageTaskBusy} /></label>
+            <div className="dialog-actions"><button type="button" onClick={() => setCustomerMessageTaskDraft(null)} disabled={customerMessageTaskBusy}>Hủy</button><button className="add-button" type="submit" disabled={customerMessageTaskBusy}>{customerMessageTaskBusy ? "Đang phát hành…" : "Phát hành giao việc"}</button></div>
           </form>
         </div>
       )}
