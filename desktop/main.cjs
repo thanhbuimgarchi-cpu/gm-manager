@@ -5,7 +5,9 @@ const os = require("node:os");
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
-const WINDOWS_DRIVE_ROOTS = ["G:\\My Drive", "G:\\Shared drives"];
+// The shared Drive used by the installed PC shortcut is mounted on I:. Keep
+// the older G: locations as fallbacks for machines that still use that mount.
+const WINDOWS_DRIVE_ROOTS = ["I:\\Shared drives", "I:\\My Drive", "G:\\Shared drives", "G:\\My Drive"];
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
 
