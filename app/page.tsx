@@ -2146,19 +2146,21 @@ export default function Home() {
 
   const openDesktopDocumentFile = async (file: DocumentFile, snapshot: DocumentSnapshot) => {
     const desktop = desktopBridge();
-    if (!desktop?.isDesktop || !desktop.openFile || !selectedCustomerLocation) {
-      setNotice("Nút Mở tệp chỉ dùng trên bản GM Manager cho máy tính.");
+    if (desktop?.isDesktop && desktop.openFile && selectedCustomerLocation) {
+      const error = await desktop.openFile({
+        projectId: selectedCustomerLocation.record.projectId,
+        houseId: selectedCustomerLocation.record.houseId,
+        year: selectedCustomerLocation.year,
+        month: selectedCustomerLocation.month,
+        snapshotName: snapshot.name,
+        fileName: file.name,
+      });
+      if (error) setNotice(error);
       return;
     }
-    const error = await desktop.openFile({
-      projectId: selectedCustomerLocation.record.projectId,
-      houseId: selectedCustomerLocation.record.houseId,
-      year: selectedCustomerLocation.year,
-      month: selectedCustomerLocation.month,
-      snapshotName: snapshot.name,
-      fileName: file.name,
-    });
-    if (error) setNotice(error);
+    const webUrl = file.viewUrl || file.downloadUrl;
+    if (webUrl) window.open(webUrl, "_blank", "noopener,noreferrer");
+    else setNotice("Không có đường dẫn mở tệp.");
   };
 
   const sendTestNotification = async () => {
@@ -4396,7 +4398,7 @@ export default function Home() {
               {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} disabled={!desktopBridge()?.isDesktop || !desktopBridge()?.openFile} title={desktopBridge()?.isDesktop && desktopBridge()?.openFile ? "Mở tệp trong thư mục Google Drive trên máy tính" : "Chỉ dùng trên bản GM Manager cho máy tính"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} title={desktopBridge()?.isDesktop && desktopBridge()?.openFile ? "Mở tệp trong thư mục Google Drive trên máy tính" : "Mở tệp trên Google Drive"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
