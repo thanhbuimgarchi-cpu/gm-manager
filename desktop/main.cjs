@@ -5,7 +5,7 @@ const os = require("node:os");
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
-const WINDOWS_DRIVE_ROOT = "G:\\My Drive";
+const WINDOWS_DRIVE_ROOTS = ["G:\\My Drive", "G:\\Shared drives"];
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
 
@@ -59,7 +59,7 @@ function openNotificationTarget(target) {
 }
 
 async function googleDriveRoots() {
-  if (process.platform === "win32") return [WINDOWS_DRIVE_ROOT];
+  if (process.platform === "win32") return WINDOWS_DRIVE_ROOTS;
   if (process.platform !== "darwin") return [];
   const home = os.homedir();
   const roots = [path.join(home, "Google Drive", "My Drive")];
@@ -103,6 +103,58 @@ async function findProjectDocumentsFolder(...identifiers) {
   return "";
 }
 
+function safeDriveEntryName(value) {
+  const name = String(value || "").trim();
+  if (!name || name === "." || name === ".." || name.length > 255) return "";
+  return /[\\/:*?"<>|\u0000-\u001f]/.test(name) ? "" : name;
+}
+
+function sameDriveEntryName(left, right) {
+  return String(left || "").normalize("NFC").toLocaleLowerCase() === String(right || "").normalize("NFC").toLocaleLowerCase();
+}
+
+async function findDriveFile(documentsFolder, fileName, snapshotName) {
+  const wantedName = safeDriveEntryName(fileName);
+  if (!wantedName) return "";
+  const safeSnapshotName = snapshotName ? safeDriveEntryName(snapshotName) : "";
+  const roots = safeSnapshotName ? [path.join(documentsFolder, safeSnapshotName)] : [documentsFolder];
+  for (const root of roots) {
+    let rootStats;
+    try {
+      rootStats = await fs.stat(root);
+    } catch {
+      continue;
+    }
+    if (!rootStats.isDirectory()) continue;
+    const queue = [root];
+    const visited = new Set();
+    while (queue.length) {
+      const folder = queue.shift();
+      if (!folder || visited.has(folder)) continue;
+      visited.add(folder);
+      let entries;
+      try {
+        entries = await fs.readdir(folder, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const child = path.join(folder, entry.name);
+        if (entry.isDirectory() && !entry.isSymbolicLink()) {
+          queue.push(child);
+        } else if (entry.isFile() && sameDriveEntryName(entry.name, wantedName)) {
+          return child;
+        }
+      }
+    }
+  }
+  // A few older Drive Desktop layouts did not preserve the snapshot folder
+  // name. If the selected snapshot path is unavailable, use the project
+  // Tài liệu folder as a compatibility fallback.
+  if (safeSnapshotName) return findDriveFile(documentsFolder, wantedName, "");
+  return "";
+}
+
 app.whenReady().then(() => {
   app.setAppUserModelId("com.mgarchi.gmcrm");
   const trustedNotificationRequest = (webContents) => isTrustedUrl(webContents.getURL());
@@ -127,6 +179,20 @@ app.whenReady().then(() => {
     if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
     const documentsFolder = await findProjectDocumentsFolder(...identifiers);
     return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ G.";
+  });
+  ipcMain.handle("gmcrm:open-file", async (_event, payload = {}) => {
+    const projectId = String(payload.projectId || "").trim();
+    const houseId = String(payload.houseId || "").trim();
+    const fileName = safeDriveEntryName(payload.fileName);
+    const snapshotName = safeDriveEntryName(payload.snapshotName);
+    const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
+    if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
+    if (!fileName) return "Tên tệp không hợp lệ.";
+    const documentsFolder = await findProjectDocumentsFolder(...identifiers);
+    if (!documentsFolder) return process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ G.";
+    const filePath = await findDriveFile(documentsFolder, fileName, snapshotName);
+    if (!filePath) return `Không tìm thấy tệp ${fileName} trong ổ G.`;
+    return shell.openPath(filePath);
   });
   createWindow();
   app.on("activate", () => {

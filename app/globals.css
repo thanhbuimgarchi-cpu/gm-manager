@@ -238,3 +238,5 @@
 .workflow-customer-search--assigned { padding: 12px 16px; color: #77736c; font-size: 10px; }
 .customer-message-summary--locked { opacity: .82; }
 .customer-message-summary--locked .sidebar-notes__toggle { cursor: pointer; }
+.document-library__open-file { min-width: 48px; min-height: 28px; padding: 0 9px; border: 1px solid #cfcac2; border-radius: 5px; background: #fff; color: #554d45; font-family: inherit; font-size: 10px; cursor: pointer; }.document-library__open-file:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }.document-library__open-file:disabled { cursor: not-allowed; opacity: .48; }
+.document-library__table th:last-child, .document-library__table td:last-child { width: 1%; white-space: nowrap; }

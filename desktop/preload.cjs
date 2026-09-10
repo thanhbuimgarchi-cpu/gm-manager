@@ -6,4 +6,5 @@ contextBridge.exposeInMainWorld("gmDesktop", {
   platform: process.platform,
   showNotification: (payload) => ipcRenderer.invoke("gmcrm:notify", payload),
   openDrive: (payload) => ipcRenderer.invoke("gmcrm:open-drive", payload),
+  openFile: (payload) => ipcRenderer.invoke("gmcrm:open-file", payload),
 });
