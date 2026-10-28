@@ -127,8 +127,8 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .customer-result { grid-template-columns: 44px minmax(0, 1fr) auto 22px; gap: 14px; min-height: 86px; padding: 16px 20px; border-bottom-color: #edf0f5; }
 .customer-result:hover { background: #f9fafc; }
 .customer-result__folder { width: 42px; height: 42px; border-radius: 11px; background: #fcf0f2; color: #aa4354; font-size: 20px; }
-.customer-result__identity b { color: #2e3c51; font-size: 14px; font-weight: 650; }
-.customer-result__identity small { margin-top: 4px; color: #8a94a4; font-size: 11px; }
+.customer-result__identity { min-width: 0; }
+.customer-result__identity b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #2e3c51; font-size: 14px; font-weight: 650; }
 .customer-result__date { color: #7e8a9c; font-size: 11px; }
 .customer-result__arrow { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 7px; color: #8490a3; font-size: 18px; }
 .customer-result:hover .customer-result__arrow { color: var(--accent); background: var(--gm-red-soft); }

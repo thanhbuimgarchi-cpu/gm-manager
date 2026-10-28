@@ -163,18 +163,15 @@ type WorkRecord = {
   functionalRows?: LegacyFunctionalRow[];
 };
 
-// projectId is kept only as an internal/cache key. Never use it as a visible
-// customer label; legacy records may still have their old GM… value in name.
+// Customer labels always use houseId. Names can differ between the local cache
+// and Drive index; neither names nor internal project keys are display fallbacks.
 function isPlaceholderCustomerName(value: string) {
   return value.trim().toLocaleLowerCase("vi") === "chưa có mã nhà";
 }
 
-function customerDisplayName(record: Pick<WorkRecord, "name" | "houseId" | "projectId">) {
-  const name = String(record.name || "").trim();
+function customerDisplayName(record: Pick<WorkRecord, "houseId">) {
   const houseId = String(record.houseId || "").trim();
-  const projectId = String(record.projectId || "").trim();
-  if (name && name !== projectId && !isPlaceholderCustomerName(name)) return name;
-  return houseId || (name && !/^GM\d{2}\d{2}\d{4}/i.test(name) ? name : "Chưa có mã nhà");
+  return houseId || "Chưa có mã nhà";
 }
 
 type DesignProgressRow = {
@@ -2129,7 +2126,7 @@ export default function Home() {
   }, [years]);
   const customerLocations = useMemo<CustomerLocation[]>(() => years.flatMap((yearFolder) => yearFolder.months.flatMap((monthFolder, monthIndex) => (
     dedupeMonthRecords(monthFolder.records).map((record) => ({ record, year: yearFolder.year, month: monthIndex + 1 }))
-  ))).sort((a, b) => b.year - a.year || b.month - a.month || a.record.name.localeCompare(b.record.name, "vi")), [years]);
+  ))).sort((a, b) => b.year - a.year || b.month - a.month || customerDisplayName(a.record).localeCompare(customerDisplayName(b.record), "vi")), [years]);
   const customerSearchResults = useMemo(() => {
     const term = normalizeSearchText(search.trim());
     const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
@@ -4741,7 +4738,7 @@ export default function Home() {
       {workflowSearch && <div className="workflow-customer-search__results">
         {workflowSearchResults.length ? workflowSearchResults.map((location) => (
           <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location)}>
-            <span><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
+            <span><b>{customerDisplayName(location.record)}</b></span>
             <em>T{location.month} / {location.year} →</em>
           </button>
         )) : <p>Không tìm thấy khách hàng phù hợp.</p>}
@@ -5021,7 +5018,7 @@ export default function Home() {
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <div className="customer-result-row" key={`${location.year}-${location.month}-${location.record.id}`}><button className="customer-result" onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder"><WorkspaceIcon name="folder" /></span>
-                    <span className="customer-result__identity"><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
+                    <span className="customer-result__identity" title={customerDisplayName(location.record)}><b>{customerDisplayName(location.record)}</b></span>
                   </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button><button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button></div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
                 )) : (
                   <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
