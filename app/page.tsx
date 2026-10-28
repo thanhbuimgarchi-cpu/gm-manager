@@ -3,6 +3,27 @@
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
 
+function WorkspaceIcon({ name, size = 20 }: { name: string; size?: number }) {
+  const paths: Record<string, string> = {
+    folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10H3Z",
+    search: "M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
+    people: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M16 3a4 4 0 0 1 0 8M22 21v-2a4 4 0 0 0-3-3.87M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
+    note: "M9 5H5v16h14V9M15 3l6 6M10 14l2-5 6-6 3 3-6 6-5 2Z",
+    message: "M21 11a8 8 0 0 1-8 8H7l-5 3V11a8 8 0 0 1 8-8h3a8 8 0 0 1 8 8ZM7 9h9M7 13h6",
+    design: "M3 3h18v18H3ZM8 3v18M8 9h13M14 9v12",
+    chart: "M3 3v18h18M7 15l4-5 4 3 6-8",
+    tool: "M14 6a5 5 0 0 0-6 6L2 18l4 4 6-6a5 5 0 0 0 6-6l-4 2-2-2 2-4Z",
+    check: "M5 12l4 4L19 6",
+    shield: "M12 3l8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3ZM8 12l3 3 5-6",
+    cube: "M12 2l10 6v9l-10 6-10-6V8l10-6ZM2 8l10 6 10-6M12 14v9M7 5l10 6",
+    arrow: "M5 12h14M13 6l6 6-6 6",
+    plus: "M12 5v14M5 12h14",
+    calendar: "M8 2v4M16 2v4M3 10h18M3 5h18v17H3Z",
+  };
+  const folderNames: Record<string, string> = { "Ghi chú": "note", "Tin nhắn": "message", "Tư vấn": "people", "Thiết kế": "design", "Dự toán": "chart", "Thi công": "tool", "Nghiệm thu": "check", "Bảo hành": "shield", "Tài liệu": "folder", "3D": "cube" };
+  return <svg className="workspace-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[folderNames[name] || name] || paths.folder} /></svg>;
+}
+
 type AudioSegment = {
   time: string;
   text: string;
@@ -1506,7 +1527,7 @@ function normalizePersonnelPhone(value: unknown) {
   return raw;
 }
 
-function normalizePersonnelMap(value: Record<string, PersonnelMember[]>) {
+function normalizePersonnelMap(value: Record<string, PersonnelMember[]>): Record<string, PersonnelMember[]> {
   return Object.fromEntries(Object.entries(value ?? {}).map(([category, members]) => [category, (Array.isArray(members) ? members : []).map((member) => ({
     ...member,
     status: personnelStatuses.includes(member.status) ? member.status : "Có",
@@ -1518,7 +1539,37 @@ function normalizePersonnelMap(value: Record<string, PersonnelMember[]>) {
 }
 
 function saveWorkspace(years: YearFolder[]) {
-  window.localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
+  try {
+    window.localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
+  } catch {
+    // Keep the in-memory workspace usable if this browser cannot write storage.
+  }
+}
+
+function uniqueCustomerProjectId(baseId: string, records: Pick<WorkRecord, "projectId">[]) {
+  const existing = new Set(records.map((record) => record.projectId));
+  if (!existing.has(baseId)) return baseId;
+  let suffix = 2;
+  while (existing.has(`${baseId}-${suffix}`)) suffix += 1;
+  return `${baseId}-${suffix}`;
+}
+
+function compareOutstandingWorkNotes(left: WorkNote, right: WorkNote) {
+  const priorityOrder: Record<WorkNotePriority, number> = { "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 };
+  const priorityDifference = (priorityOrder[left.priority] ?? 2) - (priorityOrder[right.priority] ?? 2);
+  if (priorityDifference) return priorityDifference;
+  return (parseDesignDate(left.dueDate)?.dayNumber ?? Infinity) - (parseDesignDate(right.dueDate)?.dayNumber ?? Infinity) || left.id.localeCompare(right.id);
+}
+
+function mergeWorkNotesForSync(remoteNotes: WorkNote[], localNotes: WorkNote[], deletedIds: Set<string>) {
+  return Array.from(new Map([...remoteNotes, ...localNotes].map((note) => [note.id, note])).values())
+    .filter((note) => !deletedIds.has(note.id) && shouldKeepWorkNote(note));
+}
+
+function reconcileWorkNoteEdit(original: WorkNote, draft: WorkNote): WorkNote {
+  const reassigned = original.assigneeEmail.trim().toLowerCase() !== draft.assigneeEmail.trim().toLowerCase();
+  const updated = reassigned ? { ...draft, acceptedAt: "", acceptedBy: "", actualDate: "", completedAt: "" } : draft;
+  return { ...updated, status: workNoteStatus(updated) };
 }
 
 function readDriveCache<T>(key: string, maxAgeMs: number): T | null {
@@ -1743,6 +1794,9 @@ export default function Home() {
   const [pancakePageName, setPancakePageName] = useState("Gm Manager");
   const [savingPancakeConfig, setSavingPancakeConfig] = useState(false);
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
+  const [sidebarMessagesOpen, setSidebarMessagesOpen] = useState(true);
+  const [sidebarDesignOpen, setSidebarDesignOpen] = useState(true);
+  const [mobileActivityOpen, setMobileActivityOpen] = useState(false);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
   const [editingWorkNote, setEditingWorkNote] = useState<WorkNote | null>(null);
   const [highlightWorkNoteId, setHighlightWorkNoteId] = useState("");
@@ -1786,6 +1840,67 @@ export default function Home() {
   const personnelLoadRevision = useRef(0);
   const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
 
+  // Keep keyboard focus inside the active dialog, then return to its trigger.
+  const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dismissDialog = useRef(() => {});
+  dismissDialog.current = () => {
+    if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig) return;
+    if (addOpen) setAddOpen(false);
+    else if (customerMessageTaskDraft) setCustomerMessageTaskDraft(null);
+    else if (driveConfigOpen) setDriveConfigOpen(false);
+    else if (loginOpen) setLoginOpen(false);
+    else if (mobileInstallHelp) setMobileInstallHelp(null);
+    else if (notificationSetupOpen) setNotificationSetupOpen(false);
+    else if (pendingWorkNoteCompletionId) setPendingWorkNoteCompletionId(null);
+    else if (pendingDesignTaskCompletion) setPendingDesignTaskCompletion(null);
+    else if (protectedAction) setProtectedAction(null);
+    else if (selectedRecordId) setSelectedRecordId(null);
+  };
+  useEffect(() => {
+    if (!dialogKey) return;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overlays = Array.from(document.querySelectorAll<HTMLElement>(".dialog-backdrop, .detail-backdrop"));
+    const overlay = overlays[overlays.length - 1];
+    const dialog = overlay?.firstElementChild as HTMLElement | null;
+    if (!dialog) return;
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const title = dialog.querySelector("h2");
+    if (title) {
+      title.id = `dialog-title-${dialogKey}`;
+      dialog.setAttribute("aria-labelledby", title.id);
+    }
+    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]')).filter((element) => element.getClientRects().length > 0);
+    const frame = requestAnimationFrame(() => {
+      const preferred = dialog.querySelector<HTMLElement>("[autofocus], input:not(:disabled), select:not(:disabled)");
+      (preferred || focusable()[0])?.focus();
+    });
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); dismissDialog.current(); }
+      if (event.key !== "Tab") return;
+      const elements = focusable();
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => { cancelAnimationFrame(frame); document.removeEventListener("keydown", handleKey); if (trigger?.isConnected) trigger.focus(); };
+  }, [dialogKey]);
+
+  useEffect(() => {
+    if (!openMenuId && !personnelMenuId && !workNoteMenuId) return;
+    const closeMenus = (event: PointerEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
+      if (event instanceof PointerEvent && event.target instanceof Element && event.target.closest(".project-actions, .personnel-row-actions, .work-note__menu")) return;
+      setOpenMenuId(null); setPersonnelMenuId(null); setWorkNoteMenuId(null);
+    };
+    document.addEventListener("pointerdown", closeMenus);
+    document.addEventListener("keydown", closeMenus);
+    return () => { document.removeEventListener("pointerdown", closeMenus); document.removeEventListener("keydown", closeMenus); };
+  }, [openMenuId, personnelMenuId, workNoteMenuId]);
+
   const promptForMobileNotifications = () => {
     if (!isMobileDevice()) return;
     try { window.localStorage.setItem(mobileNotificationSetupKey, "pending"); } catch { /* Optional prompt state. */ }
@@ -1810,14 +1925,10 @@ export default function Home() {
     setModalYear(currentDate.year);
     setModalMonth(currentDate.month);
 
-    const savedWorkspace = window.localStorage.getItem("gm-manager-consulting");
-    if (savedWorkspace) {
-      try {
-        setYears(dedupeWorkspaceYears(JSON.parse(savedWorkspace) as YearFolder[]));
-      } catch {
-        window.localStorage.removeItem("gm-manager-consulting");
-      }
-    }
+    try {
+      const savedWorkspace = window.localStorage.getItem("gm-manager-consulting");
+      if (savedWorkspace) setYears(dedupeWorkspaceYears(JSON.parse(savedWorkspace) as YearFolder[]));
+    } catch { /* Keep the workspace available when browser storage is restricted or malformed. */ }
 
     // Production has one canonical deployment. Replacing any URL saved by an
     // older build prevents a device from getting stuck on a retired /exec URL.
@@ -1829,7 +1940,7 @@ export default function Home() {
       savedDriveLinkUrl = savedDriveUrl && !savedDriveUrl.includes(legacyDriveFolderId) ? savedDriveUrl : defaultDriveFolderUrl;
     } catch { /* Keep the canonical Apps Script connection when prior storage is malformed. */ }
     const config = { ...defaultDriveSyncConfig, driveUrl: savedDriveLinkUrl };
-    window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
+    try { window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config)); } catch { /* The current connection can still run in memory. */ }
     setDriveScriptUrl(config.scriptUrl);
     setDriveLinkUrl(savedDriveLinkUrl);
     setWorkspaceStorageReady(true);
@@ -1840,9 +1951,7 @@ export default function Home() {
       const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
       if (savedPersonnel) setPersonnelByCategory(normalizePersonnelMap(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>));
       setLoggedInEmployeeEmail(String(window.localStorage.getItem(personnelSessionEmailKey) ?? "").trim().toLowerCase());
-    } catch {
-      window.localStorage.removeItem(personnelStorageKey);
-    }
+    } catch { /* A shared roster can still be loaded when local storage is unavailable. */ }
   }, []);
 
   useEffect(() => {
@@ -1936,7 +2045,7 @@ export default function Home() {
   const customerSearchResults = useMemo(() => {
     const term = normalizeSearchText(search.trim());
     const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
-    return (term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers).slice(0, 24);
+    return term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers;
   }, [customerLocations, search, selectedMonth, selectedYear]);
   const workflowSearchResults = useMemo(() => {
     const term = normalizeSearchText(workflowSearch.trim());
@@ -2122,14 +2231,15 @@ export default function Home() {
     if (!("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator)) return false;
     try {
       const registration = serviceWorkerRegistration.current ?? await navigator.serviceWorker.ready;
-      await registration.showNotification(title, {
+      const options: NotificationOptions & { renotify: boolean } = {
         body,
         icon: `${import.meta.env.BASE_URL}gm-logo.png`,
         badge: `${import.meta.env.BASE_URL}gm-logo.png`,
         tag: `gmcrm-customer-message-${message.id}`,
         renotify: true,
         data: { url },
-      });
+      };
+      await registration.showNotification(title, options);
       markNotificationsEnabled(true);
       return true;
     } catch {
@@ -2416,8 +2526,15 @@ export default function Home() {
   const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
     if (!location || !driveScriptUrl.trim()) return;
     const cacheKey = workNotesCacheKey(location);
-    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; storage?: string; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes });
+    // An employee may act on a sidebar assignment before the project has
+    // finished loading. Read the full collection before replacing the shared
+    // array so that notes assigned to colleagues cannot be dropped.
+    const loaded = await postToAppsScript<{ ok?: boolean; error?: string; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId });
+    if (!loaded.response.ok || !loaded.result.ok || !Array.isArray(loaded.result.notes)) throw new Error(loaded.result.error || "Chưa thể nạp đầy đủ ghi chú để đồng bộ an toàn. Thay đổi đã lưu trên thiết bị.");
+    const mergedNotes = mergeWorkNotesForSync(loaded.result.notes, notes, locallyDeletedWorkNoteIds.current);
+    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; storage?: string; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes: mergedNotes });
     if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ghi chú được giao.");
+    writeDriveCache(cacheKey, mergedNotes);
     if (pendingWorkNotesSync.current.get(cacheKey) === notes) pendingWorkNotesSync.current.delete(cacheKey);
     return result;
   };
@@ -2428,8 +2545,9 @@ export default function Home() {
     setEditingWorkNote(null);
     setWorkNoteMenuId(null);
     const cacheKey = workNotesCacheKey();
-    const canSeeNote = (note: WorkNote) => canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail);
-    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note) && canSeeNote(note));
+    // Keep the complete project collection in storage. Visibility belongs to
+    // rendering; filtering this array would erase colleagues' notes on save.
+    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note));
     setWorkNotes(cachedNotes);
     if (cachedNotes.length) writeDriveCache(cacheKey, cachedNotes);
     else removeDriveCache(cacheKey);
@@ -2439,7 +2557,7 @@ export default function Home() {
       const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId });
       if (loadRevision !== workNotesLoadRevision.current) return;
       if (response.ok && result.ok && Array.isArray(result.notes)) {
-        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id) && canSeeNote(note));
+        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
         const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId && !locallyDeletedWorkNoteIds.current.has(note.id));
         const pendingNotes = pendingWorkNotesSync.current.get(cacheKey) ?? [];
         const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject, ...pendingNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
@@ -2457,7 +2575,7 @@ export default function Home() {
     }
     setSavingWorkNotes(true);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; virtual?: boolean; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "complete-work-note",
         year: location.year,
         month: location.month,
@@ -2700,8 +2818,13 @@ export default function Home() {
   };
   const saveEditingWorkNote = async () => {
     if (!editingWorkNote) return;
-    if (!parseDesignDate(editingWorkNote.dueDate) || isPastVietnamDate(editingWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
-    const next = workNotes.map((note) => note.id === editingWorkNote.id ? { ...editingWorkNote, status: workNoteStatus(editingWorkNote) } : note);
+    if (!editingWorkNote.assigneeEmail) { setNotice("Hãy chọn Người phụ trách trước khi lưu ghi chú."); return; }
+    const original = workNotes.find((note) => note.id === editingWorkNote.id);
+    if (!parseDesignDate(editingWorkNote.dueDate) || (editingWorkNote.dueDate !== original?.dueDate && isPastVietnamDate(editingWorkNote.dueDate))) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
+    const next = workNotes.map((note) => {
+      if (note.id !== editingWorkNote.id) return note;
+      return reconcileWorkNoteEdit(note, editingWorkNote);
+    });
     persistWorkNotes(next);
     rememberPendingWorkNotes(next);
     setEditingWorkNote(null);
@@ -3129,12 +3252,13 @@ export default function Home() {
     }
 
     const created = getVietnamDate();
-    const projectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
+    const baseProjectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
     const creationKey = `${modalYear}-${modalMonth}-${normalizeSearchText(normalizedHouseId)}`;
     if (customerCreateRequestsInFlight.current.has(creationKey)) return;
     const targetMonthRecords = dedupeMonthRecords(years.find((yearFolder) => yearFolder.year === modalYear)?.months?.[modalMonth - 1]?.records ?? []);
     const normalizedHouseKey = normalizeHouseCode(normalizedHouseId);
-    const existingRecord = targetMonthRecords.find((record) => record.projectId === projectId || normalizeHouseCode(record.houseId) === normalizedHouseKey);
+    const existingRecord = targetMonthRecords.find((record) => normalizeHouseCode(record.houseId) === normalizedHouseKey);
+    const projectId = existingRecord?.projectId ?? uniqueCustomerProjectId(baseProjectId, targetMonthRecords);
     if (existingRecord && !existingRecord.pendingDriveSync) {
       setSelectedYear(modalYear);
       setSelectedMonth(modalMonth);
@@ -4008,11 +4132,6 @@ export default function Home() {
         // Ignore a malformed cache item and keep the sidebar usable.
       }
     }
-    const priorityOrder: Record<WorkNotePriority, number> = { "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 };
-    const dateValue = (value: string) => {
-      const [day = "99", month = "99", year = "9999"] = value.split("/");
-      return `${year.padStart(4, "9")}${month.padStart(2, "9")}${day.padStart(2, "9")}`;
-    };
     assignedWorkNotes.forEach((note) => {
       const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`)
         ?? (note.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? createVirtualPancakeLocation(note.year, note.month) : null);
@@ -4021,7 +4140,7 @@ export default function Home() {
       if (existing >= 0) outstanding[existing] = { note, location };
       else outstanding.push({ note, location });
     });
-    return outstanding.sort((left, right) => dateValue(left.note.dueDate).localeCompare(dateValue(right.note.dueDate)) || priorityOrder[left.note.priority] - priorityOrder[right.note.priority]);
+    return outstanding.sort((left, right) => compareOutstandingWorkNotes(left.note, right.note));
   }, [assignedWorkNotes, canViewAllNotesAndMessages, customerLocations, loggedInEmployeeEmail, workNotesCacheRevision]);
   const savePersonnelCache = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
@@ -4352,8 +4471,8 @@ export default function Home() {
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
           <header className="work-notes__heading">
-        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Nhập ghi chú mới rồi bấm Phát hành để lưu vào cache của thiết bị. Khi hoàn thành, công việc mới được lưu vào Drive." : "Chỉ hiển thị những công việc đã giao cho tài khoản này. Xác nhận nhận việc trước khi hoàn thành thực tế."}</p></div>
-        {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu về Drive…" : "Nháp trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
+        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Giao việc, theo dõi thời hạn và cập nhật kết quả hoàn thành của dự án." : "Công việc được giao cho bạn. Xác nhận nhận việc trước khi cập nhật hoàn thành thực tế."}</p></div>
+        {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
@@ -4435,8 +4554,8 @@ export default function Home() {
     return <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
         <span>⌕</span>
-        <input value={workflowSearch} onChange={(event) => { setWorkflowSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Search khách hàng, mã nhà hoặc ID dự án…" aria-label="Search khách hàng" />
-        {workflowSearch && <button type="button" onClick={() => setWorkflowSearch("")} aria-label="Xóa nội dung Search">×</button>}
+        <input value={workflowSearch} onChange={(event) => { setWorkflowSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng trong quy trình" />
+        {workflowSearch && <button type="button" onClick={() => setWorkflowSearch("")} aria-label="Xóa tìm kiếm trong quy trình">×</button>}
       </label>
       {workflowSearch && <div className="workflow-customer-search__results">
         {workflowSearchResults.length ? workflowSearchResults.map((location) => (
@@ -4559,14 +4678,14 @@ export default function Home() {
     <button type="button" className="sidebar-notes__toggle" onClick={() => loggedInEmployee ? setNotice("Chỉ Admin và Quản lý chung được xem toàn bộ Tin nhắn khách.") : setLoginOpen(true)}>
       <span><b>Tin nhắn khách</b><small>Chỉ Admin / Quản lý chung</small></span><em aria-hidden="true">🔒</em>
     </button>
-  </section> : <section className={"sidebar-notes customer-message-summary " + className + (sidebarNotesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
-    <button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages} aria-expanded={sidebarNotesOpen}>
-      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em role="button" tabIndex={0} aria-label={sidebarNotesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} onClick={(event) => { event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); setSidebarNotesOpen((isOpen) => !isOpen); } }}>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
-    </button>
-    {sidebarNotesOpen && <div className="sidebar-notes__list">
+  </section> : <section className={"sidebar-notes customer-message-summary " + className + (sidebarMessagesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
+    <div className="sidebar-summary-heading"><button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages}>
+      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span>
+    </button><button type="button" className="sidebar-summary-collapse" aria-label={sidebarMessagesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} aria-expanded={sidebarMessagesOpen} onClick={() => setSidebarMessagesOpen((isOpen) => !isOpen)}>{sidebarMessagesOpen ? "⌃" : "⌄"}</button></div>
+    {sidebarMessagesOpen && <div className="sidebar-notes__list">
       {loadingCustomerMessages && !customerMessages.length ? <p className="sidebar-notes__empty">Đang nạp Tin nhắn khách…</p>
         : customerMessagesError && !customerMessages.length ? <p className="sidebar-notes__empty">{customerMessagesError}</p>
-          : customerMessages.length ? customerMessages.slice().sort((left, right) => Number(right.status === "resolved") - Number(left.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => (
+          : customerMessages.length ? customerMessages.slice().sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => (
             <button type="button" className={"sidebar-note customer-message-summary__item " + messageStatusClass(message.status)} key={message.id} onClick={() => openCustomerMessage(message)}>
               <i className={message.status === "processing" ? "sidebar-notes__dot--blue" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.customerName || message.houseId || message.groupName}</b><small>{message.groupName} · {message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
             </button>
@@ -4607,12 +4726,12 @@ export default function Home() {
     </div>}
   </section> : null;
 
-  const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế chưa hoàn thiện">
-    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
-      <span><b>Thiết kế chưa hoàn thiện</b><small>{assignedDesignTasks.length} hạng mục · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+  const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarDesignOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế chưa hoàn thiện">
+    <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarDesignOpen((isOpen) => !isOpen)} aria-expanded={sidebarDesignOpen}>
+      <span><b>Thiết kế chưa hoàn thiện</b><small>{assignedDesignTasks.length} hạng mục · tất cả khách hàng</small></span><em>{sidebarDesignOpen ? "⌃" : "⌄"}</em>
     </button>
-    {sidebarNotesOpen && <div className="sidebar-notes__list">
-      {assignedDesignTasks.length ? assignedDesignTasks.slice().sort((left, right) => left.plannedDate.localeCompare(right.plannedDate)).map((task) => {
+    {sidebarDesignOpen && <div className="sidebar-notes__list">
+      {assignedDesignTasks.length ? assignedDesignTasks.slice().sort((left, right) => (parseDesignDate(left.plannedDate)?.dayNumber ?? Infinity) - (parseDesignDate(right.plannedDate)?.dayNumber ?? Infinity)).map((task) => {
         const status = designTaskStatus(task);
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[status];
         return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${task.year}-${task.month}-${task.projectId}-${task.kind}-${task.id}`} onClick={() => {
@@ -4638,7 +4757,7 @@ export default function Home() {
       {!selectedCustomerProjectId && activeFolder !== "Tin nhắn" && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
           <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
+            <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager<small>PROJECT WORKSPACE</small></span></div>
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
@@ -4654,18 +4773,18 @@ export default function Home() {
                 <nav className="main-nav" aria-label="Nhóm nhân lực">
                   {personnelCategories.map((category) => (
                     <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); setEditingPersonnelId(null); setPersonnelMenuId(null); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
-                      <span className="nav-row__icon">{category.icon}</span><span>{category.label}</span>
+                      <span className="nav-row__icon"><WorkspaceIcon name={category.id === "management" ? "shield" : category.id === "coordination" ? "chart" : category.id === "workshop" ? "cube" : category.id === "site" || category.id === "construction" ? "tool" : "people"} size={18} /></span><span>{category.label}</span>
                     </button>
                   ))}
                 </nav>
               </aside>
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading personnel-workspace__heading--compact">
-                  <div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><span>＋</span> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Export Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← UI tổng</button></div>
+                  <div><p className="eyebrow">Đội ngũ GM</p><h1>{selectedPersonnelCategory?.label || "Nhân lực"}</h1><p>Quản lý thông tin, chức vụ và quyền truy cập của đội ngũ.</p></div><div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><WorkspaceIcon name="plus" size={16} /> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Xuất Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Tổng quan</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
-                  <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Search trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi")}…`} aria-label={`Search ${selectedPersonnelCategory?.label}`} autoFocus />
+                  <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Tìm trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi") || "nhân lực"}…`} aria-label="Tìm nhân lực" />
                 </label>
                 <div className="personnel-category-detail">
                   {personnelAddOpen && <form className="personnel-add-form" onSubmit={savePersonnel}>
@@ -4685,20 +4804,24 @@ export default function Home() {
             </div>
           ) : (
             <div className={`customer-gateway__overview ${canViewNotesSummary || canViewCustomerMessages || canViewDesignSummary ? "" : "customer-gateway__overview--no-notes"}`}>
-              <div className="customer-gateway__summaries">
+              <button type="button" className="activity-toggle activity-toggle--gateway" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>Công việc & tin nhắn</span><b>{outstandingSidebarNotes.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
+              <div className={`customer-gateway__summaries ${mobileActivityOpen ? "is-open" : ""}`}>
                 {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
                 {renderCustomerMessagesSummary("gateway-notes gateway-notes--side")}
                 {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
               </div>
               <div className="customer-gateway__body">
-              <div className="personnel-entry customer-entry">
-                <span className="personnel-entry__icon customer-entry__icon">▰</span>
-                <span><b>Khách hàng</b></span>
+              <header className="workspace-overview"><div><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h1>Tổng quan dự án</h1><p>Theo dõi công việc, kết nối đội ngũ và chăm sóc khách hàng.</p></div><span className="workspace-overview__date"><WorkspaceIcon name="calendar" size={16} />{new Date().toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric" })}</span></header>
+              <div className="overview-metrics">
+                <div className="overview-metric"><span><WorkspaceIcon name="folder" size={18} />Hồ sơ trong tháng</span><strong>{customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth).length}</strong><small>Tháng {selectedMonth} · {selectedYear}</small></div>
+                {canViewNotesSummary && <div className="overview-metric"><span><WorkspaceIcon name="note" size={18} />Công việc đang chờ</span><strong>{outstandingSidebarNotes.length}</strong><small>{outstandingSidebarNotes.filter(({ note }) => note.priority !== "Bình thường").length} công việc ưu tiên cao</small></div>}
+                {canViewCustomerMessages && <button type="button" className="overview-metric" onClick={openAllCustomerMessages}><span><WorkspaceIcon name="message" size={18} />Tin nhắn khách</span><strong>{customerMessages.filter((message) => message.status !== "resolved").length}</strong><small>Mở hộp tin nhắn <span aria-hidden="true">↗</span></small></button>}
               </div>
-              <button className="add-button customer-gateway__add" onClick={openAddDialog}><span>＋</span> Thêm khách hàng</button>
+              <div className="customer-directory-heading"><div><h2>Khách hàng</h2><p>Tất cả hồ sơ và tài liệu dự án của bạn.</p></div><button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button></div>
               <label className="customer-search">
-                <span>⌕</span>
-                <input autoFocus value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên, mã nhà hoặc ID dự án…" aria-label="Tìm khách hàng" />
+                <WorkspaceIcon name="search" />
+                <input value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng" />
+                {search && <button type="button" className="search-clear" aria-label="Xóa tìm kiếm khách hàng" onClick={() => setSearch("")}>×</button>}
               </label>
 
               <div className="customer-period" aria-label="Chọn thời gian khách hàng">
@@ -4710,7 +4833,7 @@ export default function Home() {
               <div className="customer-search-results" aria-live="polite">
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
                   <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
-                    <span className="customer-result__folder">▰</span>
+                    <span className="customer-result__folder"><WorkspaceIcon name="folder" /></span>
                     <span className="customer-result__identity"><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
                     <span className="customer-result__date">T{location.month} / {location.year}</span>
                     <span className="customer-result__arrow">→</span>
@@ -4721,8 +4844,8 @@ export default function Home() {
               </div>
 
               {canManagePersonnel && <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
-                <span className="personnel-entry__icon">♙</span>
-                <span><b>Nhân lực</b></span>
+                <span className="personnel-entry__icon"><WorkspaceIcon name="people" /></span>
+                <span><b>Nhân lực</b><small>Thông tin đội ngũ & quyền truy cập</small></span><WorkspaceIcon name="arrow" size={18} />
               </button>}
               </div>
             </div>
@@ -4731,27 +4854,28 @@ export default function Home() {
         </section>
       )}
 
-      <aside className="sidebar">
-        <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /><small className="brand__version">v{appVersionLabel}</small></span></div>
+      {(selectedCustomerProjectId || activeFolder === "Tin nhắn") && <><aside className="sidebar">
+        <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager<small>PROJECT WORKSPACE</small></span></div>
         <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
         <nav className="main-nav" aria-label="Quy trình GM Manager">
           {visibleWorkspaceFolders.map((folder) => (
             <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
-              <span className="nav-row__icon">{folder.icon}</span>
+              <span className="nav-row__icon"><WorkspaceIcon name={folder.label} size={18} /></span>
               <span>{folder.label}</span>
             </button>
           ))}
         </nav>
-        {renderOutstandingNotesSummary()}
+        <button type="button" className="activity-toggle" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>Công việc & tin nhắn</span><b>{outstandingSidebarNotes.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
+        <div className={`sidebar-activity ${mobileActivityOpen ? "is-open" : ""}`}>{renderOutstandingNotesSummary()}
         {renderCustomerMessagesSummary()}
-        {renderOutstandingDesignSummary()}
+        {renderOutstandingDesignSummary()}</div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div className="topbar__project-controls">
             {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
-            <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← UI tổng</button>
+            <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← Tổng quan</button><span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span>/</span>{activeFolder}</span>
           </div>
           <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
         </header>
@@ -4772,8 +4896,8 @@ export default function Home() {
           <section className="consulting-view">
             <label className="customer-search consulting-search">
               <span>⌕</span>
-              <input value={consultingSearch} onChange={(event) => setConsultingSearch(event.target.value)} placeholder="Search trong Phiếu thông tin khách hàng…" aria-label="Search Phiếu thông tin khách hàng" />
-              {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa nội dung Search">×</button>}
+              <input value={consultingSearch} onChange={(event) => setConsultingSearch(event.target.value)} placeholder="Tìm nội dung trong phiếu thông tin…" aria-label="Tìm trong phiếu thông tin khách hàng" />
+              {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa tìm kiếm trong phiếu">×</button>}
             </label>
 
             {selectedRecord && <section className="record-detail record-detail--inline">
@@ -4784,8 +4908,8 @@ export default function Home() {
                   <div className="project-actions">
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.houseId || selectedRecord.name || "hồ sơ"}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
-                      <button onClick={() => startProtectedAction("rename", selectedRecord)}>Rename</button>
-                      <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Delete</button>
+                      <button onClick={() => startProtectedAction("rename", selectedRecord)}>Sửa thông tin</button>
+                      <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Xóa hồ sơ</button>
                     </div>}
                   </div>
                 </div>
@@ -4879,13 +5003,13 @@ export default function Home() {
           </section>
         )}
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
-      </section>
+      </section></>}
 
       {addOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setAddOpen(false)}>
           <form className="add-dialog" onSubmit={addCustomer} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setAddOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Tạo thư mục dự án</p><h2>Add customer</h2>
+            <p className="eyebrow">Hồ sơ dự án mới</p><h2>Thêm khách hàng</h2><p className="dialog-intro">Tạo hồ sơ để quản lý thông tin, công việc và tài liệu của khách hàng.</p>
             <label>Tháng<select value={modalMonth} onChange={(event) => setModalMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
             <label>Năm<select value={modalYear} onChange={(event) => setModalYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>

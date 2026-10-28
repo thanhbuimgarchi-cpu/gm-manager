@@ -180,7 +180,7 @@ app.whenReady().then(() => {
     const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
     if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
     const documentsFolder = await findProjectDocumentsFolder(...identifiers);
-    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ G.";
+    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
   });
   ipcMain.handle("gmcrm:open-file", async (_event, payload = {}) => {
     const projectId = String(payload.projectId || "").trim();
@@ -191,9 +191,9 @@ app.whenReady().then(() => {
     if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
     if (!fileName) return "Tên tệp không hợp lệ.";
     const documentsFolder = await findProjectDocumentsFolder(...identifiers);
-    if (!documentsFolder) return process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ G.";
+    if (!documentsFolder) return process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
     const filePath = await findDriveFile(documentsFolder, fileName, snapshotName);
-    if (!filePath) return `Không tìm thấy tệp ${fileName} trong ổ G.`;
+    if (!filePath) return `Không tìm thấy tệp ${fileName} trong thư mục Google Drive trên máy tính.`;
     return shell.openPath(filePath);
   });
   createWindow();

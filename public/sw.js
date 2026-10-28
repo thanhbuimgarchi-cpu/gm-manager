@@ -1,7 +1,7 @@
 // Bump this whenever a release changes how locally cached data is handled.
 // Activating a new shell removes the older UI that used to send every work
 // note to Drive while it was being edited.
-const CACHE_NAME = "gm-crm-shell-v9";
+const CACHE_NAME = "gm-crm-shell-v10";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png", "./gm-logo-192.png", "./gm-logo-512.png"];
 
 self.addEventListener("install", (event) => {

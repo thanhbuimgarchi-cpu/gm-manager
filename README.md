@@ -94,6 +94,23 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
 
+## Interface checks
+
+`npm test` runs the Drive behavior and frontend data regression checks.
+`npm run build:github-pages` builds the website for GitHub Pages.
+
+For interactive browser checks, start the Vite preview with
+`vite --config vite.github.config.ts --host 127.0.0.1`, then run `npm run test:ui`
+with Playwright and its Chromium browser available. The browser suite uses
+synthetic customers and intercepts Apps Script requests; it never changes real
+Drive or Pancake data. It checks desktop/mobile layouts, dialogs, date and
+assignee validation, messages, personnel, and employee permissions. Screenshots
+are saved under ignored `outputs/interface-qa/`.
+
+Optional environment variables: `GM_TEST_BASE_URL`,
+`GM_TEST_PLAYWRIGHT_MODULE` (path to an existing Playwright module), and
+`GM_TEST_BROWSER_PATH` (an existing Chromium executable).
+
 ## Google Apps Script deployment
 
 The production Apps Script source is versioned in `apps-script/` and deployed
