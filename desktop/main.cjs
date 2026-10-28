@@ -50,13 +50,13 @@ async function saveWorkspaceFolder(folder) {
 async function validateWorkspaceFolder(payload = {}) {
   const requested = typeof payload.path === "string" && payload.path.trim() ? payload.path : await readWorkspaceFolder();
   const folder = await normalizeWorkspaceRoot(requested);
-  if (!folder) return { ok: false, path: "", error: "Hãy chọn thư mục GM Manager có đủ hai thư mục Khách hàng và Nhân lực." };
+  if (!folder) return { ok: false, path: "", error: "Chưa tìm thấy GM Manager tại đường dẫn này. Hãy nhập đường dẫn tới GM Manager/Khách hàng hoặc chọn thư mục gần dữ liệu hơn." };
   try { await saveWorkspaceFolder(folder); } catch { return { ok: false, path: "", error: "Không thể lưu vị trí thư mục trên máy này. Hãy thử chọn lại." }; }
   return { ok: true, path: folder };
 }
 
 async function selectWorkspaceFolder() {
-  const options = { title: "Chọn thư mục GM Manager", buttonLabel: "Chọn thư mục", properties: ["openDirectory"], defaultPath: await readWorkspaceFolder() || undefined };
+  const options = { title: "Chọn ổ đĩa hoặc thư mục chứa dữ liệu GM Manager", buttonLabel: "Chọn vị trí này", properties: ["openDirectory"], defaultPath: await readWorkspaceFolder() || undefined };
   const selected = mainWindow && !mainWindow.isDestroyed() ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
   if (selected.canceled || !selected.filePaths[0]) return { ok: false, canceled: true, path: await readWorkspaceFolder() || "" };
   return validateWorkspaceFolder({ path: selected.filePaths[0] });
@@ -215,7 +215,9 @@ async function handleProtocolUrl(value) {
   const payload = { houseId: url.searchParams.get("houseId"), projectId: url.searchParams.get("projectId"), year: url.searchParams.get("year"), month: url.searchParams.get("month"), snapshotName: url.searchParams.get("snapshotName") || "" };
   if (![payload.houseId, payload.projectId].some((name) => safeDriveEntryName(name)) || (payload.snapshotName && !safeDriveEntryName(payload.snapshotName))) return;
   if (!/^\d{4}$/.test(payload.year || "") || !Number.isInteger(Number(payload.month)) || Number(payload.month) < 1 || Number(payload.month) > 12) return;
-  let validation = await validateWorkspaceFolder();
+  const requestedWorkspace = url.searchParams.get("workspacePath");
+  if (requestedWorkspace && requestedWorkspace.length > 4096) return;
+  let validation = await validateWorkspaceFolder(requestedWorkspace ? { path: requestedWorkspace } : {});
   if (!validation.ok) validation = await selectWorkspaceFolder();
   if (!validation.ok) return;
   const error = await openDocumentFolder(payload);

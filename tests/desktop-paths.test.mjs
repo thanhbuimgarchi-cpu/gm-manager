@@ -31,6 +31,32 @@ test("choosing the inner, outer, or drive folder resolves the same valid workspa
   }
 });
 
+test("pasted customer, month and document-day paths resolve to the existing workspace ancestor", async (t) => {
+  const { root, snapshot } = await fixture(t);
+  for (const selected of [path.join(root, "Khách hàng"), path.dirname(snapshot), snapshot, `  "${snapshot}"  `]) {
+    assert.equal(await helpers.normalizeWorkspaceRoot(selected), root);
+  }
+  assert.equal(await helpers.normalizeWorkspaceRoot(path.join(snapshot, "missing-folder")), "");
+});
+
+test("a selected storage folder can discover GM Manager below arbitrary team directories", async (t) => {
+  const { temporary } = await fixture(t);
+  const selected = path.join(temporary, "Other drive");
+  const root = path.join(selected, "Company", "Shared with team", "Project data", "GM Manager");
+  await Promise.all([mkdir(path.join(root, "Khách hàng"), { recursive: true }), mkdir(path.join(root, "Nhân lực"), { recursive: true })]);
+  assert.equal(await helpers.normalizeWorkspaceRoot(selected), root);
+});
+
+test("a directly selected Customers directory can open its exact project without a personnel folder", async (t) => {
+  const { temporary } = await fixture(t);
+  const selected = path.join(temporary, "Documents only", "Khách hàng");
+  const documents = path.join(selected, "2026", "T10", "DV 75", "Tài liệu");
+  await mkdir(documents, { recursive: true });
+  assert.equal(await helpers.normalizeWorkspaceRoot(selected), selected);
+  assert.equal(await helpers.findProjectDocumentsAtRoot(selected, { year: 2026, month: 10, houseId: "DV 75" }), documents);
+  assert.equal(await helpers.findProjectDocumentsAtRoot(selected, { year: 2026, month: 9, houseId: "DV 75" }), "");
+});
+
 test("a workspace must contain both customer and personnel folders", async (t) => {
   const { temporary } = await fixture(t);
   const incomplete = path.join(temporary, "Incomplete", "GM Manager");
@@ -100,6 +126,7 @@ test("native selection persists its root and IPC only accepts the application or
   assert.equal((await select(trusted)).path, root);
   assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, root);
   assert.equal((await ipcHandlers.get("gmcrm:validate-workspace-folder")(trusted)).ok, true);
+  assert.equal((await ipcHandlers.get("gmcrm:validate-workspace-folder")(trusted, { path: snapshot })).path, root);
   const payload = { year: 2026, month: 10, houseId: "DV 75", snapshotName: "28-10-2026-DV 75" };
   assert.equal(await ipcHandlers.get("gmcrm:open-document-folder")(trusted, payload), "");
   assert.equal(opened.at(-1), snapshot);
@@ -116,4 +143,12 @@ test("native selection persists its root and IPC only accepts the application or
   appEvents.get("second-instance")({}, ["gmmanager://open-documents?year=2026&month=10&houseId=DV%2075&snapshotName=28-10-2026-DV%2075"]);
   for (let attempt = 0; opened.length < 2 && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(opened.length, 2);
+  const alternateRoot = path.join(temporary, "Another drive", "GM Manager");
+  const alternateSnapshot = path.join(alternateRoot, "Khách hàng", "2026", "T10", "DV 75", "Tài liệu", payload.snapshotName);
+  await Promise.all([mkdir(alternateSnapshot, { recursive: true }), mkdir(path.join(alternateRoot, "Nhân lực"), { recursive: true })]);
+  const query = new URLSearchParams({ ...payload, year: String(payload.year), month: String(payload.month), workspacePath: path.join(alternateRoot, "Khách hàng") });
+  appEvents.get("second-instance")({}, [`gmmanager://open-documents?${query}`]);
+  for (let attempt = 0; opened.length < 3 && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(opened.at(-1), alternateSnapshot);
+  assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, alternateRoot);
 });

@@ -422,6 +422,7 @@ type DesktopNotificationBridge = {
 type LocalDirectoryHandle = FileSystemDirectoryHandle & {
   queryPermission?: (options: { mode: "read" }) => Promise<PermissionState>;
   requestPermission?: (options: { mode: "read" }) => Promise<PermissionState>;
+  values?: () => AsyncIterableIterator<FileSystemHandle>;
 };
 
 async function storedWorkspaceDirectory(handle?: LocalDirectoryHandle): Promise<LocalDirectoryHandle | undefined> {
@@ -441,23 +442,67 @@ async function storedWorkspaceDirectory(handle?: LocalDirectoryHandle): Promise<
   });
 }
 
+const workspaceEntryKey = (name: string) => name.normalize("NFC").trim().toLocaleLowerCase("vi");
+
+async function isBrowserWorkspaceRoot(handle: LocalDirectoryHandle) {
+  if (workspaceEntryKey(handle.name) === "khách hàng") return true;
+  try {
+    await Promise.all([handle.getDirectoryHandle("Khách hàng"), handle.getDirectoryHandle("Nhân lực")]);
+    return true;
+  } catch { return false; }
+}
+
 async function verifyBrowserWorkspace(handle: LocalDirectoryHandle): Promise<LocalDirectoryHandle> {
-  const queue = [{ handle, depth: 0 }];
-  while (queue.length) {
-    const current = queue.shift()!;
-    try {
-      if (current.handle.name.normalize("NFC").toLowerCase() === "gm manager") {
-        await current.handle.getDirectoryHandle("Khách hàng");
-        await current.handle.getDirectoryHandle("Nhân lực");
-        return current.handle;
+  const queue = [{ handle, depth: 0, key: "" }];
+  const queued = new Set([""]);
+  const skipped = new Set(["$recycle.bin", "system volume information", "windows", "node_modules", ".git", "khách hàng", "nhân lực"]);
+  for (let index = 0; index < queue.length && index < 2048; index++) {
+    const current = queue[index];
+    if (await isBrowserWorkspaceRoot(current.handle)) return current.handle;
+    if (current.depth >= 8) continue;
+    const add = (child: LocalDirectoryHandle) => {
+      const key = `${current.key}/${workspaceEntryKey(child.name)}`;
+      if (!queued.has(key) && queue.length < 4096) {
+        queued.add(key);
+        queue.push({ handle: child, depth: current.depth + 1, key });
       }
-    } catch { /* An outer GM Manager folder may contain the actual root. */ }
-    if (current.depth >= 3) continue;
+    };
     for (const child of ["Shared drives", "My Drive", "GM Manager"]) {
-      try { queue.push({ handle: await current.handle.getDirectoryHandle(child) as LocalDirectoryHandle, depth: current.depth + 1 }); } catch { /* Only check the expected Drive layout. */ }
+      try { add(await current.handle.getDirectoryHandle(child) as LocalDirectoryHandle); } catch { /* Try the remaining branches. */ }
+    }
+    if (current.handle.values) {
+      try {
+        for await (const child of current.handle.values()) {
+          if (child.kind === "directory" && !skipped.has(workspaceEntryKey(child.name))) add(child as LocalDirectoryHandle);
+        }
+      } catch { /* A denied directory does not prevent searching its siblings. */ }
     }
   }
-  throw new Error("Chọn thư mục GM Manager có cả Khách hàng và Nhân lực bên trong.");
+  throw new Error("Chưa tìm thấy GM Manager có Khách hàng và Nhân lực. Hãy chọn thư mục Khách hàng hoặc vị trí gần dữ liệu hơn.");
+}
+
+async function browserWorkspaceAtPath(handle: LocalDirectoryHandle, value: string) {
+  const requested = value.trim().replace(/^["'](.*)["']$/, "$1").trim();
+  if (!requested || /^[a-z]:[\\/]?$/i.test(requested)) return verifyBrowserWorkspace(handle);
+  const parts = requested.split(/[\\/]+/).filter(Boolean);
+  if (parts.some((part) => part === "." || part === ".." || /\u0000/.test(part))) throw new Error("Đường dẫn thư mục không hợp lệ.");
+  const handleKey = workspaceEntryKey(handle.name).replace(/:$/, "");
+  const offsets = parts.flatMap((part, index) => workspaceEntryKey(part).replace(/:$/, "") === handleKey ? [index + 1] : []).reverse();
+  if (!handleKey) offsets.push(/^[a-z]:$/i.test(parts[0] ?? "") ? 1 : 0);
+  if (!/^(?:[a-z]:|[\\/])/i.test(requested)) offsets.push(0);
+  for (const offset of offsets) {
+    let target = handle;
+    const ancestors = [handle];
+    try {
+      for (const part of parts.slice(offset)) {
+        target = await target.getDirectoryHandle(part) as LocalDirectoryHandle;
+        ancestors.push(target);
+      }
+      for (const ancestor of ancestors.reverse()) if (await isBrowserWorkspaceRoot(ancestor)) return ancestor;
+      return await verifyBrowserWorkspace(target);
+    } catch { /* Another occurrence of GM Manager may identify the selected root. */ }
+  }
+  throw new Error("Không tìm thấy đường dẫn trong vị trí đã cấp quyền. Hãy chọn ổ đĩa hoặc thư mục chứa đúng đường dẫn này.");
 }
 
 const employeeNameKey = (name: string) => name.normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi");
@@ -500,6 +545,7 @@ const defaultDriveFolderUrl = "https://drive.google.com/drive/folders/1jY12yTvgh
 const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
+const localWorkspacePathStorageKey = "gm-manager-local-workspace-path-v1";
 const adminSessionStorageKey = "gm-manager-admin-session-v1";
 function isCurrentAdminSession(session: { token: string; scriptUrl: string } | null, scriptUrl: string) {
   if (!session?.token || session.scriptUrl !== scriptUrl.trim()) return false;
@@ -1845,6 +1891,8 @@ export default function Home() {
   const [localWorkspacePath, setLocalWorkspacePath] = useState("");
   const [choosingWorkspace, setChoosingWorkspace] = useState(false);
   const browserWorkspaceHandle = useRef<LocalDirectoryHandle | null>(null);
+  const workspaceLocationRevision = useRef(0);
+  const workspacePathEdited = useRef(false);
   const [employeeAuthBusy, setEmployeeAuthBusy] = useState(false);
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
   const [adminSession, setAdminSession] = useState<{ token: string; scriptUrl: string } | null>(null);
@@ -2057,6 +2105,7 @@ export default function Home() {
       const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
       if (savedPersonnel) setPersonnelByCategory(normalizePersonnelMap(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>));
       setLoggedInEmployeeEmail(String(window.localStorage.getItem(personnelSessionEmailKey) ?? "").trim().toLowerCase());
+      setLocalWorkspacePath(window.localStorage.getItem(localWorkspacePathStorageKey) || "");
       const savedAdminSession = JSON.parse(window.localStorage.getItem(adminSessionStorageKey) ?? "null");
       if (typeof savedAdminSession?.token === "string" && typeof savedAdminSession?.scriptUrl === "string") setAdminSession(savedAdminSession);
     } catch { /* A shared roster can still be loaded when local storage is unavailable. */ }
@@ -2399,6 +2448,8 @@ export default function Home() {
       return;
     }
     const query = new URLSearchParams(Object.entries(payload).map(([key, value]) => [key, String(value ?? "")]));
+    const workspacePath = localWorkspacePath.trim();
+    if (/^(?:[a-z]:(?:[\\/]|$)|[\\/])/i.test(workspacePath)) query.set("workspacePath", workspacePath);
     window.location.assign(`gmmanager://open-documents?${query}`);
     setNotice("Đang yêu cầu GM Manager mở thư mục trên máy. Nếu chưa có ứng dụng hỗ trợ, hãy cài/cập nhật bản PC.");
   };
@@ -4450,6 +4501,8 @@ export default function Home() {
     setPersonnelMenuId(null);
   };
   const selectLocalWorkspace = async () => {
+    const requestedPath = workspacePathEdited.current ? localWorkspacePath : "";
+    const revision = ++workspaceLocationRevision.current;
     setChoosingWorkspace(true);
     setEmployeeLoginError("");
     try {
@@ -4458,15 +4511,24 @@ export default function Home() {
         const result = await desktop.selectWorkspaceFolder();
         if (result.canceled) return;
         if (!result.ok) throw new Error(result.error || "Thư mục GM Manager không hợp lệ.");
-        setLocalWorkspacePath(result.path);
+        if (revision === workspaceLocationRevision.current) {
+          setLocalWorkspacePath(result.path);
+          workspacePathEdited.current = false;
+          try { window.localStorage.setItem(localWorkspacePathStorageKey, result.path); } catch { /* The native app also remembers this folder. */ }
+        }
         return;
       }
       const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "read"; id: string }) => Promise<LocalDirectoryHandle> }).showDirectoryPicker;
       if (!picker) throw new Error("Chọn thư mục cần Chrome, Edge hoặc bản cài GM Manager trên PC.");
-      const handle = await verifyBrowserWorkspace(await picker({ mode: "read", id: "gm-manager-root" }));
+      const selected = await picker({ mode: "read", id: "gm-manager-root" });
+      const handle = await browserWorkspaceAtPath(selected, requestedPath);
+      if (revision !== workspaceLocationRevision.current) return;
       browserWorkspaceHandle.current = handle;
       try { await storedWorkspaceDirectory(handle); } catch { /* This login can still use the selected handle. */ }
-      setLocalWorkspacePath(handle.name);
+      const displayPath = requestedPath.trim() || handle.name;
+      setLocalWorkspacePath(displayPath);
+      workspacePathEdited.current = false;
+      try { window.localStorage.setItem(localWorkspacePathStorageKey, displayPath); } catch { /* Optional display preference. */ }
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) setEmployeeLoginError(error instanceof Error ? error.message : "Không thể kiểm tra thư mục.");
     } finally { setChoosingWorkspace(false); }
@@ -4479,29 +4541,40 @@ export default function Home() {
       const result = await desktop.validateWorkspaceFolder(localWorkspacePath ? { path: localWorkspacePath } : {});
       if (!result.ok) throw new Error(result.error || "Hãy chọn thư mục GM Manager trước khi đăng nhập.");
       setLocalWorkspacePath(result.path);
+      workspacePathEdited.current = false;
+      try { window.localStorage.setItem(localWorkspacePathStorageKey, result.path); } catch { /* The native app also remembers this folder. */ }
       return;
     }
-    const handle = browserWorkspaceHandle.current || await storedWorkspaceDirectory();
-    if (!handle) throw new Error("Hãy chọn thư mục GM Manager trước khi đăng nhập.");
+    let handle = browserWorkspaceHandle.current || await storedWorkspaceDirectory();
+    if (!handle) {
+      const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "read"; id: string }) => Promise<LocalDirectoryHandle> }).showDirectoryPicker;
+      if (!picker) throw new Error("Trình duyệt cần bạn chọn ổ đĩa để cấp quyền đọc. Hãy dùng Chrome, Edge hoặc bản cài PC.");
+      handle = await picker({ mode: "read", id: "gm-manager-root" });
+    }
     let permission = await handle.queryPermission?.({ mode: "read" });
     if (permission !== "granted" && handle.requestPermission) permission = await handle.requestPermission({ mode: "read" });
     if (permission !== "granted") throw new Error("Cần cho phép đọc thư mục GM Manager đã chọn.");
-    browserWorkspaceHandle.current = await verifyBrowserWorkspace(handle);
-    setLocalWorkspacePath(handle.name);
+    const workspace = await browserWorkspaceAtPath(handle, localWorkspacePath);
+    browserWorkspaceHandle.current = workspace;
+    const displayPath = localWorkspacePath.trim() || workspace.name;
+    setLocalWorkspacePath(displayPath);
+    workspacePathEdited.current = false;
+    try { await storedWorkspaceDirectory(workspace); window.localStorage.setItem(localWorkspacePathStorageKey, displayPath); } catch { /* This session keeps the validated location in memory. */ }
   };
 
   useEffect(() => {
     if (!loginOpen || isMobileDevice()) return;
     let canceled = false;
+    const revision = workspaceLocationRevision.current;
     void (async () => {
       try {
         const desktop = desktopBridge();
         if (desktop?.validateWorkspaceFolder) {
           const result = await desktop.validateWorkspaceFolder();
-          if (!canceled && result.ok) setLocalWorkspacePath(result.path);
+          if (!canceled && revision === workspaceLocationRevision.current && result.ok) setLocalWorkspacePath(result.path);
         } else {
           const handle = await storedWorkspaceDirectory();
-          if (handle && !canceled) { browserWorkspaceHandle.current = handle; setLocalWorkspacePath(handle.name); }
+          if (handle && !canceled && revision === workspaceLocationRevision.current) { browserWorkspaceHandle.current = handle; setLocalWorkspacePath(window.localStorage.getItem(localWorkspacePathStorageKey) || handle.name); }
         }
       } catch { /* A fresh selection remains available. */ }
     })();
@@ -5347,7 +5420,7 @@ export default function Home() {
             <p className="dialog-intro">Dùng tên và mã do quản lý cấp trong danh sách Nhân lực.</p>
             <label>Tên nhân viên<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="Nhập đúng họ và tên" onChange={(event) => setEmployeeLoginEmail(event.target.value)} autoFocus required /></label>
             <label>Mã đăng nhập<input type="password" value={employeeLoginPassword} autoComplete="current-password" placeholder="Mã trong danh sách Nhân lực" onChange={(event) => setEmployeeLoginPassword(event.target.value)} required /></label>
-            {!isMobileDevice() && <label className="workspace-location-field">Vị trí GM Manager<div><input value={localWorkspacePath} readOnly placeholder="Chọn thư mục hoặc ổ chứa GM Manager" aria-label="Vị trí GM Manager" /><button type="button" onClick={() => void selectLocalWorkspace()} disabled={choosingWorkspace || employeeAuthBusy}>{choosingWorkspace ? "Đang kiểm tra…" : "Chọn thư mục"}</button></div><small>Thư mục phải có Khách hàng và Nhân lực. Dùng bản cài PC để mở trực tiếp trong Explorer/Finder.</small></label>}
+            {!isMobileDevice() && <label className="workspace-location-field">Vị trí GM Manager<div><input value={localWorkspacePath} onChange={(event) => { workspaceLocationRevision.current++; workspacePathEdited.current = true; setLocalWorkspacePath(event.target.value); setEmployeeLoginError(""); }} disabled={choosingWorkspace || employeeAuthBusy} placeholder={"Ví dụ: I:\\ hoặc I:\\Shared drives\\GM Manager\\GM Manager\\Khách hàng"} aria-label="Vị trí GM Manager" autoComplete="off" spellCheck={false} /><button type="button" onClick={() => void selectLocalWorkspace()} disabled={choosingWorkspace || employeeAuthBusy}>{choosingWorkspace ? "Đang tìm…" : "Chọn ổ / thư mục"}</button></div><small>Nhập đường dẫn hoặc chọn ổ để tìm GM Manager. Trên web, chọn ổ một lần để cấp quyền đọc; bản PC kiểm tra trực tiếp đường dẫn đã nhập.</small></label>}
             {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
             <div className="login-dialog__actions"><button className="add-button" type="submit" disabled={employeeAuthBusy || choosingWorkspace}>{employeeAuthBusy ? "Đang xác thực…" : "Đăng nhập"}</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
           </form>
