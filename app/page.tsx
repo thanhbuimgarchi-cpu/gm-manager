@@ -144,6 +144,7 @@ type WorkRecord = {
   id: string;
   name: string;
   houseId?: string;
+  driveFolderId?: string;
   customerShareToken?: string;
   projectId: string;
   createdAt: string;
@@ -1614,6 +1615,12 @@ function uniqueCustomerProjectId(baseId: string, records: Pick<WorkRecord, "proj
   return `${baseId}-${suffix}`;
 }
 
+function customerRecordsAfterDriveMutation(years: YearFolder[], target: CustomerLocation, changes?: Pick<WorkRecord, "name" | "houseId" | "driveFolderId">): YearFolder[] {
+  return years.map((year) => year.year !== target.year ? year : { ...year, months: year.months.map((month, index) => index + 1 !== target.month ? month : { ...month,
+    records: changes ? month.records.map((record) => record.projectId === target.record.projectId ? { ...record, ...changes, pendingDriveSync: false, cacheUpdatedAt: Date.now() } : record) : month.records.filter((record) => record.projectId !== target.record.projectId),
+  }) });
+}
+
 function compareOutstandingWorkNotes(left: WorkNote, right: WorkNote) {
   const priorityOrder: Record<WorkNotePriority, number> = { "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 };
   const priorityDifference = (priorityOrder[left.priority] ?? 2) - (priorityOrder[right.priority] ?? 2);
@@ -1824,7 +1831,11 @@ export default function Home() {
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
-  const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord } | null>(null);
+  const [protectedAction, setProtectedAction] = useState<{ type: "rename" | "delete"; record: WorkRecord; year: number; month: number } | null>(null);
+  const [customerMutationBusy, setCustomerMutationBusy] = useState(false);
+  const [customerMutationError, setCustomerMutationError] = useState("");
+  const customerMutationInFlight = useRef(false);
+  const customerMutationRevision = useRef(0);
   const [renameValue, setRenameValue] = useState("");
   const [renameHouseId, setRenameHouseId] = useState("");
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
@@ -1908,7 +1919,7 @@ export default function Home() {
   const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
-    if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig) return;
+    if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
     if (addOpen) setAddOpen(false);
     else if (customerMessageTaskDraft) setCustomerMessageTaskDraft(null);
     else if (driveConfigOpen) setDriveConfigOpen(false);
@@ -2459,6 +2470,8 @@ export default function Home() {
   };
 
   const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string; force?: boolean } = {}) => {
+    if (customerMutationInFlight.current) return false;
+    const mutationRevision = customerMutationRevision.current;
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) return false;
     const mode = options.mode ?? "index";
@@ -2484,6 +2497,7 @@ export default function Home() {
     if (!quietly) setIsLoadingDrive(true);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId, refresh: Boolean(options.force) });
+      if (mutationRevision !== customerMutationRevision.current || customerMutationInFlight.current) return false;
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       if (cacheAge) writeDriveCache(cacheKey, result.years);
       if (mode === "index") {
@@ -2547,12 +2561,15 @@ export default function Home() {
   }, [driveScriptUrl, isCustomerPortal, selectedYear, selectedMonth]);
 
   const loadWorkspaceCache = async () => {
+    if (customerMutationInFlight.current) return;
+    const mutationRevision = customerMutationRevision.current;
     if (!workspaceStorageReady || isCustomerPortal || !driveScriptUrl.trim()) return;
     const requestKey = "shared-workspace-cache";
     if (driveRequestsInFlight.current.has(requestKey) || workspaceSyncInFlight.current || workspaceSyncPending.current) return;
     driveRequestsInFlight.current.add(requestKey);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
+      if (mutationRevision !== customerMutationRevision.current || customerMutationInFlight.current) return;
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
       const mergedYears = mergeSharedWorkspaceYears(result.years, yearsRef.current, driveIndexProjectIds.current);
       const mergedHasRecords = mergedYears.some((year) => year.months?.some((month) => month.records?.length));
@@ -3448,16 +3465,6 @@ export default function Home() {
     }
   };
 
-  const deleteRecord = (id: string) => {
-    const deletedRecord = activeMonthFolder?.records.find((record) => record.id === id);
-    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : { ...monthFolder, records: monthFolder.records.filter((record) => record.id !== id) }),
-    });
-    persist(nextYears);
-    if (deletedRecord?.projectId === selectedCustomerProjectId) returnToCustomerSearch();
-    setNotice("Đã xóa dữ liệu — danh sách được cập nhật ngay");
-  };
 
   const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
   const selectedRecord = activeCustomerRecord;
@@ -3637,60 +3644,83 @@ export default function Home() {
     commitWarrantyProgressRows(nextRows);
   };
 
-  const startProtectedAction = (type: "rename" | "delete", record: WorkRecord) => {
+  const startProtectedAction = (type: "rename" | "delete", record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+    if (customerMutationInFlight.current) return;
     setOpenMenuId(null);
-    setProtectedAction({ type, record });
+    setCustomerMutationError("");
+    setProtectedAction({ type, record, year, month });
     if (type === "rename") {
-      setRenameValue(record.name === record.projectId || isPlaceholderCustomerName(record.name) ? "" : record.name);
-      setRenameHouseId(record.houseId ?? "");
+      setRenameValue(record.name === record.projectId || record.name === record.houseId || isPlaceholderCustomerName(record.name) ? "" : record.name);
+      setRenameHouseId(record.houseId || record.projectId);
     }
   };
 
-  const confirmDeleteRecord = () => {
-    if (!protectedAction || protectedAction.type !== "delete") return;
-    deleteRecord(protectedAction.record.id);
-    setNotice(`Đã xóa ${customerDisplayName(protectedAction.record)}`);
-    setProtectedAction(null);
+  const clearCustomerDirectoryCache = (year: number, month: number) => {
+    try {
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith(`${driveCachePrefix}workspace:`) && key.includes(`:${year}:${month}:`)) window.localStorage.removeItem(key);
+      }
+    } catch { /* A fresh network index still supersedes this browser's cache. */ }
+    driveIndexFingerprints.current.delete(`${year}-${month}`);
   };
 
-  const renameRecord = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!protectedAction) return;
+  const runCustomerDriveMutation = async (type: "rename" | "delete") => {
+    if (!protectedAction || protectedAction.type !== type || customerMutationInFlight.current) return;
+    const { record, year, month } = protectedAction;
     const nextHouseId = renameHouseId.trim();
-    if (!nextHouseId) {
-      setNotice("Hãy nhập mã nhà trước khi lưu thay đổi.");
+    if (type === "rename" && (!nextHouseId || /[\\/:*?"<>|\u0000-\u001f]/.test(nextHouseId) || [".", ".."].includes(nextHouseId))) {
+      setCustomerMutationError("Tên thư mục / mã nhà không hợp lệ.");
       return;
     }
-    const previousRecord = protectedAction.record;
-    const nextName = renameValue.trim() || (previousRecord.name && !isPlaceholderCustomerName(previousRecord.name) ? previousRecord.name : previousRecord.projectId);
-    const updatedRecord = { ...previousRecord, name: nextName, houseId: nextHouseId, cacheUpdatedAt: Date.now() };
-    const nextYears = years.map((yearFolder) => yearFolder.year !== selectedYear ? yearFolder : {
-      ...yearFolder,
-      months: yearFolder.months.map((monthFolder, index) => index !== selectedMonth - 1 ? monthFolder : {
-        ...monthFolder,
-        records: monthFolder.records.map((record) => record.id === protectedAction.record.id ? updatedRecord : record),
-      }),
-    });
-    persist(nextYears);
-    setProtectedAction(null);
-    setNotice("Đã lưu tên và mã nhà trên thiết bị.");
-    if (driveScriptUrl.trim() && previousRecord.houseId?.trim() !== nextHouseId) {
-      try {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-          action: "rename-customer-folder",
-          year: selectedYear,
-          month: selectedMonth,
-          projectId: previousRecord.projectId,
-          oldHouseId: previousRecord.houseId,
-          houseId: nextHouseId,
-        });
-        if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đổi tên thư mục Drive.");
-        setNotice("Đã lưu tên và mã nhà, đồng thời cập nhật thư mục Drive.");
-      } catch (error) {
-        setNotice(`Đã lưu mã nhà trên thiết bị nhưng chưa cập nhật Drive: ${error instanceof Error ? error.message : "lỗi kết nối"}`);
+    customerMutationInFlight.current = true;
+    customerMutationRevision.current += 1;
+    setCustomerMutationBusy(true);
+    setCustomerMutationError("");
+    try {
+      const nextName = renameValue.trim() || (record.name === record.projectId || record.name === record.houseId || isPlaceholderCustomerName(record.name) ? nextHouseId : record.name);
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; deleted?: boolean; trashed?: boolean; folderId?: string; folderName?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+        action: type === "delete" ? "delete-customer-folder" : "rename-customer-folder",
+        mutationId: `customer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        year, month, projectId: record.projectId, folderId: record.driveFolderId,
+        oldHouseId: record.houseId,
+        houseId: type === "delete" ? record.houseId : nextHouseId,
+        ...(type === "rename" ? { name: nextName } : {}),
+      });
+      if (!response.ok || !result.ok || (type === "delete" && (!result.deleted || !result.trashed))) throw new Error(result.error || "Drive chưa xác nhận thao tác. Dữ liệu trên web được giữ nguyên.");
+      const nextYears = customerRecordsAfterDriveMutation(yearsRef.current, { record, year, month }, type === "rename" ? { houseId: nextHouseId, name: nextName, driveFolderId: result.folderId || record.driveFolderId } : undefined);
+      const indexKey = `${year}-${month}`;
+      const indexed = driveIndexProjectIds.current.get(indexKey);
+      if (indexed) {
+        indexed.delete(record.houseId || record.projectId);
+        if (type === "delete") indexed.delete(record.projectId);
+        else { indexed.add(nextHouseId); indexed.add(record.projectId); }
       }
+      clearCustomerDirectoryCache(year, month);
+      yearsRef.current = nextYears;
+      persist(nextYears);
+      const matchesTarget = (item: { year: number; month: number; projectId: string }) => item.year === year && item.month === month && item.projectId === record.projectId;
+      if (type === "delete") {
+        const notesKey = `work-notes-draft-v1:${year}-${month}-${record.projectId}`;
+        removeDriveCache(notesKey);
+        pendingWorkNotesSync.current.delete(notesKey);
+        setAssignedWorkNotes((current) => current.filter((item) => !matchesTarget(item)));
+        setAssignedDesignTasks((current) => current.filter((item) => !matchesTarget(item)));
+        setCustomerMessages((current) => current.filter((item) => !matchesTarget(item)));
+        setWorkNotesCacheRevision((revision) => revision + 1);
+        if (record.projectId === selectedCustomerProjectId && year === selectedYear && month === selectedMonth) returnToCustomerSearch();
+      }
+      setProtectedAction(null);
+      setNotice(type === "delete" ? `Đã chuyển thư mục ${record.houseId || record.projectId} vào thùng rác Drive. Có thể khôi phục trong Drive.` : `Đã đổi tên thư mục Drive thành ${nextHouseId}.`);
+    } catch (error) {
+      setCustomerMutationError(error instanceof Error ? error.message : "Không thể cập nhật Drive. Hồ sơ trên web chưa thay đổi.");
+    } finally {
+      customerMutationRevision.current += 1;
+      customerMutationInFlight.current = false;
+      setCustomerMutationBusy(false);
     }
   };
+  const confirmDeleteRecord = () => { void runCustomerDriveMutation("delete"); };
+  const renameRecord = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void runCustomerDriveMutation("rename"); };
 
   const updateRecordDetail = (key: string, value: string) => {
     if (!selectedRecord) return;
@@ -4976,12 +5006,10 @@ export default function Home() {
 
               <div className="customer-search-results" aria-live="polite">
                 {customerSearchResults.length ? customerSearchResults.map((location) => (
-                  <button className="customer-result" key={`${location.year}-${location.month}-${location.record.id}`} onClick={() => selectCustomer(location)}>
+                  <div className="customer-result-row" key={`${location.year}-${location.month}-${location.record.id}`}><button className="customer-result" onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder"><WorkspaceIcon name="folder" /></span>
                     <span className="customer-result__identity"><b>{customerDisplayName(location.record)}</b>{location.record.houseId && <small>{location.record.houseId}</small>}</span>
-                    <span className="customer-result__date">T{location.month} / {location.year}</span>
-                    <span className="customer-result__arrow">→</span>
-                  </button>
+                  </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button><button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button></div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
                 )) : (
                   <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
                 )}
@@ -5271,23 +5299,26 @@ export default function Home() {
       )}
 
       {protectedAction && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setProtectedAction(null)}>
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => !customerMutationBusy && setProtectedAction(null)}>
           {protectedAction.type === "delete" ? (
             <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>
-              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng" disabled={customerMutationBusy}>×</button>
               <p className="eyebrow">{customerDisplayName(protectedAction.record)}</p>
               <h2>Xóa hồ sơ?</h2>
-              <p>Thao tác này sẽ xóa hồ sơ khỏi danh sách hiện tại.</p>
-              <div className="dialog-actions"><button type="button" onClick={() => setProtectedAction(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDeleteRecord}>Xóa hồ sơ</button></div>
+              <p>Chuyển toàn bộ thư mục <b>{protectedAction.record.houseId || protectedAction.record.projectId}</b> trong Khách hàng / {protectedAction.year} / T{protectedAction.month} và các tài liệu bên trong vào thùng rác Google Drive. Bạn có thể khôi phục trong Drive.</p>
+              {customerMutationError && <p className="customer-portal__error" role="alert">{customerMutationError}</p>}
+              <div className="dialog-actions"><button type="button" onClick={() => setProtectedAction(null)} disabled={customerMutationBusy}>Hủy</button><button className="add-button" type="button" onClick={confirmDeleteRecord} disabled={customerMutationBusy}>{customerMutationBusy ? "Đang xóa trên Drive…" : "Delete trên Drive"}</button></div>
             </div>
           ) : (
             <form className="security-dialog" onSubmit={renameRecord} onMouseDown={(event) => event.stopPropagation()}>
-              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng">×</button>
+              <button type="button" className="dialog-close" onClick={() => setProtectedAction(null)} aria-label="Đóng" disabled={customerMutationBusy}>×</button>
               <p className="eyebrow">{customerDisplayName(protectedAction.record)}</p>
-              <h2>Rename hồ sơ</h2>
-              <label>Tên khách hàng<input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} autoFocus /></label>
-              <label>Mã nhà <span className="field-code">(dùng làm tên thư mục Drive)</span><input value={renameHouseId} onChange={(event) => setRenameHouseId(event.target.value)} required placeholder="Ví dụ: HP-587" /></label>
-              <button className="add-button" type="submit">Lưu thay đổi</button>
+              <h2>Rename thư mục Drive</h2>
+              <p>Đổi tên thư mục trong Khách hàng / {protectedAction.year} / T{protectedAction.month}. Tài liệu bên trong được giữ nguyên.</p>
+              <label>Tên thư mục Drive / Mã nhà<input value={renameHouseId} onChange={(event) => { setRenameHouseId(event.target.value); setCustomerMutationError(""); }} required maxLength={160} placeholder="Ví dụ: HP-587" autoFocus disabled={customerMutationBusy} /></label>
+              <label>Tên khách hàng hiển thị <span className="field-code">(tùy chọn)</span><input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} disabled={customerMutationBusy} /></label>
+              {customerMutationError && <p className="customer-portal__error" role="alert">{customerMutationError}</p>}
+              <button className="add-button" type="submit" disabled={customerMutationBusy}>{customerMutationBusy ? "Đang đổi tên trên Drive…" : "Rename trên Drive"}</button>
             </form>
           )}
         </div>

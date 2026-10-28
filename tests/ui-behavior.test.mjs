@@ -7,7 +7,7 @@ import { transform } from "esbuild";
 // Execute the real frontend helpers without mounting React or contacting the
 // production backend. This protects data behavior during interface changes.
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl };`, {
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
@@ -98,4 +98,19 @@ test("mobile document opening uses the correct PDF/Office MIME with a browser fa
     assert.equal(helpers.mobileFileOpenUrl(file,"iPhone"),file.downloadUrl);
   }
   assert.equal(helpers.mobileFileOpenUrl({name:"bad.pdf",downloadUrl:"javascript:alert(1)",mimeType:"application/pdf"},"Android"),"");
+});
+
+test("confirmed customer mutations affect only the selected project and month", () => {
+  const target={record:{id:"one",projectId:"project-one",houseId:"DV-75",name:"Quỳnh"},year:2026,month:8};
+  const other={id:"two",projectId:"project-two",houseId:"TLA-871",name:"Tùng"};
+  const years=[{year:2026,months:Array.from({length:12},(_,index)=>({label:`T${index+1}`,records:index===7?[target.record,other]:index===8?[target.record]:[]}))}];
+  const renamed=helpers.customerRecordsAfterDriveMutation(years,target,{name:"Quỳnh",houseId:"DV-76",driveFolderId:"drive-folder"});
+  assert.equal(renamed[0].months[7].records[0].houseId,"DV-76");
+  assert.equal(renamed[0].months[7].records[0].projectId,"project-one");
+  assert.equal(renamed[0].months[8].records[0].houseId,"DV-75");
+  const removed=helpers.customerRecordsAfterDriveMutation(years,target);
+  assert.equal(removed[0].months[7].records.length,1);
+  assert.equal(removed[0].months[7].records[0].projectId,"project-two");
+  assert.equal(removed[0].months[8].records.length,1);
+  assert.equal(years[0].months[7].records.length,2);
 });

@@ -106,6 +106,24 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .customer-period > span { color: #7c8899; font-size: 11px; }
 .customer-period > span b { color: #526178; }
 .customer-search-results { min-height: 0; margin-top: 16px; border-color: var(--line); border-radius: var(--gm-radius); box-shadow: var(--gm-shadow); }
+.customer-search-results { overflow: visible; }
+.customer-result-row { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 44px auto 36px; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid #edf0f5; }
+.customer-result-row:last-child { border-bottom: 0; }
+.customer-result-row > .customer-result { min-width: 0; grid-template-columns: 44px minmax(0, 1fr); height: 100%; border: 0; border-radius: 0; }
+.customer-result-row:first-child > .customer-result { border-top-left-radius: var(--gm-radius); }
+.customer-result-row:last-child > .customer-result { border-bottom-left-radius: var(--gm-radius); }
+.customer-result-actions { display: flex; position: relative; align-items: center; justify-content: center; padding: 0; }
+.customer-result-open { padding: 0; border: 0; background: transparent; }
+.customer-result-open:hover { color: var(--accent); background: var(--gm-red-soft); }
+.customer-result-more { min-width: 32px; min-height: 34px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #7e8a9c; font-size: 22px; }
+.customer-result-more:hover, .customer-result-more[aria-expanded="true"] { border-color: #e3e8ef; background: #f4f6fa; color: var(--accent); }
+.customer-result-menu { position: absolute; z-index: 65; top: calc(50% + 21px); right: 10px; min-width: 138px; }
+.customer-result-menu > button { min-height: 38px; font-size: 13px; }
+.customer-result-row:last-child .customer-result-menu { top: auto; bottom: calc(50% + 21px); }
+@media (max-width: 480px) {
+  .customer-result-row { grid-template-columns: minmax(0, 1fr) 36px 26px; gap: 4px; padding-right: 8px; }
+  .customer-result-row > .customer-result { grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding-right: 4px; }
+}
 .customer-result { grid-template-columns: 44px minmax(0, 1fr) auto 22px; gap: 14px; min-height: 86px; padding: 16px 20px; border-bottom-color: #edf0f5; }
 .customer-result:hover { background: #f9fafc; }
 .customer-result__folder { width: 42px; height: 42px; border-radius: 11px; background: #fcf0f2; color: #aa4354; font-size: 20px; }

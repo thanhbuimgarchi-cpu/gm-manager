@@ -128,6 +128,7 @@ function customerFolderForPayload_(payload, createMissing) {
   const projectId = String(payload.projectId || "").trim();
   const folderKey = customerFolderKey_(payload);
   if (!folderKey) return null;
+  if (createMissing && isCustomerDriveRecordDeleted_(payload)) throw new Error("Hồ sơ đã được xóa trên Drive. Hãy tạo hồ sơ mới nếu cần dùng lại mã nhà.");
   let folder = getCustomerFolder_(year, month, folderKey, false);
   // Existing GM... folders remain readable after a house code is added to a
   // cached record. New writes can migrate that legacy folder by record.
@@ -141,6 +142,7 @@ function customerFolderForRecord_(record, year, month, createMissing) {
   const houseId = String(record && record.houseId || "").trim();
   const folderKey = customerFolderKey_(record);
   if (!folderKey) return null;
+  if (createMissing && isCustomerDriveRecordDeleted_({ year: year, month: month, projectId: projectId, houseId: houseId })) throw new Error("Hồ sơ đã được xóa trên Drive. Hãy tạo hồ sơ mới nếu cần dùng lại mã nhà.");
   let folder = getCustomerFolder_(year, month, folderKey, false);
   if (!folder && houseId && projectId && houseId !== projectId) {
     const legacy = getCustomerFolder_(year, month, projectId, false);
@@ -185,6 +187,7 @@ function createCustomerFolder_(payload) {
   folder = getOrCreateFolder_(monthFolder, houseId || projectId);
   if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
   ensureProjectFolders_(folder, false);
+  clearCustomerDriveDeletion_({ year: year, month: month, projectId: projectId, houseId: houseId });
   cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + folderKey, folder);
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
 }
@@ -194,7 +197,160 @@ function createCustomerFolder_(payload) {
  * The internal projectId is retained in the cache and is used as a fallback
  * for folders created before house codes were introduced.
  */
+function customerMutationMonthFolder_(payload) {
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || month % 1) throw new Error("Tháng hoặc năm của hồ sơ không hợp lệ.");
+  const uniqueChild = function(parent, name) {
+    if (!parent) return null;
+    const matches = findFolders_(parent, name).filter(function(folder) { return !folder.isTrashed || !folder.isTrashed(); });
+    if (matches.length > 1) throw new Error("Có nhiều thư mục trùng tên " + name + " trên Drive. Hãy xử lý thư mục trùng trước khi đổi tên hoặc xóa.");
+    return matches[0] || null;
+  };
+  const customers = uniqueChild(rootFolder_(), CUSTOMERS_FOLDER_NAME);
+  const yearFolder = uniqueChild(customers, String(year));
+  const monthFolder = uniqueChild(yearFolder, "T" + month);
+  if (!monthFolder) throw new Error("Không tìm thấy thư mục tháng của hồ sơ trên Drive.");
+  return monthFolder;
+}
+
+function existingCustomerMutationFolder_(payload, monthFolder) {
+  const names = [payload.oldHouseId, payload.houseId, payload.projectId].map(function(value) { return String(value || "").trim(); }).filter(Boolean);
+  if (!names.length || names.some(function(name) { return !validCustomerFolderKey_(name); })) throw new Error("Mã nhà hoặc mã hồ sơ không hợp lệ.");
+  const wanted = names.map(normalizeDriveName_);
+  const requestedId = String(payload.folderId || "").trim();
+  const matches = [];
+  const children = monthFolder.getFolders();
+  while (children.hasNext()) {
+    const child = children.next();
+    if (child.isTrashed && child.isTrashed()) continue;
+    if (wanted.indexOf(normalizeDriveName_(child.getName())) < 0) continue;
+    if (requestedId && child.getId() !== requestedId) continue;
+    matches.push(child);
+  }
+  if (!matches.length) throw new Error("Không tìm thấy đúng thư mục hồ sơ cũ trên Drive. Hãy nạp lại danh sách.");
+  if (matches.length !== 1) throw new Error("Có nhiều thư mục khớp hồ sơ này trên Drive. Chưa thể xác định an toàn thư mục cần đổi tên hoặc xóa.");
+  return matches[0];
+}
+
+function customerDriveMutationsKey_() {
+  return "gmcrm-customer-drive-mutations-" + configuredRootFolderId_();
+}
+
+function customerDriveMutations_() {
+  try { const value = readPropertyJson_(customerDriveMutationsKey_()); return Array.isArray(value) ? value : []; } catch (error) { return []; }
+}
+
+function customerMutationMatches_(record, mutation) {
+  const aliases = mutation.aliases || [];
+  if (record.driveFolderId && mutation.folderId) return String(record.driveFolderId) === String(mutation.folderId);
+  const projectId = normalizeDriveName_(record.projectId);
+  return projectId ? aliases.indexOf(projectId) >= 0 : aliases.indexOf(normalizeDriveName_(record.houseId)) >= 0;
+}
+
+function isCustomerDriveRecordDeleted_(payload) {
+  return customerDriveMutations_().some(function(mutation) {
+    return mutation.deleted && Number(mutation.year) === Number(payload.year) && Number(mutation.month) === Number(payload.month) && customerMutationMatches_(payload, mutation);
+  });
+}
+
+function applyCustomerDriveMutations_(years) {
+  const mutations = customerDriveMutations_();
+  return (Array.isArray(years) ? years : []).map(function(year) {
+    return { ...year, months: (Array.isArray(year.months) ? year.months : []).map(function(month, index) {
+      const monthNumber = /^T(\d{1,2})$/.exec(String(month.label || ""));
+      const selected = mutations.filter(function(mutation) { return Number(mutation.year) === Number(year.year) && Number(mutation.month) === (monthNumber ? Number(monthNumber[1]) : index + 1); });
+      const records = (Array.isArray(month.records) ? month.records : []).reduce(function(result, record) {
+        const mutation = selected.find(function(item) { return customerMutationMatches_(record, item); });
+        if (mutation && mutation.deleted) return result;
+        if (!mutation) { result.push(record); return result; }
+        const name = mutation.name || (mutation.aliases.indexOf(normalizeDriveName_(record.name)) >= 0 ? mutation.houseId : record.name);
+        result.push({ ...record, projectId: mutation.projectId, houseId: mutation.houseId, name: name, cacheUpdatedAt: Math.max(Number(record.cacheUpdatedAt || 0), Number(mutation.updatedAt)) });
+        return result;
+      }, []);
+      return { ...month, records: records };
+    }) };
+  });
+}
+
+function saveCustomerDriveMutation_(payload, folder, deleted) {
+  const existing = customerDriveMutations_();
+  const current = existing.find(function(item) { return Number(item.year) === Number(payload.year) && Number(item.month) === Number(payload.month) && item.projectId === String(payload.projectId); });
+  const aliases = [payload.projectId, payload.oldHouseId, payload.houseId, folder.getName()].concat(current && current.aliases || []).map(normalizeDriveName_).filter(Boolean);
+  const mutation = { year: Number(payload.year), month: Number(payload.month), projectId: String(payload.projectId || "").trim(), houseId: String(payload.houseId || folder.getName()).trim(), folderId: folder.getId(), aliases: Array.from(new Set(aliases)), deleted: Boolean(deleted), updatedAt: Date.now() };
+  if (Object.prototype.hasOwnProperty.call(payload, "name")) mutation.name = String(payload.name || "").trim();
+  const next = existing.filter(function(item) { return !(Number(item.year) === mutation.year && Number(item.month) === mutation.month && item.projectId === mutation.projectId); });
+  next.push(mutation);
+  writePropertyJson_(customerDriveMutationsKey_(), next);
+  const stored = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
+  if (stored && Array.isArray(stored.years)) writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { ...stored, updatedAt: mutation.updatedAt, years: applyCustomerDriveMutations_(stored.years) });
+  PropertiesService.getScriptProperties().setProperty("gmcrm-customer-tree-revision-" + configuredRootFolderId_(), String(mutation.updatedAt) + "-" + Math.random().toString(36).slice(2, 7));
+  return mutation;
+}
+
+function clearCustomerDriveDeletion_(payload) {
+  const previous = customerDriveMutations_();
+  const houseKey = normalizeDriveName_(payload.houseId || payload.projectId);
+  const next = previous.filter(function(mutation) { return !(mutation.deleted && Number(mutation.year) === Number(payload.year) && Number(mutation.month) === Number(payload.month) && (customerMutationMatches_(payload, mutation) || normalizeDriveName_(mutation.houseId) === houseKey)); }).map(function(mutation) {
+    if (Number(mutation.year) !== Number(payload.year) || Number(mutation.month) !== Number(payload.month) || normalizeDriveName_(mutation.houseId) === houseKey || mutation.projectId === payload.projectId) return mutation;
+    return { ...mutation, aliases: (mutation.aliases || []).filter(function(alias) { return alias !== houseKey; }) };
+  });
+  if (JSON.stringify(next) !== JSON.stringify(previous)) writePropertyJson_(customerDriveMutationsKey_(), next);
+}
+
+function customerMutationRequest_(payload, action, completedResult) {
+  const id = String(payload.mutationId || "").trim();
+  if (!id) return null;
+  if (!/^[A-Za-z0-9_-]{8,160}$/.test(id)) throw new Error("Mã yêu cầu thay đổi hồ sơ không hợp lệ.");
+  const key = "gmcrm-customer-mutation-requests-" + configuredRootFolderId_();
+  const stored = readPropertyJson_(key);
+  const requests = Array.isArray(stored) ? stored : [];
+  const signature = JSON.stringify([action, Number(payload.year), Number(payload.month), String(payload.projectId || "").trim(), String(payload.oldHouseId || "").trim(), String(payload.houseId || "").trim(), String(payload.folderId || "").trim(), String(payload.name || "").trim()]);
+  const previous = requests.find(function(request) { return request.id === id; });
+  if (previous) {
+    if (previous.signature !== signature) throw new Error("Mã yêu cầu đã được dùng cho thao tác hoặc hồ sơ khác. Hãy thử lại bằng yêu cầu mới.");
+    return { ...previous.result, repeated: true };
+  }
+  if (completedResult) {
+    requests.push({ id: id, signature: signature, result: completedResult, completedAt: Date.now() });
+    writePropertyJson_(key, requests.slice(-100));
+  }
+  return null;
+}
+
+function deleteCustomerFolder_(payload) {
+  const repeated = customerMutationRequest_(payload, "delete");
+  if (repeated) return repeated;
+  if (!String(payload.projectId || "").trim()) throw new Error("Thiếu mã hồ sơ cần xóa.");
+  const prior = customerDriveMutations_().find(function(mutation) { return mutation.deleted && Number(mutation.year) === Number(payload.year) && Number(mutation.month) === Number(payload.month) && mutation.projectId === String(payload.projectId).trim() && (!payload.folderId || payload.folderId === mutation.folderId); });
+  if (prior) {
+    try {
+      const removed = DriveApp.getFolderById(prior.folderId);
+      if (removed.isTrashed && removed.isTrashed()) {
+        const result = { ok: true, deleted: true, trashed: true, alreadyDeleted: true, folderId: prior.folderId, year: prior.year, month: prior.month, projectId: prior.projectId, houseId: prior.houseId };
+        customerMutationRequest_(payload, "delete", result);
+        return result;
+      }
+    } catch (error) { /* Missing Drive permission is not proof that the folder was deleted. */ }
+  }
+  const monthFolder = customerMutationMonthFolder_(payload);
+  const folder = existingCustomerMutationFolder_(payload, monthFolder);
+  const folderId = folder.getId();
+  const folderName = folder.getName();
+  folder.setTrashed(true);
+  saveCustomerDriveMutation_(payload, folder, true);
+  const details = { year: Number(payload.year), month: Number(payload.month), projectId: String(payload.projectId).trim() };
+  clearPropertyJson_(workNotesPropertyKey_(details));
+  const notes = readPropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY);
+  if (Array.isArray(notes)) writePropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY, notes.filter(function(note) { return !(Number(note.year) === details.year && Number(note.month) === details.month && (String(note.projectId) === details.projectId || normalizeDriveName_(note.houseId) === normalizeDriveName_(folderName))); }));
+  const result = { ok: true, deleted: true, trashed: true, folderId: folderId, folderName: folderName, year: details.year, month: details.month, projectId: details.projectId, houseId: String(payload.houseId || folderName) };
+  customerMutationRequest_(payload, "delete", result);
+  return result;
+}
+
 function renameCustomerFolder_(payload) {
+  const repeated = customerMutationRequest_(payload, "rename");
+  if (repeated) return repeated;
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
@@ -204,29 +360,27 @@ function renameCustomerFolder_(payload) {
     throw new Error("Thiếu thông tin mã nhà hợp lệ để lưu thay đổi.");
   }
 
-  const root = rootFolder_();
-  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
-  const yearFolder = customers && findFolder_(customers, String(year));
-  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
-  if (!monthFolder) throw new Error("Không tìm thấy thư mục tháng của hồ sơ trên Drive.");
-
-  // Prefer the previous user-facing code, then the internal project id for
-  // older folders, and finally the new code for an idempotent retry.
-  let folder = oldHouseId ? findFolder_(monthFolder, oldHouseId) : null;
-  if (!folder) folder = findFolder_(monthFolder, projectId);
-  if (!folder) folder = findFolder_(monthFolder, houseId);
-  if (!folder) throw new Error("Không tìm thấy thư mục hồ sơ cũ trên Drive.");
-
-  const duplicate = findFolder_(monthFolder, houseId);
-  if (duplicate && duplicate.getId() !== folder.getId()) {
+  const monthFolder = customerMutationMonthFolder_(payload);
+  let folder;
+  try { folder = existingCustomerMutationFolder_({ ...payload, houseId: oldHouseId || projectId }, monthFolder); }
+  catch (error) {
+    const prior = customerDriveMutations_().find(function(mutation) { return !mutation.deleted && Number(mutation.year) === year && Number(mutation.month) === month && mutation.projectId === projectId && normalizeDriveName_(mutation.houseId) === normalizeDriveName_(houseId); });
+    if (!prior || String(error.message || "").indexOf("Không tìm thấy đúng") !== 0) throw error;
+    folder = existingCustomerMutationFolder_({ projectId: projectId, houseId: houseId, folderId: prior.folderId }, monthFolder);
+  }
+  const duplicate = findFolders_(monthFolder, houseId).some(function(item) { return item.getId() !== folder.getId(); });
+  if (duplicate) {
     throw new Error("Mã nhà đã tồn tại trong cùng tháng. Hãy chọn mã khác.");
   }
   if (folder.getName() !== houseId) folder.setName(houseId);
+  saveCustomerDriveMutation_(payload, folder, false);
   cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + houseId, folder);
   if (oldHouseId && oldHouseId !== houseId) {
     try { CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-customer-folder-" + year + "-" + month + "-" + oldHouseId)); } catch (error) { /* Cache is optional. */ }
   }
-  return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
+  const result = { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
+  customerMutationRequest_(payload, "rename", result);
+  return result;
 }
 
 function doPost(event) {
@@ -280,6 +434,7 @@ function doPost(event) {
       if (payload.action === "set-drive-root") return json_(setDriveRootFolder_(payload));
       if (payload.action === "create-customer-folder") return json_(createCustomerFolder_(payload));
       if (payload.action === "rename-customer-folder") return json_(renameCustomerFolder_(payload));
+      if (payload.action === "delete-customer-folder") return json_(deleteCustomerFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
       if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
@@ -468,7 +623,9 @@ function splitTranscript_(text) {
 }
 
 function driveScopedCacheKey_(key) {
-  return "gmcrm-root-" + configuredRootFolderId_() + "-" + key;
+  const rootId = configuredRootFolderId_();
+  const revision = PropertiesService.getScriptProperties().getProperty("gmcrm-customer-tree-revision-" + rootId) || "";
+  return "gmcrm-root-" + rootId + (revision ? "-r" + revision : "") + "-" + key;
 }
 
 function readCachedJson_(key) {
@@ -660,6 +817,7 @@ function fastCustomerIndexFromFolder_(folderName, customerFolder) {
   }
   return {
     id: "drive-" + folderName,
+    driveFolderId: customerFolder && customerFolder.getId ? customerFolder.getId() : "",
     name: "",
     houseId: houseId,
     projectId: folderName,
@@ -719,6 +877,7 @@ function loadCustomerProgress_(customers, payload) {
     month: month,
     record: {
       projectId: projectId,
+      driveFolderId: customerFolder.getId(),
       houseId: String(payload.houseId || ""),
       designProgress: readDesignProgress_(customerFolder, projectId, "architecture"),
       interiorDesignProgress: readDesignProgress_(customerFolder, projectId, "interior"),
@@ -731,7 +890,10 @@ function loadCustomerProgress_(customers, payload) {
 
 function customerIndexFromFolder_(customerFolder, projectId) {
   const workbook = latestCustomerWorkbook_(customerFolder, projectId);
-  return workbook ? customerIndexFromWorkbook_(workbook, projectId) : null;
+  if (!workbook) return null;
+  const record = customerIndexFromWorkbook_(workbook, projectId);
+  record.driveFolderId = customerFolder.getId();
+  return record;
 }
 
 function customerIndexFromWorkbook_(file, projectId) {
@@ -953,6 +1115,7 @@ function recordFromWorkbook_(file, projectId, customerFolder, includeProgress) {
   const createdAt = normalizeExcelDate_(metadata.createdAt) || (dateMatch ? dateMatch[1] + "/" + dateMatch[2] + "/" + dateMatch[3] : "");
   const record = {
     id: "drive-" + projectId,
+    driveFolderId: customerFolder && customerFolder.getId ? customerFolder.getId() : "",
     name: metadata.name || details.HVT || metadata.houseId || projectId,
     houseId: metadata.houseId || "",
     customerShareToken: metadata.customerShareToken || "",
@@ -1537,7 +1700,7 @@ function loadWorkspaceCache_() {
   return {
     ok: true,
     updatedAt: stored && Number(stored.updatedAt || 0) || 0,
-    years: stored && Array.isArray(stored.years) ? stored.years : [],
+    years: stored && Array.isArray(stored.years) ? applyCustomerDriveMutations_(stored.years) : [],
   };
 }
 
@@ -1547,7 +1710,7 @@ function saveWorkspaceCache_(payload) {
   if (current && Number(current.updatedAt || 0) > incomingUpdatedAt) {
     return { ok: true, updatedAt: Number(current.updatedAt || 0), years: Array.isArray(current.years) ? current.years : [], ignored: true };
   }
-  const years = Array.isArray(payload.years) ? payload.years : [];
+  const years = applyCustomerDriveMutations_(Array.isArray(payload.years) ? payload.years : []);
   writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { version: 1, updatedAt: incomingUpdatedAt, years: years });
   return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
 }
@@ -1653,7 +1816,7 @@ function syncActiveWorkNotes_(details, notes, payload) {
 function loadAssignedWorkNotes_(payload) {
   const email = workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const activeNotes = readActiveWorkNotes_().filter(function(note) { return !note.actualDate; });
+  const activeNotes = readActiveWorkNotes_().filter(function(note) { return !note.actualDate && !isCustomerDriveRecordDeleted_(note); });
   // The built-in manager account needs an overview across every customer,
   // while each employee continues to receive only work assigned to them.
   if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
@@ -1667,6 +1830,7 @@ function loadAssignedWorkNotes_(payload) {
 
 function loadWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
+  if (isCustomerDriveRecordDeleted_(details)) return { ok: true, notes: [], deleted: true };
   const cacheKey = workNotesCacheKey_(details);
   const shared = readPropertyJson_(workNotesPropertyKey_(details));
   if (Array.isArray(shared)) return { ok: true, notes: normalizeWorkNotes_(shared), source: "script-properties" };
@@ -1693,6 +1857,7 @@ function loadWorkNotes_(payload) {
 
 function syncWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
+  if (isCustomerDriveRecordDeleted_(details)) throw new Error("Hồ sơ đã được xóa trên Drive. Không thể đồng bộ ghi chú vào hồ sơ đã xóa.");
   const notes = normalizeWorkNotes_(payload.notes);
   const propertyKey = workNotesPropertyKey_(details);
   writePropertyJson_(propertyKey, notes);
@@ -2245,6 +2410,7 @@ function normalizeDesignTaskRows_(rows) {
 
 function syncDesignTasks_(payload) {
   const details = workNotesPayload_(payload);
+  if (isCustomerDriveRecordDeleted_(details)) throw new Error("Hồ sơ đã được xóa trên Drive. Không thể đồng bộ thiết kế vào hồ sơ đã xóa.");
   const kind = workNoteText_(payload.kind, 40);
   if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw new Error("Loại tiến độ thiết kế không hợp lệ.");
   const title = workNoteText_(payload.title, 160) || "Tiến độ thiết kế";
@@ -2272,7 +2438,7 @@ function syncDesignTasks_(payload) {
 function loadAssignedDesignTasks_(payload) {
   const email = workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const tasks = readActiveDesignTasks_().filter(function(task) { return !task.actualDate; });
+  const tasks = readActiveDesignTasks_().filter(function(task) { return !task.actualDate && !isCustomerDriveRecordDeleted_(task); });
   if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
   const needsMemberLookup = tasks.some(function(task) { return /^member:/i.test(workNoteText_(task.assigneeEmail, 240)); });
   const member = needsMemberLookup ? employeeRosterMember_(email) : null;
@@ -3082,6 +3248,7 @@ function isSpreadsheetFile_(name, mimeType) {
 }
 
 function getCustomerFolder_(year, month, projectId, createMissing, createInitialDocumentSnapshot) {
+  if (createMissing && isCustomerDriveRecordDeleted_({ year: year, month: month, projectId: projectId })) throw new Error("Hồ sơ đã được xóa trên Drive.");
   const folderCacheKey = "gmcrm-customer-folder-" + year + "-" + month + "-" + projectId;
   const cachedFolder = getCachedFolder_(folderCacheKey);
   if (cachedFolder) {

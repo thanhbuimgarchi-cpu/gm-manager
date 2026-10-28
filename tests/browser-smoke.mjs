@@ -31,7 +31,18 @@ await context.addInitScript(({years,personnel,notes}) => {
 }, {years,personnel,notes});
 await context.route('https://script.google.com/**', route => route.fulfill({ contentType:'text/html; charset=utf-8', body:`<meta charset="utf-8"><script>
 const years=${JSON.stringify(years)}, personnel=${JSON.stringify(personnel)}, notes=${JSON.stringify(notes)}, messages=${JSON.stringify(messages)};
+window.qaMutationFail=false;window.qaMutationLog=[];
 addEventListener('message',event=>{if(event.data?.channel!=='gm-manager-apps-script')return; const {id,payload:p}=event.data; let r={ok:true};
+if(p.action==='rename-customer-folder'||p.action==='delete-customer-folder'){
+  window.qaMutationLog.push(p);
+  if(window.qaMutationFail)r={ok:false,error:'Drive từ chối thao tác kiểm thử'};
+  else{
+    const month=years.find(y=>y.year===p.year)?.months[p.month-1];const index=month?.records.findIndex(record=>record.projectId===p.projectId);
+    if(index===undefined||index<0)r={ok:false,error:'Không tìm thấy thư mục'};
+    else if(p.action==='delete-customer-folder'){month.records.splice(index,1);r={ok:true,deleted:true,trashed:true,folderId:'fixture-folder'};}
+    else{Object.assign(month.records[index],{houseId:p.houseId,name:p.name});r={ok:true,folderId:'fixture-folder',folderName:p.houseId};}
+  }
+}
 if(p.action==='load-consulting'||p.action==='load-workspace-cache')r.years=years;
 if(p.action==='load-personnel')r.personnel=personnel;
 if(p.action==='load-work-notes')r.notes=p.projectId==='GM28102026CQ'?notes:[];
@@ -41,7 +52,7 @@ if(p.action==='load-assigned-design-tasks')r.tasks=[];
 if(p.action==='load-customer-messages'){r.messages=messages;r.configured=true;}
 if(p.action==='list-documents'){r.snapshots=[{id:'s1',name:'28-10-2026-DV-75',date:'28/10/2026'}];r.activeSnapshotId='s1';r.files=[{id:'f1',name:'Phương án kiến trúc.pdf',updatedAt:'28/10/2026 09:30',work:'Thiết kế',mimeType:'application/pdf',viewUrl:'https://drive.google.com/file/d/test/view',downloadUrl:'https://drive.google.com/file/d/test/view'}];}
 if(p.action==='list-3d-library')r.folders=[];
-event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*');});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
+setTimeout(()=>event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*'),p.action==='rename-customer-folder'||p.action==='delete-customer-folder'?250:0);});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
 await page.locator('.customer-result').first().waitFor();
@@ -57,6 +68,42 @@ await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).click();
 await page.getByRole('dialog',{name:'Thêm khách hàng'}).waitFor();
 await page.keyboard.press('Escape');
 assert.equal(await page.getByRole('dialog').count(),0,'Escape closes dialog');
+const bridgeFrame=page.frames().find(frame=>frame.url().startsWith('https://script.google.com/'));
+const quynhRow=page.locator('.customer-result-row').filter({hasText:'DV-75'});
+await quynhRow.getByRole('button',{name:/Tùy chọn khách hàng/}).click();
+await page.screenshot({path:'outputs/interface-qa/desktop-customer-menu.png',fullPage:true});
+assert.ok(await page.getByRole('heading',{name:'Tổng quan dự án'}).isVisible(),'row menu must not open project');
+await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+const renameDialog=page.getByRole('dialog',{name:'Rename thư mục Drive',exact:true});
+await renameDialog.getByLabel('Tên thư mục Drive / Mã nhà',{exact:true}).fill('DV-76');
+await bridgeFrame.evaluate(()=>window.qaMutationFail=true);
+await renameDialog.getByRole('button',{name:'Rename trên Drive',exact:true}).click();
+await renameDialog.getByRole('alert').waitFor();
+assert.equal(await quynhRow.count(),1,'failed Drive rename keeps the old card');
+assert.equal(await page.locator('.customer-result-row').filter({hasText:'DV-76'}).count(),0);
+await bridgeFrame.evaluate(()=>window.qaMutationFail=false);
+await renameDialog.getByRole('button',{name:'Rename trên Drive',exact:true}).click();
+assert.equal(await quynhRow.count(),1,'card changes only after Drive confirmation');
+await page.waitForFunction(()=>!document.querySelector('[role=dialog]'));
+await page.locator('.customer-result-row').filter({hasText:'DV-76'}).getByRole('button',{name:/Tùy chọn khách hàng/}).click();
+await page.getByRole('menuitem',{name:'Rename',exact:true}).click();
+await page.getByRole('dialog').getByLabel('Tên thư mục Drive / Mã nhà',{exact:true}).fill('DV-75');
+await page.getByRole('button',{name:'Rename trên Drive',exact:true}).click();
+await page.waitForFunction(()=>!document.querySelector('[role=dialog]'));
+const minhRow=page.locator('.customer-result-row').filter({hasText:'NT5-38'});
+await minhRow.getByRole('button',{name:/Tùy chọn khách hàng/}).click();
+await page.getByRole('menuitem',{name:'Delete',exact:true}).click();
+await bridgeFrame.evaluate(()=>window.qaMutationFail=true);
+await page.getByRole('button',{name:'Delete trên Drive',exact:true}).click();
+await page.getByRole('dialog').getByRole('alert').waitFor();
+assert.equal(await minhRow.count(),1,'failed Drive delete keeps the old card');
+await bridgeFrame.evaluate(()=>window.qaMutationFail=false);
+await page.getByRole('button',{name:'Delete trên Drive',exact:true}).click();
+assert.equal(await minhRow.count(),1,'card stays until trash is confirmed');
+await page.waitForFunction(()=>!document.querySelector('[role=dialog]'));
+assert.equal(await minhRow.count(),0);
+const mutationCalls=await bridgeFrame.evaluate(()=>window.qaMutationLog);
+assert.ok(mutationCalls.every(call=>call.year===2026&&call.month===10&&call.mutationId));
 await page.getByRole('button',{name:'Thu gọn Tin nhắn khách'}).click();
 assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-notes__list').isVisible(),'message fold leaves notes open');
 await page.getByRole('button',{name:'Mở danh sách Tin nhắn khách'}).click();

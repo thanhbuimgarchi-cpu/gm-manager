@@ -52,6 +52,7 @@ test("Drive root links can be normalized and saved for all devices", () => {
 
 test("house code changes rename the existing Drive customer folder", () => {
   const cache = new Map();
+  const properties = new Map([["gmcrm-drive-root-folder-id", "root-id-123"]]);
   const makeFolder = (name, id, children = []) => ({
     name,
     getId: () => id,
@@ -68,13 +69,143 @@ test("house code changes rename the existing Drive customer folder", () => {
   const customers = makeFolder("Khách hàng", "customers-id-123", [year]);
   const root = makeFolder("GM Manager", "root-id-123", [customers]);
   const context = loadContext({
-    PropertiesService: { getScriptProperties: () => ({ getProperty: () => "root-id-123" }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => properties.get(key) || "", setProperty: (key, value) => properties.set(key, value), deleteProperty: (key) => properties.delete(key) }) },
     CacheService: { getScriptCache: () => ({ get: (key) => cache.get(key) || "", put: (key, value) => cache.set(key, value), remove: (key) => cache.delete(key) }) },
     DriveApp: { getFolderById: (id) => { if (id === "root-id-123" || id === "customer-id-123") return id === "root-id-123" ? root : customer; throw new Error("missing folder"); } },
   });
   const result = context.renameCustomerFolder_({ year: 2026, month: 9, projectId: "GM03092026V", oldHouseId: "HP-587", houseId: "HP-888" });
   assert.equal(result.ok, true);
   assert.equal(customer.getName(), "HP-888");
+});
+
+function customerMutationFixture() {
+  const folders = new Map();
+  let createdCount = 0;
+  const makeFolder = (name, id, children = []) => {
+    const value = {
+      name, children, trashed: false, trashCalls: 0,
+      getName() { return this.name; },
+      getId: () => id,
+      getUrl: () => `https://drive.google.com/drive/folders/${id}`,
+      getDateCreated: () => new Date("2026-01-01T00:00:00Z"),
+      getFolders() { return iterator(this.children.filter((child) => !child.trashed)); },
+      getFiles: () => iterator([]),
+      getFilesByName: () => iterator([]),
+      createFolder() { createdCount += 1; throw new Error("mutations must not create missing Drive folders"); },
+      setName(next) { this.name = next; },
+      isTrashed() { return this.trashed; },
+      setTrashed(next) { this.trashed = next; this.trashCalls += 1; },
+    };
+    folders.set(id, value);
+    return value;
+  };
+  const target = makeFolder("HP-587", "target-folder-id");
+  const keep = makeFolder("NT5-38", "keep-folder-id");
+  const otherMonthTarget = makeFolder("HP-587", "other-month-target-id");
+  const month = makeFolder("T9", "month-folder-id", [target, keep]);
+  const otherMonth = makeFolder("T8", "other-month-id", [otherMonthTarget]);
+  const year = makeFolder("2026", "year-folder-id", [month, otherMonth]);
+  const customers = makeFolder("Khách hàng", "customers-folder-id", [year]);
+  const root = makeFolder("GM Manager", "root-folder-id", [customers]);
+  const values = new Map([["gmcrm-drive-root-folder-id", "root-folder-id"]]);
+  const cache = new Map();
+  const context = loadContext({
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => values.get(key) || "", setProperty: (key, value) => values.set(key, String(value)), deleteProperty: (key) => values.delete(key) }) },
+    CacheService: { getScriptCache: () => ({ get: (key) => cache.get(key) || "", put: (key, value) => cache.set(key, value), remove: (key) => cache.delete(key) }) },
+    DriveApp: { getFolderById: (id) => { const value = folders.get(id); if (!value) throw new Error("folder missing"); return value; } },
+    Utilities: { base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url") },
+  });
+  return { context, target, keep, otherMonthTarget, month, year, customers, root, makeFolder, values, createdCount: () => createdCount };
+}
+
+test("customer Delete trashes only the resolved Drive folder and prunes only that period's cache", () => {
+  const f = customerMutationFixture();
+  const years = [{ year: 2026, months: [{ label: "T9", records: [
+    { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId(), details: { HVT: "Target" } },
+    { projectId: "GM-KEEP", houseId: "NT5-38", driveFolderId: f.keep.getId() },
+  ] }, { label: "T8", records: [{ projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.otherMonthTarget.getId() }] }] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 1, years });
+  f.context.writePropertyJson_("gmcrm-active-work-notes-state", [{ id: "note-target", year: 2026, month: 9, projectId: "GM-TARGET" }, { id: "note-keep", year: 2026, month: 9, projectId: "GM-KEEP" }]);
+  const oldCacheKey = f.context.driveScopedCacheKey_("gmcrm-index-2026-9");
+  const result = f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-target-001" });
+  assert.equal(result.ok, true);
+  assert.equal(result.trashed, true);
+  assert.equal(result.folderId, f.target.getId());
+  assert.equal(f.target.trashed, true);
+  assert.equal(f.keep.trashed, false);
+  assert.equal(f.otherMonthTarget.trashed, false);
+  assert.equal(f.createdCount(), 0);
+  assert.notEqual(f.context.driveScopedCacheKey_("gmcrm-index-2026-9"), oldCacheKey);
+  const current = f.context.loadWorkspaceCache_().years[0].months;
+  assert.deepEqual(Array.from(current[0].records, (record) => record.projectId), ["GM-KEEP"]);
+  assert.equal(current[1].records.length, 1);
+  assert.deepEqual(Array.from(f.context.readPropertyJson_("gmcrm-active-work-notes-state"), (note) => note.id), ["note-keep"]);
+  f.context.saveWorkspaceCache_({ updatedAt: Date.now() + 1000, years });
+  assert.equal(f.context.loadWorkspaceCache_().years[0].months[0].records.length, 1, "a newer stale-device save cannot resurrect a deleted folder");
+  assert.equal(f.context.loadWorkNotes_({ year: 2026, month: 9, projectId: "GM-TARGET" }).notes.length, 0);
+});
+
+test("customer mutations do not create missing paths or delete ambiguous folder names", () => {
+  const f = customerMutationFixture();
+  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2027, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /thư mục tháng/);
+  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-MISSING", houseId: "missing" }), /Không tìm thấy đúng/);
+  const duplicate = f.makeFolder("hp-587", "duplicate-folder-id");
+  f.month.children.push(duplicate);
+  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /nhiều thư mục/);
+  assert.equal(f.target.trashed, false);
+  assert.equal(duplicate.trashed, false);
+  assert.equal(f.createdCount(), 0);
+  f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId() });
+  assert.equal(f.target.trashed, true);
+  assert.equal(duplicate.trashed, false, "the exact selected folder ID disambiguates duplicates");
+});
+
+test("a delete retry returns the original result without touching a replacement folder", () => {
+  const f = customerMutationFixture();
+  const request = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-retry-001" };
+  const first = f.context.deleteCustomerFolder_(request);
+  const replacement = f.makeFolder("HP-587", "replacement-folder-id");
+  f.month.children.push(replacement);
+  f.context.clearCustomerDriveDeletion_({ year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-587" });
+  const repeated = f.context.deleteCustomerFolder_(request);
+  assert.equal(repeated.folderId, first.folderId);
+  assert.equal(repeated.repeated, true);
+  assert.equal(f.target.trashCalls, 1);
+  assert.equal(replacement.trashed, false);
+  assert.equal(f.context.isCustomerDriveRecordDeleted_({ year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-587", driveFolderId: replacement.getId() }), false);
+  assert.throws(() => f.context.deleteCustomerFolder_({ ...request, houseId: "NT5-38", folderId: f.keep.getId() }), /Mã yêu cầu đã được dùng/);
+});
+
+test("Rename preserves the project key, updates shared cache and rejects collisions before changing Drive", () => {
+  const f = customerMutationFixture();
+  f.context.saveWorkspaceCache_({ years: [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId(), name: "Chị An", details: { SDT: "0912345678" } }, { projectId: "GM-KEEP", houseId: "NT5-38", name: "Anh Bình" }] }] }] });
+  const request = { year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888", name: "Chị An mới", folderId: f.target.getId(), mutationId: "rename-target-001" };
+  assert.throws(() => f.context.renameCustomerFolder_({ ...request, houseId: "NT5-38" }), /Mã nhà đã tồn tại/);
+  assert.equal(f.target.getName(), "HP-587");
+  const result = f.context.renameCustomerFolder_(request);
+  assert.equal(result.projectId, "GM-TARGET");
+  assert.equal(f.target.getName(), "HP-888");
+  const records = f.context.loadWorkspaceCache_().years[0].months[0].records;
+  assert.equal(records[0].projectId, "GM-TARGET");
+  assert.equal(records[0].name, "Chị An mới");
+  assert.equal(records[0].houseId, "HP-888");
+  assert.equal(records[0].details.SDT, "0912345678");
+  assert.equal(records[1].name, "Anh Bình");
+  assert.equal(f.context.renameCustomerFolder_(request).repeated, true);
+  assert.throws(() => f.context.renameCustomerFolder_({ ...request, houseId: "HP-999" }), /Mã yêu cầu đã được dùng/);
+  const withoutId = { ...request, mutationId: undefined };
+  assert.equal(f.context.renameCustomerFolder_(withoutId).folderId, f.target.getId(), "legacy transport retry only reuses a confirmed prior renamed folder");
+});
+
+test("exact folder identities prevent stale rename aliases from changing an unrelated newly created house", () => {
+  const f = customerMutationFixture();
+  f.context.renameCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888" });
+  f.context.clearCustomerDriveDeletion_({ year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-587" });
+  const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-NEW", houseId: "HP-587", driveFolderId: "new-folder-id" }, { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId() }] }] }];
+  const records = f.context.applyCustomerDriveMutations_(years)[0].months[0].records;
+  assert.equal(records[0].projectId, "GM-NEW");
+  assert.equal(records[0].houseId, "HP-587");
+  assert.equal(records[1].houseId, "HP-888");
 });
 
 test("Drive listings exclude spreadsheet files", () => {
