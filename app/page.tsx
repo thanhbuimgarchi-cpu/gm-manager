@@ -1621,6 +1621,19 @@ function customerRecordsAfterDriveMutation(years: YearFolder[], target: Customer
   }) });
 }
 
+function customerDriveMutationError(error: unknown, type: "rename" | "delete") {
+  const message = (typeof error === "string" ? error : error && typeof error === "object" && "message" in error ? String(error.message || "") : "").trim();
+  // Legacy deployments route an unknown mutation action into the old customer
+  // workbook handler. Its exact validation error does not mean the selected
+  // customer is incomplete; that deployment does not yet have this action.
+  const legacyResponse = /^(?:Error:\s*)?Thiếu dữ liệu hồ sơ\.?$/u.test(message.normalize("NFC"));
+  if (legacyResponse) {
+    const operation = type === "delete" ? "xóa" : "đổi tên";
+    return `Apps Script đang chạy phiên bản cũ, chưa hỗ trợ ${operation} thư mục Drive. Quản trị viên cần hoàn tất ủy quyền Google và triển khai phiên bản mới. Hồ sơ trên web được giữ nguyên.`;
+  }
+  return message || "Không thể cập nhật Drive. Hồ sơ trên web chưa thay đổi.";
+}
+
 function compareOutstandingWorkNotes(left: WorkNote, right: WorkNote) {
   const priorityOrder: Record<WorkNotePriority, number> = { "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 };
   const priorityDifference = (priorityOrder[left.priority] ?? 2) - (priorityOrder[right.priority] ?? 2);
@@ -3712,7 +3725,7 @@ export default function Home() {
       setProtectedAction(null);
       setNotice(type === "delete" ? `Đã chuyển thư mục ${record.houseId || record.projectId} vào thùng rác Drive. Có thể khôi phục trong Drive.` : `Đã đổi tên thư mục Drive thành ${nextHouseId}.`);
     } catch (error) {
-      setCustomerMutationError(error instanceof Error ? error.message : "Không thể cập nhật Drive. Hồ sơ trên web chưa thay đổi.");
+      setCustomerMutationError(customerDriveMutationError(error, type));
     } finally {
       customerMutationRevision.current += 1;
       customerMutationInFlight.current = false;

@@ -7,7 +7,7 @@ import { transform } from "esbuild";
 // Execute the real frontend helpers without mounting React or contacting the
 // production backend. This protects data behavior during interface changes.
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation };`, {
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
@@ -113,4 +113,16 @@ test("confirmed customer mutations affect only the selected project and month", 
   assert.equal(removed[0].months[7].records[0].projectId,"project-two");
   assert.equal(removed[0].months[8].records.length,1);
   assert.equal(years[0].months[7].records.length,2);
+});
+
+test("legacy mutation-handler validation explains the deployment mismatch instead of blaming the customer", () => {
+  const deletion = helpers.customerDriveMutationError(new Error("Thiếu dữ liệu hồ sơ."), "delete");
+  assert.match(deletion, /phiên bản cũ, chưa hỗ trợ xóa thư mục Drive/);
+  assert.match(deletion, /hoàn tất ủy quyền Google và triển khai phiên bản mới/);
+  assert.match(deletion, /Hồ sơ trên web được giữ nguyên/);
+  const rename = helpers.customerDriveMutationError("Error: Thiếu dữ liệu hồ sơ.", "rename");
+  assert.match(rename, /chưa hỗ trợ đổi tên thư mục Drive/);
+  assert.equal(helpers.customerDriveMutationError(new Error("Access denied: DriveApp."), "delete"), "Access denied: DriveApp.");
+  assert.equal(helpers.customerDriveMutationError(new Error("Thiếu mã hồ sơ cần xóa."), "delete"), "Thiếu mã hồ sơ cần xóa.");
+  assert.equal(helpers.customerDriveMutationError("Thiếu dữ liệu hồ sơ khi nhập công việc", "delete"), "Thiếu dữ liệu hồ sơ khi nhập công việc");
 });
