@@ -28,9 +28,12 @@ const message = {id:'message-qa-a',conversationId:'conversation-qa-a',year:2026,
 ]};
 const notes = new Map(records.map(record=>[record.projectId,[]]));
 const notesRevision = new Map(records.map(record=>[record.projectId,0]));
+const deletedNoteIds = new Map(records.map(record=>[record.projectId,[]]));
 const commandLog = [];
+const readLog = [];
 const committed = new Map();
-const control = {transportOffline:false,noteArchivePending:false,designArchivePending:false,messageArchivePending:false,hold:null};
+const control = {transportOffline:false,noteArchivePending:false,designArchivePending:false,messageArchivePending:false,staleAssignedFeed:false,hold:null};
+let feedSerial=0;
 function holdNext(operation) {
   let entered,release;
   const gate = new Promise(resolve=>{release=resolve;});
@@ -43,9 +46,10 @@ function scopeRecord(payload) { return records.find(record=>record.projectId===p
 function noteResult(payload,note) {
   const revision=(notesRevision.get(payload.projectId)||0)+1;
   notesRevision.set(payload.projectId,revision);
-  return {ok:true,note:clone(note),notes:clone(notes.get(payload.projectId)),revision,deletedIds:[],archivePending:Boolean(note?.archivePending)};
+  return {ok:true,note:clone(note),notes:clone(notes.get(payload.projectId)),revision,deletedIds:clone(deletedNoteIds.get(payload.projectId)||[]),archivePending:Boolean(note?.archivePending)};
 }
 async function dispatch(payload) {
+  if(payload.action.startsWith('load-'))readLog.push({action:payload.action,project:clone(payload.project||null)});
   if(payload.action==='verify-employee-login') {
     if(payload.name==='admin'&&payload.loginCode==='1') return {ok:true,valid:true,account:'admin',adminSessionToken:adminToken,workflowSessionToken:tokens.admin};
     const found=Object.values(personnel).flat().find(person=>person.name===payload.name&&person.loginCode===payload.loginCode);
@@ -54,8 +58,16 @@ async function dispatch(payload) {
   if(payload.action==='load-personnel')return {ok:true,personnel:clone(personnel)};
   if(['load-consulting','load-workspace-cache'].includes(payload.action))return {ok:true,years:clone(years)};
   if(payload.action==='save-workspace-cache')return {ok:true};
-  if(payload.action==='load-work-notes')return {ok:true,notes:clone(notes.get(payload.projectId)||[]),revision:notesRevision.get(payload.projectId)||0,deletedIds:[]};
-  if(payload.action==='load-assigned-work-notes')return {ok:true,notes:records.flatMap(record=>(notes.get(record.projectId)||[]).filter(note=>!note.actualDate&&(payload.email==='admin'||payload.email===manager.email||note.assigneeEmail===payload.email)).map(note=>({...clone(note),year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name})))};
+  if(payload.action==='load-work-notes')return {ok:true,notes:clone(notes.get(payload.projectId)||[]),revision:notesRevision.get(payload.projectId)||0,deletedIds:clone(deletedNoteIds.get(payload.projectId)||[])};
+  if(payload.action==='load-assigned-work-notes'){
+    const actor=actorFor(payload);
+    if(!actor)return {ok:false,code:'AUTH_REQUIRED',error:'Hãy đăng nhập lại.'};
+    const visible=note=>actor==='admin'||actor===manager.email||note.assigneeEmail===actor;
+    const projectRevisions=records.map(record=>({year:2026,month:10,projectId:record.projectId,revision:Math.max(0,(notesRevision.get(record.projectId)||0)-(control.staleAssignedFeed?1:0))}));
+    const selected=payload.project&&records.find(record=>payload.project.year===2026&&payload.project.month===10&&payload.project.projectId===record.projectId);
+    const projectSnapshot=selected?{year:2026,month:10,projectId:selected.projectId,revision:projectRevisions.find(item=>item.projectId===selected.projectId).revision,notes:control.staleAssignedFeed?[]:clone(notes.get(selected.projectId).filter(visible)),deletedIds:control.staleAssignedFeed?[]:clone(deletedNoteIds.get(selected.projectId)||[]),legacyImportPending:false}:undefined;
+    return {ok:true,notes:control.staleAssignedFeed?[]:records.flatMap(record=>(notes.get(record.projectId)||[]).filter(note=>!note.actualDate&&visible(note)).map(note=>({...clone(note),year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name}))),projectRevisions,...(projectSnapshot?{projectSnapshot}:{}),qaFeedSerial:++feedSerial};
+  }
   if(payload.action==='load-assigned-design-tasks')return {ok:true,tasks:records.flatMap(record=>(record.designProgress||[]).filter(row=>row.publishedAt&&!row.actualDate&&(payload.email==='admin'||payload.email===manager.email||row.assigneeEmail===payload.email)).map(row=>({...clone(row),kind:'architecture',title:'Tiến độ thiết kế kiến trúc',year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name})))};
   if(payload.action==='load-customer-messages')return {ok:true,configured:true,messages:message.status!=='resolved'||message.archivePending?[clone(message)]:[]};
   if(payload.action==='list-documents')return {ok:true,snapshots:[],files:[]};
@@ -131,6 +143,8 @@ const context=await browser.newContext({viewport:{width:1440,height:1000},servic
 await context.exposeBinding('qaWorkflowRequest',async(_source,payload)=>dispatch(payload));
 await context.addInitScript(({years,personnel,scriptUrl,adminToken,workflowToken})=>{
   window.gmDesktop={isDesktop:true,isWindows:true,platform:'win32',validateWorkspaceFolder:async()=>({ok:true,path:'I:\\Shared drives\\GM Manager\\GM Manager'}),showNotification:async()=>true};
+  window.qaFeedSerial=0;
+  addEventListener('message',event=>{if(event.data?.channel==='gm-manager-apps-script-response'&&event.data.result?.qaFeedSerial)window.qaFeedSerial=event.data.result.qaFeedSerial;});
   window.qaReadOutbox=()=>{
     const entries=JSON.parse(localStorage.getItem('gm-manager-workflow-outbox-v1')||'{"entries":[]}').entries||[];
     for(const key of Object.keys(localStorage).filter(key=>key.startsWith('gm-manager-workflow-outbox-v1:command:'))){const value=JSON.parse(localStorage.getItem(key)||'null');if(value?.entry)entries.push(value.entry);}
@@ -160,6 +174,7 @@ async function login(name,code){await page.getByRole('button',{name:/Đổi tài
 async function compose(content){await page.locator('.work-notes__actions button').first().click();const composer=page.getByLabel('Ghi chú mới',{exact:true});await composer.getByLabel('Người phụ trách',{exact:true}).selectOption(member.email);await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).fill('10112026');await composer.getByLabel('Nội dung công việc',{exact:true}).fill(content);return composer;}
 const cachedNotes=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value||[]);
 const outbox=()=>page.evaluate(()=>window.qaReadOutbox());
+async function focusPoll(){const previous=await page.evaluate(()=>window.qaFeedSerial);await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForFunction(value=>window.qaFeedSerial>value,previous,{timeout:8000});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));}
 
 await openHouse('QA-A');
 phase='note publish';
@@ -279,6 +294,37 @@ assert.equal(await page.locator('textarea[aria-label="Nội dung công việc"]'
 
 await openHouse('QA-A');
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+phase='stale assignment feed after local acknowledgement';
+const delayedNote=notes.get(records[0].projectId).find(note=>note.content==='Chỉ thuộc khách A, không được sang B');
+assert.ok(delayedNote);
+control.staleAssignedFeed=true;
+await focusPoll();
+assert.ok((await cachedNotes()).some(note=>note.id===delayedNote.id),'an older assignment feed cannot remove a locally acknowledged note');
+assert.ok(await page.locator('textarea[aria-label="Nội dung công việc"]').evaluateAll(inputs=>inputs.some(input=>input.value==='Chỉ thuộc khách A, không được sang B')),'the open editor retains a note acknowledged at a newer project revision');
+const sidebar=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first();
+assert.equal(await sidebar.locator('.sidebar-note').filter({hasText:delayedNote.content}).count(),1,'an older feed cannot hide the acknowledged note from the sidebar');
+control.staleAssignedFeed=false;
+
+phase='remote completion reconciles an open project';
+const directReadsBeforeCompletion=readLog.filter(request=>request.action==='load-work-notes').length;
+Object.assign(messageAssignment,{acceptedAt:fixedNow,acceptedBy:member.email,actualDate:'28/10/2026',completedAt:fixedNow,archivedAt:fixedNow,archivePending:false,revision:messageAssignment.revision+1});
+notesRevision.set(records[0].projectId,notesRevision.get(records[0].projectId)+1);
+await focusPoll();
+await page.waitForFunction(()=>Array.from(document.querySelectorAll('.work-note')).some(card=>card.querySelector('textarea[aria-label="Nội dung công việc"]')?.value==='Xử lý đúng dòng khách đã chọn.'&&card.querySelector('input[aria-label="Hoàn thành thực tế"]')?.value==='28/10/2026'),undefined,{timeout:8000});
+assert.equal(await sidebar.locator('.sidebar-note').filter({hasText:messageAssignment.content}).count(),0,'completed remote work is removed from the pending sidebar without reloading');
+assert.equal(readLog.filter(request=>request.action==='load-work-notes').length,directReadsBeforeCompletion,'the existing assignment response updates the editor without an extra project GET');
+
+phase='remote deletion reconciles an open project';
+const directReadsBeforeDeletion=readLog.filter(request=>request.action==='load-work-notes').length;
+notes.set(records[0].projectId,notes.get(records[0].projectId).filter(note=>note.id!==delayedNote.id));
+deletedNoteIds.get(records[0].projectId).push(delayedNote.id);
+notesRevision.set(records[0].projectId,notesRevision.get(records[0].projectId)+1);
+await focusPoll();
+await page.waitForFunction(()=>!Array.from(document.querySelectorAll('textarea[aria-label="Nội dung công việc"]')).some(input=>input.value==='Chỉ thuộc khách A, không được sang B'),undefined,{timeout:8000});
+assert.ok(!(await cachedNotes()).some(note=>note.id===delayedNote.id),'remote deletion removes the canonical cached row');
+assert.equal(await sidebar.locator('.sidebar-note').filter({hasText:delayedNote.content}).count(),0,'the deleted note also leaves the sidebar without reloading');
+assert.equal(readLog.filter(request=>request.action==='load-work-notes').length,directReadsBeforeDeletion,'remote deletion is reconciled from the existing assignment response');
+
 control.transportOffline=true;
 phase='offline durable outbox';
 const offlineComposer=await compose('Giữ nguyên mã yêu cầu khi mất mạng và tải lại');
@@ -297,7 +343,7 @@ await page.waitForFunction(()=>window.qaReadOutbox().length===0);
 assert.equal(notes.get(records[0].projectId).filter(note=>note.content==='Giữ nguyên mã yêu cầu khi mất mạng và tải lại').length,1,'reconnection commits one copy');
 assert.ok(commandLog.filter(command=>command.note?.content==='Giữ nguyên mã yêu cầu khi mất mạng và tải lại').every(command=>command.requestId===queued.requestId),'all retries use the original id');
 assert.deepEqual(errors,[],'no browser runtime errors');
-console.log(JSON.stringify({passed:true,commands:commandLog.length,uniqueCommits:committed.size,noRuntimeErrors:true,archivePendingRetained:true,customerScopedReplies:true,offlineReplayIdStable:true}));
+console.log(JSON.stringify({passed:true,commands:commandLog.length,uniqueCommits:committed.size,noRuntimeErrors:true,archivePendingRetained:true,customerScopedReplies:true,offlineReplayIdStable:true,remoteCompletionReconciled:true,remoteDeletionReconciled:true,staleFeedPreservesAcknowledgedNotes:true,noExtraProjectReads:true}));
 } catch(error) {
   await page.screenshot({path:'outputs/interface-qa/workflow-failure.png',fullPage:true}).catch(()=>{});
   console.error(JSON.stringify({phase,commands:commandLog.map(command=>({operation:command.operation,requestId:command.requestId})),pageText:(await page.locator('body').innerText().catch(()=>'' )).slice(-5000)}));

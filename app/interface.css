@@ -638,6 +638,9 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .sidebar-customer-group__items .sidebar-note { width: 100%; margin: 0; padding: 9px 7px; }
 .sidebar-customer-group__items .sidebar-note b { font-size: 11px; line-height: 1.55; }
 .workflow-item-status { margin: 8px 0 0; color: #65758d; font-size: 12px; line-height: 1.5; }
+.work-note-pending { padding: 16px 18px; border: 1px dashed #c9d7e8; border-radius: 12px; color: #425c7e; background: #f5f8fd; line-height: 1.6; }
+.work-note-pending p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.work-note-pending small { color: #6b7f99; }
 .workflow-item-status--warning { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #93611a; }
 .workflow-item-status button, .workflow-archive-retry { padding: 6px 10px; border: 1px solid #decba7; border-radius: 7px; color: #80581c; background: #fff8e9; font-size: 11px; cursor: pointer; }
 .workflow-sync-panel { position: fixed; right: 18px; bottom: 18px; z-index: 65; width: min(390px, calc(100vw - 36px)); color: #26374f; background: #fff; border: 1px solid #d9e2ef; border-radius: 14px; box-shadow: 0 10px 35px #1b2f4826; }

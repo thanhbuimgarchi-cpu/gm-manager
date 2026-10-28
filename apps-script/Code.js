@@ -175,6 +175,7 @@ function createCustomerFolder_(payload) {
   const monthFolder = getOrCreateFolder_(yearFolder, "T" + month);
   let folder = findFolder_(monthFolder, houseId || projectId);
   const legacyFolder = projectId && houseId && projectId !== houseId ? findFolder_(monthFolder, projectId) : null;
+  const creatingNewCustomer = !folder && !legacyFolder;
 
   // Before house codes became the Drive folder key, the same customer was
   // created as GM.... If that legacy folder exists, rename/reuse it instead
@@ -195,6 +196,13 @@ function createCustomerFolder_(payload) {
     // is cleared. A normal create retry must never reset a live project.
     deletedScopes.forEach(function(mutation) { workflowResetCustomerProject_(mutation, true); });
     workflowResetCustomerProject_({ year: year, month: month, projectId: projectId, houseId: houseId }, false);
+  } else if (creatingNewCustomer && projectId) {
+    // This folder was just created empty by the authenticated admin. Seed its
+    // authoritative blank workflow so first publication need not inspect Drive.
+    try {
+      const details = { year: year, month: month, projectId: projectId, houseId: houseId };
+      if (!workflowReadProject_(details)) workflowResetCustomerProject_(details, false);
+    } catch (cacheError) { /* A confirmed new Drive folder stays created; first workflow use can import it safely. */ }
   }
   clearCustomerDriveDeletion_({ year: year, month: month, projectId: projectId, houseId: houseId });
   cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + folderKey, folder);
@@ -2058,17 +2066,15 @@ function loadAssignedWorkNotes_(payload) {
   if (actor) workflowMayUse_(actor, "Ghi chú");
   const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const activeNotes = workflowAssignedRegistry_("notes").filter(function(note) { return !note.actualDate && !isCustomerDriveRecordDeleted_(note) && (actor || note.collectionRevision === undefined); });
+  const queue = workflowReadQueue_("notes", payload.project, actor);
+  const metadata = { ok: true, projectRevisions: actor ? queue.projectRevisions : [], ...(actor && queue.projectSnapshot ? { projectSnapshot: queue.projectSnapshot } : {}) };
+  const activeNotes = queue.items.filter(function(note) { return !note.actualDate && (actor || note.collectionRevision === undefined); });
   // The built-in manager account needs an overview across every customer,
   // while each employee continues to receive only work assigned to them.
-  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
-  // Only legacy ID-based assignments need a roster lookup. Email assignments
-  // can be matched directly and this keeps the overview usable when Drive is
-  // unavailable (for example in a read-only test/cache environment).
-  const needsMemberLookup = activeNotes.some(function(note) { return /^member:/i.test(workNoteText_(note.assigneeEmail, 240)); });
-  const member = employeeRosterMember_(email);
-  if (member && member.role === "Quản lý chung") return { ok: true, notes: activeNotes };
-  return { ok: true, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
+  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, notes: activeNotes };
+  const member = actor ? actor.member : employeeRosterMember_(email);
+  if (member && member.role === "Quản lý chung") return { ...metadata, notes: activeNotes };
+  return { ...metadata, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
 }
 
 function loadWorkNotes_(payload) {
@@ -2804,10 +2810,10 @@ function workflowWorkspaceRecord_(details) {
   return month && (month.records || []).find(function(item) { return item.projectId === details.projectId; }) || null;
 }
 
-function workflowProject_(details) {
+function workflowProject_(details, retryLegacyImport) {
   const existing = workflowReadProject_(details);
   if (existing && existing.customerDeleted) throw workflowError_("NOT_FOUND", "Khách hàng đã được xóa. Không thể cập nhật công việc cũ.");
-  if (existing) return existing.legacyImportPending ? workflowTryLegacyImport_(existing) : existing;
+  if (existing) return existing.legacyImportPending && retryLegacyImport ? workflowTryLegacyImport_(existing) : existing;
   const stored = readPropertyJson_(workNotesPropertyKey_(details));
   let notes = Array.isArray(stored) ? normalizeWorkNotes_(stored) : [];
   let legacyImportPending = false;
@@ -2943,7 +2949,7 @@ function workflowArchiveItem_(details, item, kind) {
   return { folderUrl: month.getUrl() };
 }
 
-function workflowAttemptArchives_(state, onlyId) {
+function workflowAttemptArchives_(state, onlyId, report) {
   let changed = false;
   let attempted = 0;
   const archive = function(item, kind) {
@@ -2958,6 +2964,7 @@ function workflowAttemptArchives_(state, onlyId) {
     }
     if (result.archivePending !== item.archivePending || result.archiveError !== item.archiveError || result.archivedAt !== item.archivedAt) {
       changed = true;
+      if (report && kind.indexOf("design:") === 0) report.designChanged = true;
       return { ...result, revision: Number(item.revision || 0) + 1, updatedAt: new Date().toISOString() };
     }
     return item;
@@ -3005,7 +3012,7 @@ function workflowCommand_(payload) {
   if (operation === "archive.retry") {
     if (!actor.manager && actor.permissions.indexOf("Ghi chú") < 0 && actor.permissions.indexOf("Thiết kế") < 0) throw workflowError_("FORBIDDEN", "Bạn không có quyền lưu trữ công việc.");
   } else workflowMayUse_(actor, operation.indexOf("design.") === 0 ? "Thiết kế" : "Ghi chú");
-  const state = workflowProject_(details);
+  const state = workflowProject_(details, operation === "archive.retry");
   const legacyImported = Boolean(state._legacyImportChanged);
   delete state._legacyImportChanged;
   const pruned = workflowPruneArchived_(state);
@@ -3013,9 +3020,11 @@ function workflowCommand_(payload) {
   const previousRequest = (state.requests || []).find(function(item) { return item.id === requestId; });
   if (previousRequest) {
     if (previousRequest.signature !== signature || previousRequest.actor !== actor.account) throw workflowError_("CONFLICT", "Mã yêu cầu đã được dùng cho nội dung hoặc nhân viên khác.");
-    const archiveChanged = workflowAttemptArchives_(state, previousRequest.targetId);
+    const archiveReport = {};
+    const canRetryArchive = operation === "note.complete" || operation === "design.complete" || operation === "archive.retry";
+    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport);
     if (archiveChanged) state.revision += 1;
-    if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state); }
+    if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state, { kind: payload.kind, designChanged: Boolean(archiveReport.designChanged) }); }
     return workflowProjectResponse_(state, payload, previousRequest.targetId, true, actor);
   }
   let targetId = String(payload.noteId || payload.rowId || "");
@@ -3063,10 +3072,11 @@ function workflowCommand_(payload) {
   state.revision += 1;
   workflowRememberRequest_(state, payload, signature, actor, targetId);
   workflowWriteProject_(state);
+  const projection = { kind: payload.kind, designChanged: operation.indexOf("design.") === 0 };
   if (operation === "note.complete" || operation === "design.complete" || operation === "archive.retry") {
-    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId)) { state.revision += 1; workflowWriteProject_(state); }
+    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection)) { state.revision += 1; workflowWriteProject_(state); }
   }
-  workflowProjectProjection_(state);
+  workflowProjectProjection_(state, projection);
   return workflowProjectResponse_(state, payload, targetId, false, actor);
 }
 
@@ -3122,16 +3132,32 @@ function workflowDesignCommand_(state, payload, actor) {
   state.design[kind] = currentRows;
 }
 
-function workflowProjectProjection_(state) {
+function workflowProjectProjection_(state, projection) {
   // Compatibility projections are rebuilt from the committed snapshot. A
   // failed projection never rolls back an accepted/completed canonical item.
+  try { cacheJson_(workNotesCacheKey_(state.details), state.notes, 21600); } catch (cacheError) { /* Optional CacheService failure must not skip a design workspace update. */ }
+  // Canonical projects are discovered through WORKFLOW_PROJECT_INDEX.
+  // Keep note commands off the global workspace write path; only design
+  // changes project their public progress fields into the workspace record.
+  if (!projection || !projection.designChanged) return;
   try {
-    cacheJson_(workNotesCacheKey_(state.details), state.notes, 21600);
-    // Canonical projects are discovered through WORKFLOW_PROJECT_INDEX.
-    // Do not duplicate their notes/tasks into legacy Property arrays: keeping
-    // those historic sources untouched also makes deferred imports safe.
     const workspace = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
-    if (workspace && Array.isArray(workspace.years)) { workspace.years = workflowProtectWorkspace_(workspace.years); workspace.updatedAt = Date.now(); writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, workspace); }
+    if (workspace && Array.isArray(workspace.years)) {
+      let found = false;
+      workspace.years = workspace.years.map(function(year) {
+        if (Number(year.year) !== state.details.year) return year;
+        return { ...year, months: (year.months || []).map(function(month, index) {
+          const monthNumber = /^T\d+$/.test(month.label) ? Number(month.label.slice(1)) : index + 1;
+          if (monthNumber !== state.details.month) return month;
+          return { ...month, records: (month.records || []).map(function(record) {
+            if (record.projectId !== state.details.projectId) return record;
+            found = true;
+            return workflowOverlayDesignRecord_(record, state, projection.kind);
+          }) };
+        }) };
+      });
+      if (found) { workspace.updatedAt = Date.now(); writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, workspace); }
+    }
   } catch (error) { /* All readers can recover directly from the canonical snapshot. */ }
 }
 
@@ -3141,8 +3167,14 @@ function workflowProtectWorkspace_(years, useReadCache) {
     const state = workflowReadProject_(details, Boolean(useReadCache));
     if (!state) return record;
     if (state.customerDeleted) return null;
+    return workflowOverlayDesignRecord_(record, state);
+  }).filter(Boolean) }; }) }; });
+}
+
+function workflowOverlayDesignRecord_(record, state, selectedKind) {
     const next = { ...record };
-    DESIGN_TASK_KINDS.forEach(function(kind) {
+    const kinds = DESIGN_TASK_KINDS.indexOf(selectedKind) >= 0 ? [selectedKind] : DESIGN_TASK_KINDS;
+    kinds.forEach(function(kind) {
       const field = kind === "interior" ? "interiorDesignProgress" : kind === "acceptance" ? "acceptanceDesignProgress" : "designProgress";
       const canonical = (state.design[kind] || []).filter(function(row) { return row.publishedAt; });
       const byId = new Map(canonical.map(function(row) { return [row.id, row]; }));
@@ -3150,7 +3182,6 @@ function workflowProtectWorkspace_(years, useReadCache) {
       next[field] = existing.map(function(row) { const current = byId.get(row.id); byId.delete(row.id); return current || (row.publishedAt ? null : row); }).filter(Boolean).concat(Array.from(byId.values()));
     });
     return next;
-  }).filter(Boolean) }; }) }; });
 }
 
 function workflowMessageSource_(id) {
@@ -3253,7 +3284,13 @@ function workflowMessagesView_(groups, states) {
   }).filter(function(group) { return group.status !== "resolved" || group.archivePending || !group.archivedAt; });
 }
 
-function workflowAssignedRegistry_(domain) {
+function workflowReadQueue_(domain, project, actor) {
+  const readContext = { project: project, actor: actor, projectRevisions: [], projectSnapshot: undefined };
+  const items = workflowAssignedRegistry_(domain, readContext);
+  return { items: items, projectRevisions: readContext.projectRevisions, projectSnapshot: readContext.projectSnapshot };
+}
+
+function workflowAssignedRegistry_(domain, readContext) {
   const index = workflowReadSnapshot_(WORKFLOW_PROJECT_INDEX, true) || [];
   const migrated = new Set();
   let result = [];
@@ -3261,7 +3298,16 @@ function workflowAssignedRegistry_(domain) {
     const state = workflowReadProject_(details, true);
     if (!state) return;
     migrated.add(details.year + ":" + details.month + ":" + details.projectId);
-    if (state.customerDeleted || isCustomerDriveRecordDeleted_(details)) return;
+    const deleted = state.customerDeleted || isCustomerDriveRecordDeleted_(details);
+    if (readContext && readContext.actor) {
+      const scope = { year: Number(details.year), month: Number(details.month), projectId: String(details.projectId), revision: state.revision };
+      readContext.projectRevisions.push(scope);
+      const requested = readContext.project;
+      if (domain === "notes" && requested && Number(requested.year) === scope.year && Number(requested.month) === scope.month && String(requested.projectId) === scope.projectId) {
+        readContext.projectSnapshot = deleted ? { ...scope, notes: [], deletedIds: state.deletedIds || [], deleted: true, legacyImportPending: false, legacyImportError: "" } : workflowSnapshot_(state, scope, readContext.actor);
+      }
+    }
+    if (deleted) return;
     result = result.concat(workflowProjectItems_(state, domain).filter(function(item) { return !item.actualDate && (domain === "notes" || item.publishedAt); }).map(function(item) { return { ...item, ...state.details, collectionRevision: state.revision }; }));
   });
   const legacy = domain === "notes" ? readActiveWorkNotes_() : readActiveDesignTasks_();
@@ -3340,12 +3386,13 @@ function loadAssignedDesignTasks_(payload) {
   if (actor) workflowMayUse_(actor, "Thiết kế");
   const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const tasks = workflowAssignedRegistry_("design").filter(function(task) { return !task.actualDate && !isCustomerDriveRecordDeleted_(task) && (actor || task.collectionRevision === undefined); });
-  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
-  const needsMemberLookup = tasks.some(function(task) { return /^member:/i.test(workNoteText_(task.assigneeEmail, 240)); });
-  const member = employeeRosterMember_(email);
-  if (member && member.role === "Quản lý chung") return { ok: true, tasks: tasks };
-  return { ok: true, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
+  const queue = workflowReadQueue_("design", undefined, actor);
+  const metadata = { ok: true, projectRevisions: actor ? queue.projectRevisions : [] };
+  const tasks = queue.items.filter(function(task) { return !task.actualDate && (actor || task.collectionRevision === undefined); });
+  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, tasks: tasks };
+  const member = actor ? actor.member : employeeRosterMember_(email);
+  if (member && member.role === "Quản lý chung") return { ...metadata, tasks: tasks };
+  return { ...metadata, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";

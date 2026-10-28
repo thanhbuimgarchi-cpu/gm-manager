@@ -1950,6 +1950,7 @@ export default function Home() {
   const [workflowSession, setWorkflowSession] = useState<{ token: string; scriptUrl: string; account: string } | null>(null);
   const [workflowOutbox, setWorkflowOutbox] = useState<WorkflowOutboxEntry[]>([]);
   const [legacyImportScopes, setLegacyImportScopes] = useState<Record<string, boolean>>({});
+  const [assignmentFeed, setAssignmentFeed] = useState<{ account: string; scriptUrl: string; revisions: Record<string, number>; activeIds: Set<string> } | null>(null);
   const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
@@ -2923,6 +2924,7 @@ export default function Home() {
       client.resumeForAccount({ account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), token });
       const entry = client.enqueue(projectWorkflowScope(location), { operation, year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId, customerName: location.record.name, ...values }, logical);
       onQueued?.();
+      setNotice("Đã giữ thay đổi trên thiết bị. Đang đồng bộ công việc…");
       const result = await client.execute(entry.requestId) as WorkflowServerResult;
       return workflowView.current.account === loggedInEmployeeEmail && workflowView.current.scriptUrl === driveScriptUrl ? result : null;
     } catch (error) {
@@ -3040,6 +3042,7 @@ export default function Home() {
     return candidates.length === 1 ? candidates[0] : undefined;
   };
   const openCustomerMessageTask = (message: CustomerMessageGroup) => {
+    if (hasWorkflowPending("message.assign", message.id, customerLocationForMessage(message))) { setNotice("Giao việc từ tin nhắn này đang chờ đồng bộ. Không cần phát hành lại."); return; }
     if (!canAssignCustomerMessages) {
       setNotice("Bạn có thể xem Tin nhắn khách, nhưng chỉ Admin và Quản lý chung được dùng để giao việc.");
       return;
@@ -3702,10 +3705,10 @@ export default function Home() {
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
-  const canModifyDesignRow = (row: DesignProgressRow) => Boolean(loggedInEmployee && !row.actualDate && (!row.publishedAt || row.creatorEmail === loggedInEmployeeEmail || canViewAllNotesAndMessages));
+  const canModifyDesignRow = (row: DesignProgressRow, kind: DesignProgressKind) => Boolean(loggedInEmployee && !row.actualDate && !hasWorkflowPending("design.publish", kind) && !hasWorkflowPending("design.accept", row.id) && !hasWorkflowPending("design.complete", row.id) && (!row.publishedAt || row.creatorEmail === loggedInEmployeeEmail || canViewAllNotesAndMessages));
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
     const currentRows = progressRowsFor(kind);
-    if (!currentRows[rowIndex] || !canModifyDesignRow(currentRows[rowIndex])) return;
+    if (!currentRows[rowIndex] || !canModifyDesignRow(currentRows[rowIndex], kind)) return;
     let nextValue = value;
     if (key === "plannedDate" || key === "actualDate") {
       nextValue = formatDesignDateInput(value);
@@ -3724,7 +3727,7 @@ export default function Home() {
 
   const updateDesignAssignee = (kind: DesignProgressKind, rowIndex: number, email: string) => {
     const row = progressRowsFor(kind)[rowIndex];
-    if (!row || !canModifyDesignRow(row)) return;
+    if (!row || !canModifyDesignRow(row, kind)) return;
     const member = assignablePersonnel.find((item) => personnelAssignmentKey(item) === email);
     const nextRows = progressRowsFor(kind).map((row, index) => index === rowIndex ? {
       ...row,
@@ -3769,11 +3772,12 @@ export default function Home() {
   const deleteDesignProgressRow = (kind: DesignProgressKind, rowIndex: number) => {
     const rows = progressRowsFor(kind);
     const row = rows[rowIndex];
-    if (!row?.isCustom || row.publishedAt || !canModifyDesignRow(row)) return;
+    if (!row?.isCustom || row.publishedAt || !canModifyDesignRow(row, kind)) return;
     commitDesignProgressRows(kind, rows.filter((_, index) => index !== rowIndex));
   };
 
   const moveDesignProgressRow = (kind: DesignProgressKind, rowIndex: number, direction: -1 | 1) => {
+    if (hasWorkflowPending("design.publish", kind)) return;
     const rows = progressRowsFor(kind);
     const destination = rowIndex + direction;
     if (destination < 0 || destination >= rows.length) return;
@@ -4334,13 +4338,17 @@ export default function Home() {
       if (cancelled || navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop) || driveRequestsInFlight.current.has(requestKey)) return;
       driveRequestsInFlight.current.add(requestKey);
       try {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", ...workflowAuthorization.current, email: loggedInEmployeeEmail });
+        const project = selectedCustomerLocation && activeFolder === "Ghi chú" ? { year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId } : undefined;
+        const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[]; projectRevisions?: { year: number; month: number; projectId: string; revision: number }[]; projectSnapshot?: WorkflowServerResult & { year: number; month: number; projectId: string } }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", ...workflowAuthorization.current, email: loggedInEmployeeEmail, project });
         if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
         const notes = result.notes.map((note) => {
           const cached = readDriveCache<WorkNote[]>(`work-notes-draft-v1:${note.year}-${note.month}-${note.projectId}`, DRIVE_FILE_LIST_CACHE_MS)?.find((item) => item.id === note.id);
           return cached && Number(cached.revision || 0) > Number(note.revision || 0) ? { ...note, ...cached } : note;
         }).filter((note) => !note.actualDate && !deletedWorkNotesFor(note.year, note.month, note.projectId).has(note.id)).map((note) => ({ ...note, status: workNoteStatus(note) }));
         setAssignedWorkNotes(notes);
+        if (result.projectRevisions) setAssignmentFeed({ account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), revisions: Object.fromEntries(result.projectRevisions.map((item) => [`${item.year}-${item.month}-${item.projectId}`, Number(item.revision || 0)])), activeIds: new Set(result.notes.map((note) => `${note.year}-${note.month}-${note.projectId}:${note.id}`)) });
+        const snapshot = result.projectSnapshot;
+        if (snapshot && selectedCustomerLocation && snapshot.year === selectedCustomerLocation.year && snapshot.month === selectedCustomerLocation.month && snapshot.projectId === selectedCustomerLocation.record.projectId && isCurrentWorkflowLocation(selectedCustomerLocation)) applyWorkflowNotes(selectedCustomerLocation, snapshot);
         if (selectedCustomerLocation && isCurrentWorkflowLocation(selectedCustomerLocation) && workflowView.current.activeFolder === "Ghi chú") {
           const forOpenedProject = notes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
           if (forOpenedProject.length) setWorkNotes((current) => newestWorkflowItems([...current, ...forOpenedProject]));
@@ -4480,6 +4488,7 @@ export default function Home() {
     const notesKeyPrefix = `${driveCachePrefix}work-notes-draft-v1:`;
     const locationsByKey = new Map(customerLocations.map((location) => [`${location.year}-${location.month}-${location.record.projectId}`, location]));
     const canSeeNote = (note: WorkNote) => canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail);
+    const feed = assignmentFeed?.account === loggedInEmployeeEmail && assignmentFeed.scriptUrl === driveScriptUrl.trim() ? assignmentFeed : null;
     const outstanding: OutstandingWorkNote[] = [];
     for (let index = 0; index < window.localStorage.length; index += 1) {
       const storageKey = window.localStorage.key(index);
@@ -4491,7 +4500,11 @@ export default function Home() {
         const virtualKey = new RegExp(`^(\\d+)-(\\d+)-${VIRTUAL_PANCAKE_TEST_PROJECT_ID}$`).exec(locationKey);
         const location = locationsByKey.get(locationKey) ?? (virtualKey ? createVirtualPancakeLocation(Number(virtualKey[1]), Number(virtualKey[2])) : null);
         if (!location) continue;
-        cached.value.filter((note) => note && !note.actualDate && canSeeNote(note)).forEach((note) => outstanding.push({ note, location }));
+        const snapshot = readDriveCache<{ revision?: number; deletedIds?: string[] }>(`work-note-snapshot:${locationKey}`, DRIVE_DOCUMENT_CACHE_MS);
+        const localRevision = workflowReadRevisions.current.get(`notes:${locationKey}`) ?? Number(snapshot?.revision || 0);
+        const sourceRevision = feed?.revisions[locationKey];
+        const deleted = new Set(snapshot?.deletedIds ?? []);
+        cached.value.filter((note) => note && !note.actualDate && canSeeNote(note) && !deleted.has(note.id) && (sourceRevision === undefined || sourceRevision < localRevision || feed!.activeIds.has(`${locationKey}:${note.id}`))).forEach((note) => outstanding.push({ note, location }));
       } catch {
         // Ignore a malformed cache item and keep the sidebar usable.
       }
@@ -4500,12 +4513,12 @@ export default function Home() {
       const location = locationsByKey.get(`${note.year}-${note.month}-${note.projectId}`)
         ?? (note.projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? createVirtualPancakeLocation(note.year, note.month) : null);
       if (!location || note.actualDate || !canSeeNote(note)) return;
-      const existing = outstanding.findIndex((item) => item.note.id === note.id);
+      const existing = outstanding.findIndex((item) => item.note.id === note.id && item.location.year === location.year && item.location.month === location.month && item.location.record.projectId === location.record.projectId);
       if (existing >= 0) outstanding[existing] = { note, location };
       else outstanding.push({ note, location });
     });
     return outstanding.sort((left, right) => compareOutstandingWorkNotes(left.note, right.note));
-  }, [assignedWorkNotes, canViewAllNotesAndMessages, customerLocations, loggedInEmployeeEmail, workNotesCacheRevision]);
+  }, [assignedWorkNotes, assignmentFeed, driveScriptUrl, canViewAllNotesAndMessages, customerLocations, loggedInEmployeeEmail, workNotesCacheRevision]);
   const savePersonnelCache = async (next: Record<string, PersonnelMember[]>) => {
     if (!driveScriptUrl.trim()) return;
     try {
@@ -4896,6 +4909,7 @@ export default function Home() {
         {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
+        {selectedCustomerLocation && workflowOutbox.filter((entry) => entry.account === loggedInEmployeeEmail && entry.scriptUrl === driveScriptUrl.trim() && entry.scope === projectWorkflowScope(selectedCustomerLocation) && (entry.payload.operation === "note.publish" || entry.payload.operation === "message.assign")).map((entry) => <div className="work-note-pending" role="status" key={entry.requestId}><b>{entry.state === "blocked" || entry.state === "conflict" ? "Chưa phát hành · cần kiểm tra" : "Đang phát hành công việc…"}</b><p>{String((entry.payload.note as WorkNote)?.content || (entry.payload.assignment as { content?: string })?.content || "Giao việc từ tin nhắn")}</p><small>{entry.error || "Nội dung đã giữ trên thiết bị. Chờ máy chủ xác nhận."}</small></div>)}
         {selectedCustomerLocation && legacyImportScopes[projectWorkflowScope(selectedCustomerLocation)] && <div className="workflow-item-status workflow-item-status--warning"><span>Chưa kiểm tra được ghi chú cũ trên Drive. Công việc mới vẫn được lưu.</span><button type="button" onClick={() => void runWorkflowCommand("archive.retry", {})}>Thử nạp dữ liệu cũ</button></div>}
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
@@ -5011,7 +5025,7 @@ export default function Home() {
             <tr key={row.id}>
               <td><div className="design-progress-content">
                 {row.isCustom
-                  ? <GrowingTextarea readOnly={!canModifyDesignRow(row)} value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
+                  ? <GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
                   : <b>{row.content}</b>}{row.assignmentDirty && <small className="workflow-item-status">Sửa đổi chưa phát hành</small>}
                 <span className="design-progress-content__actions">
                   <button type="button" onClick={() => moveDesignProgressRow(kind, index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
@@ -5019,11 +5033,11 @@ export default function Home() {
                   {row.isCustom && !row.publishedAt && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
                 </span>
               </div></td>
-              <td><input readOnly={!canModifyDesignRow(row)} value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><input readOnly={!canModifyDesignRow(row, kind)} value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
               <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small>{row.archivePending && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}<label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
-              <td><select disabled={!canModifyDesignRow(row)} className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
+              <td><select disabled={!canModifyDesignRow(row, kind)} className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
               <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && isAssignedToLoggedInEmployee(row.assigneeEmail) && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
-              <td><GrowingTextarea readOnly={!canModifyDesignRow(row)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+              <td><GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
         </table>
@@ -5133,7 +5147,7 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy || hasWorkflowPending("message.assign", message.id, customerLocationForMessage(message))} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
             {message.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Excel vào Drive. Tin nhắn vẫn được giữ tại đây.</span><button type="button" onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Thử lưu Drive</button></div>}
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>

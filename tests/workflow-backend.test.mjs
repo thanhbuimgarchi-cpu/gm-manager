@@ -11,6 +11,7 @@ function fixture(shared) {
   const values = shared || new Map();
   const cache = new Map();
   const propertyReads = [];
+  const propertyWrites = [];
   const cacheWrites = [];
   const clock = { now: Date.parse("2026-10-28T16:30:00Z") };
   class ClockDate extends Date { constructor(...args) { super(...(args.length ? args : [clock.now])); } static now() { return clock.now; } }
@@ -22,7 +23,7 @@ function fixture(shared) {
     { id: "manager", name: "Quản lý", email: "manager@example.com", status: "Có", loginCode: "004", role: "Quản lý chung", permissions: [] },
     { id: "viewer", name: "Người xem", email: "viewer@example.com", status: "Có", loginCode: "005", role: "Marketing", permissions: [] },
   ];
-  const properties = { getProperty: key => { propertyReads.push(key); return values.get(key) ?? null; }, setProperty: (key, value) => values.set(key, String(value)), deleteProperty: key => values.delete(key) };
+  const properties = { getProperty: key => { propertyReads.push(key); return values.get(key) ?? null; }, setProperty: (key, value) => { propertyWrites.push(key); values.set(key, String(value)); }, deleteProperty: key => values.delete(key) };
   const context = vm.createContext({
     console, Date: ClockDate,
     PropertiesService: { getScriptProperties: () => properties },
@@ -60,7 +61,7 @@ function fixture(shared) {
   const note = (id, extra = {}) => ({ id, priority: "Bình thường", workType: "Tư vấn", content: `Công việc ${id}`, dueDate: "30/10/2026", assigneeEmail: "alice@example.com", ...extra });
   const message = (id = "pancake-qa-2026-10-28", extra = {}) => ({ id, conversationId: "qa-conversation", groupName: "QA-101-GM-Tư vấn", ...scope, messages: [{ id: "line-one", senderName: "Khách", content: "Xin sửa phương án", sentAt: "2026-10-28T02:00:00Z" }], firstMessageAt: "2026-10-28T02:00:00Z", lastMessageAt: "2026-10-28T02:00:00Z", messageCount: 1, ...extra });
   const loadNotes = (actor = "admin") => context.loadWorkNotes_({ ...scope, workflowSessionToken: tokens[actor] });
-  return { context, values, cache, propertyReads, cacheWrites, clock, personnel, tokens, admin, command, note, message, loadNotes, driveCalls: () => driveCalls };
+  return { context, values, cache, propertyReads, propertyWrites, cacheWrites, clock, personnel, tokens, admin, command, note, message, loadNotes, driveCalls: () => driveCalls };
 }
 
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -444,8 +445,9 @@ test("deferred legacy import merges unknown notes without overwriting new versio
     return { getFilesByName: () => { let emitted = false; return { hasNext: () => !emitted, next: () => { emitted = true; return file; } }; } };
   };
   const replay = f.command("creator", "note.publish", { note: draft, requestId: "first-publish-stable" });
-  assert.equal(replay.repeated, true, "a request replay can finish deferred migration without repeating its mutation");
-  assert.equal(replay.legacyImportPending, false);
+  assert.equal(replay.repeated, true);
+  assert.equal(replay.legacyImportPending, true, "normal request replays stay off the legacy Drive import path");
+  f.command("creator", "archive.retry");
   const stored = f.loadNotes();
   assert.equal(stored.legacyImportPending, false);
   assert.equal(stored.notes.find(note => note.id === "same-id").content, "Bản mới đã xác nhận");
@@ -546,4 +548,126 @@ test("customer deletion/recreation masks old canonical and legacy jobs without r
     assert.deepEqual(plain(afterRetry.notes.map(note => note.id)), ["new-customer-note"]);
     assert.equal(afterRetry.revision, beforeRetryRevision, "a normal create retry never resets active new jobs");
   }
+});
+
+test("note and message-assignment hot paths do not read/write global workspace or unrelated project states", () => {
+  const f = fixture();
+  f.command("creator", "note.publish", { note: f.note("hotpath-edit") });
+  f.command("creator", "note.publish", { note: f.note("hotpath-delete") });
+  const unrelated = { ...scope, projectId: "GM-QA-UNRELATED", houseId: "QA-OTHER" };
+  f.context.workflowResetCustomerProject_(unrelated, false);
+  const workspace = f.context.readPropertyJson_("gmcrm-workspace-cache-v1");
+  workspace.years[0].months[9].records.push({ ...unrelated, details: {}, designProgress: [] });
+  f.context.writePropertyJson_("gmcrm-workspace-cache-v1", workspace);
+  const group = f.message("hotpath-message");
+  f.context.workflowIngestMessages_([group]);
+  const unrelatedKey = f.context.workflowProjectKey_(unrelated);
+  let archiveAttempts = 0;
+  f.context.workflowArchiveItem_ = () => { archiveAttempts += 1; return {}; };
+  const measure = action => {
+    f.propertyReads.length = 0;
+    f.propertyWrites.length = 0;
+    const result = action();
+    assert.equal(f.propertyReads.some(key => key.startsWith("gmcrm-workspace-cache-v1:")), false, "note commands do not parse the global workspace");
+    assert.equal(f.propertyWrites.some(key => key.startsWith("gmcrm-workspace-cache-v1:")), false, "note commands do not rewrite the global workspace");
+    assert.equal(f.propertyReads.some(key => key.startsWith(`${unrelatedKey}:`)), false, "note commands do not scan another project's design state");
+    assert.equal(f.driveCalls(), 0, "known canonical note mutations do not depend on legacy Drive reads");
+    return result;
+  };
+  const published = measure(() => f.command("creator", "note.publish", { note: f.note("hotpath-new") }));
+  measure(() => f.command("creator", "note.edit", { note: { ...published.note, content: "Nội dung cập nhật" }, expectedRevision: published.note.revision }));
+  measure(() => f.command("alice", "note.accept", { noteId: "hotpath-new" }));
+  measure(() => f.command("alice", "note.complete", { noteId: "hotpath-new" }));
+  assert.equal(archiveAttempts, 1, "completion still runs its explicit archival step");
+  measure(() => f.command("creator", "note.delete", { noteId: "hotpath-delete", expectedRevision: 1 }));
+  const assigned = measure(() => f.command("manager", "message.assign", { messageId: group.id, selectedLineIds: ["line-one"], assignment: f.note("hotpath-assigned") }));
+  assert.equal(assigned.note.sourceMessageId, group.id);
+});
+
+test("design projections update only their target record and survive optional cache failure", () => {
+  const f = fixture();
+  f.command("creator", "note.publish", { note: f.note("known-project") });
+  const unrelated = { ...scope, projectId: "GM-QA-DESIGN-UNRELATED", houseId: "QA-OTHER" };
+  f.context.workflowResetCustomerProject_(unrelated, false);
+  const workspace = f.context.readPropertyJson_("gmcrm-workspace-cache-v1");
+  const otherRecord = { ...unrelated, details: { preserved: "Giữ nguyên" }, designProgress: [{ id: "other-draft", content: "Hạng mục nhà khác", plannedDate: "", assigneeEmail: "", publishedAt: "" }] };
+  workspace.years[0].months[9].records.push(otherRecord);
+  f.context.writePropertyJson_("gmcrm-workspace-cache-v1", workspace);
+  const unrelatedKey = f.context.workflowProjectKey_(unrelated);
+  f.propertyReads.length = 0;
+  f.propertyWrites.length = 0;
+  f.context.CacheService = { getScriptCache() { throw new Error("Cache temporarily unavailable"); } };
+  const published = f.command("creator", "design.publish", { kind: "architecture", rows: [{ id: "target-design", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
+  assert.equal(published.rows[0].id, "target-design");
+  assert.equal(f.propertyReads.some(key => key.startsWith(`${unrelatedKey}:`)), false, "design projection does not load unrelated canonical states");
+  assert.ok(f.propertyWrites.some(key => key.startsWith("gmcrm-workspace-cache-v1:")));
+  const stored = f.context.readPropertyJson_("gmcrm-workspace-cache-v1");
+  assert.equal(stored.years[0].months[9].records[0].designProgress[0].id, "target-design");
+  assert.deepEqual(plain(stored.years[0].months[9].records[1]), otherRecord);
+});
+
+test("assigned feeds include removal revisions and the selected project snapshot without reading it twice", () => {
+  const f = fixture();
+  const published = f.command("creator", "note.publish", { note: f.note("remote-change") });
+  const key = f.context.workflowProjectKey_(scope);
+  f.propertyReads.length = 0;
+  const first = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice, project: scope });
+  assert.equal(f.propertyReads.filter(read => read === `${key}:manifest`).length, 1, "selected project snapshot reuses the queue's existing canonical read");
+  assert.deepEqual(plain(Object.keys(first.projectRevisions[0]).sort()), ["month", "projectId", "revision", "year"]);
+  assert.equal(first.projectSnapshot.notes[0].id, "remote-change");
+  assert.equal(first.projectSnapshot.revision, first.projectRevisions[0].revision);
+  const reassigned = f.command("creator", "note.edit", { note: { ...published.note, assigneeEmail: "bob@example.com" }, expectedRevision: published.note.revision });
+  const removedFromAlice = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice, project: scope });
+  assert.deepEqual(plain(removedFromAlice.notes), []);
+  assert.deepEqual(plain(removedFromAlice.projectSnapshot.notes), []);
+  assert.equal(removedFromAlice.projectRevisions[0].revision, reassigned.revision, "zero-active feed still invalidates a previous employee's cached assignment");
+  const bob = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.bob, project: scope });
+  assert.equal(bob.notes[0].id, "remote-change");
+  assert.equal(bob.projectSnapshot.notes[0].assigneeEmail, "bob@example.com");
+  const deleted = f.command("creator", "note.delete", { noteId: "remote-change", expectedRevision: reassigned.note.revision });
+  const removedFromBob = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.bob, project: scope });
+  assert.deepEqual(plain(removedFromBob.notes), []);
+  assert.equal(removedFromBob.projectRevisions[0].revision, deleted.revision);
+  assert.deepEqual(plain(removedFromBob.projectSnapshot.deletedIds), ["remote-change"]);
+  const unauthorized = f.context.loadAssignedWorkNotes_({ email: "admin", project: scope });
+  assert.deepEqual(plain(unauthorized.projectRevisions), []);
+  assert.equal(unauthorized.projectSnapshot, undefined);
+  const completed = fixture();
+  completed.command("creator", "note.publish", { note: completed.note("completed-history") });
+  completed.command("alice", "note.accept", { noteId: "completed-history" });
+  completed.context.workflowArchiveItem_ = () => ({});
+  completed.command("alice", "note.complete", { noteId: "completed-history" });
+  const snapshot = completed.context.loadAssignedWorkNotes_({ workflowSessionToken: completed.tokens.alice, project: scope });
+  assert.deepEqual(plain(snapshot.notes), []);
+  assert.equal(snapshot.projectSnapshot.notes[0].actualDate, "28/10/2026", "the same feed preserves completed history in the open project for two days");
+});
+
+test("a newly created empty customer seeds canonical cache before its first note/design publish", () => {
+  const f = fixture();
+  const newScope = { ...scope, projectId: "GM-QA-BRAND-NEW", houseId: "QA-NEW" };
+  const root = {}, customers = {}, year = {}, month = {};
+  const created = { getId: () => "qa-brand-new-folder", getName: () => newScope.houseId, getUrl: () => "https://drive.google.com/drive/folders/qa-brand-new-folder" };
+  f.context.rootFolder_ = () => root;
+  f.context.findFolder_ = () => null;
+  f.context.getOrCreateFolder_ = (parent, name) => {
+    if (parent === root && name === "Khách hàng") return customers;
+    if (parent === customers && name === "2026") return year;
+    if (parent === year && name === "T10") return month;
+    if (parent === month && name === newScope.houseId) return created;
+    throw new Error("unexpected folder creation");
+  };
+  f.context.ensureProjectFolders_ = () => {};
+  let legacyReads = 0;
+  f.context.workNotesFolder_ = () => { legacyReads += 1; throw new Error("DriveApp access denied"); };
+  f.context.createCustomerFolder_({ ...newScope, adminSessionToken: f.admin.adminSessionToken });
+  const blank = f.context.workflowReadProject_(newScope);
+  assert.ok(blank);
+  assert.equal(blank.legacyImportPending, false);
+  assert.deepEqual(plain(blank.notes), []);
+  const design = f.command("creator", "design.publish", { ...newScope, kind: "architecture", rows: [{ id: "brand-new-design", content: "Mặt bằng mới", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
+  assert.equal(design.rows[0].id, "brand-new-design");
+  const note = f.command("creator", "note.publish", { ...newScope, note: f.note("brand-new-note") });
+  assert.equal(note.note.id, "brand-new-note");
+  assert.equal(note.legacyImportPending, false);
+  assert.equal(legacyReads, 0, "the server's known-empty customer does not inspect Drive on first publication");
 });

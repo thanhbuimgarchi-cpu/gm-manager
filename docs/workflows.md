@@ -2,6 +2,8 @@
 
 Ghi chú, thiết kế và giao việc từ tin nhắn dùng `workflow-command`. Mỗi yêu cầu chỉ thay đổi một công việc, thay cho việc gửi lại cả danh sách từ trình duyệt.
 
+Phát hành, sửa, nhận và xóa ghi chú gửi một lệnh, không đọc lại toàn bộ danh sách trước khi ghi và không ghi lại workspace của các khách khác. Dự án đã có cache không nạp lại lịch sử Drive trên đường xử lý này; dữ liệu cũ chưa nạp được có nút thử riêng. Giao diện hiện nội dung đang phát hành ngay khi đã giữ yêu cầu trên thiết bị.
+
 - Máy chủ xác thực phiên đăng nhập, kiểm tra lại nhân viên đang hoạt động và quyền hiện tại.
 - Người tạo được sửa/xóa ghi chú chưa hoàn thành; người phụ trách được nhận và hoàn thành việc. Chỉ admin/quản lý giao việc từ tin nhắn.
 - Ngày hoàn thành và thời điểm nhận việc do máy chủ ghi theo giờ Việt Nam. Ngày dự kiến mới phải là hôm nay hoặc tương lai.
@@ -12,6 +14,8 @@ Ghi chú, thiết kế và giao việc từ tin nhắn dùng `workflow-command`.
 Trước khi gửi, trình duyệt giữ ý định thay đổi vào hàng đợi riêng cho tài khoản, kết nối và dự án. Hàng đợi không lưu token. Mỗi yêu cầu dùng một khóa lưu trữ riêng để các tab không ghi đè nhau.
 
 Giao diện chỉ cập nhật trạng thái đã phát hành/nhận/hoàn thành sau phản hồi xác nhận. Lỗi mạng hoặc lỗi máy chủ tạm thời được gửi lại có giới hạn. Lỗi quyền, dữ liệu và xung đột được giữ trong mục “Có thay đổi cần kiểm tra”; người dùng có thể đăng nhập lại, thử lại hoặc hủy yêu cầu.
+
+Feed công việc mang revision theo dự án và snapshot của dự án đang mở. Một lần cập nhật này đồng thời làm mới sidebar và nội dung ghi chú, kể cả việc hoàn thành, xóa hay giao lại trên thiết bị khác; không tạo thêm lượt tải riêng để làm mới editor.
 
 ## Lưu trữ
 
