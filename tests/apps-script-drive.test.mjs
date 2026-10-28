@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
@@ -24,7 +24,29 @@ function folder(name, createdAt) {
 }
 
 function loadContext(extra = {}) {
-  const context = vm.createContext({ console, ...extra });
+  const values = new Map();
+  const utilities = {
+    base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url"),
+    base64DecodeWebSafe: (value) => [...Buffer.from(value, "base64url")],
+    newBlob: (value) => ({ getDataAsString: () => Buffer.from(value).toString("utf8") }),
+    getUuid: randomUUID,
+    Charset: { UTF_8: "utf8" }, DigestAlgorithm: { SHA_256: "sha256" },
+    computeHmacSha256Signature: (value, secret) => [...createHmac("sha256", secret).update(value).digest()],
+    computeDigest: (_algorithm, value) => [...createHash("sha256").update(value).digest()],
+    formatDate: (date, timeZone, format) => {
+      const parts = new Intl.DateTimeFormat("en-GB", { timeZone, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(date);
+      const part = (type) => parts.find((item) => item.type === type)?.value;
+      const tokens = { dd: part("day"), MM: part("month"), yyyy: part("year"), HH: part("hour"), mm: part("minute"), ss: part("second") };
+      return format.replace(/yyyy|dd|MM|HH|mm|ss/g, (token) => tokens[token]);
+    },
+  };
+  const context = vm.createContext({
+    console,
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => values.get(key) ?? null, setProperty: (key, value) => values.set(key, String(value)), deleteProperty: (key) => values.delete(key) }) },
+    LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
+    ...extra,
+    Utilities: { ...utilities, ...extra.Utilities },
+  });
   vm.runInContext(source, context);
   return context;
 }
@@ -697,22 +719,23 @@ test("completed normal groups export once while Bùi Đức Thành stays a test-
   assert.equal(exports, 1);
 });
 
-test("Pancake customer messages are grouped into two-hour windows", () => {
+test("Pancake customer messages use fixed two-hour windows from the first message rather than extending after every message", () => {
   const context = loadContext();
   const groups = context.groupPancakeMessages_(
     { id: "conversation-1", from: { name: "HP-587-GM-Tư vấn" }, page_customer: { name: "Nguyễn Tùng" } },
     [
       { id: "m-2", text: "Tin thứ hai", inserted_at: "2026-09-03T10:20:00.000Z", from: { name: "Nguyễn Tùng" } },
       { id: "m-1", text: "Tin thứ nhất", inserted_at: "2026-09-03T09:00:00.000Z", from: { name: "Nguyễn Tùng" } },
-      { id: "m-3", text: "Tin đúng hai giờ", inserted_at: "2026-09-03T12:20:00.000Z", from: { name: "Nguyễn Tùng" } },
+      { id: "m-3", text: "Tin sau cửa sổ đầu tiên", inserted_at: "2026-09-03T12:20:00.000Z", from: { name: "Nguyễn Tùng" } },
       { id: "m-4", text: "Tin mới", inserted_at: "2026-09-03T14:20:01.000Z", from: { name: "Nguyễn Tùng" } },
     ],
     { houseId: "HP-587", projectId: "GM09092026NT", customerName: "Nguyễn Tùng", year: 2026, month: 9 },
   );
-  assert.equal(groups.length, 2);
-  assert.equal(groups[0].messageCount, 3);
+  assert.equal(groups.length, 3);
+  assert.equal(groups[0].messageCount, 2);
   assert.equal(groups[0].messages[0].content, "Tin thứ nhất");
-  assert.equal(groups[1].messages[0].content, "Tin mới");
+  assert.equal(groups[1].messages[0].content, "Tin sau cửa sổ đầu tiên");
+  assert.equal(groups[2].messages[0].content, "Tin mới");
 });
 
 test("employee credentials are stored as a hash and verified by the server", () => {
@@ -784,7 +807,7 @@ test("personnel Excel export and import round-trip the login-code column as text
   const range = { setValues(value) { exportedRows = value; return this; }, setFontFamily() { return this; }, setWrap() { return this; }, setVerticalAlignment() { return this; }, setFontWeight() { return this; }, setBackground() { return this; }, setNumberFormat() { return this; } };
   const sheet = { setName() {}, getRange(row, column, rows, columns) { if (row === 2) numberFormats.push(column); return range; }, setFrozenRows() {}, setColumnWidth() {}, hideColumns(column) { hidden.push(column); }, autoResizeRows() {}, getLastRow: () => exportedRows.length };
   const context = loadContext({ SpreadsheetApp: { create: () => ({ getSheets: () => [sheet], getId: () => "temporary" }) }, DriveApp: { getFileById: () => ({ setTrashed() {} }) } });
-  context.personnelFolder_ = () => ({ createFile: () => ({ getId: () => "exported", getUrl: () => "file-url" }) });
+  context.personnelFolder_ = () => ({ getFilesByName: () => iterator([]), createFile: () => ({ getId: () => "exported", getUrl: () => "file-url" }) });
   context.trashFilesByName_ = () => {};
   context.exportXlsx_ = () => ({ setName() { return this; } });
   context.syncPersonnelWorkbook_({ office: [{ id: "p1", name: "Nguyễn An", email: "an@example.com", loginCode: "00123", permissions: [], phone: "0912345678" }] });

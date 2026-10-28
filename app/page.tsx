@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
+import { createWorkflowClient, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
 
 function WorkspaceIcon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, string> = {
@@ -185,6 +186,14 @@ type DesignProgressRow = {
   acceptedAt?: string;
   acceptedBy?: string;
   publishedAt?: string;
+  creatorEmail?: string;
+  creatorName?: string;
+  completedAt?: string;
+  revision?: number;
+  archivedAt?: string;
+  archivePending?: boolean;
+  archiveStatus?: string;
+  assignmentDirty?: boolean;
   note: string;
 };
 
@@ -324,6 +333,11 @@ type WorkNote = {
   status: WorkNoteStatus;
   messageContext?: string;
   sourceMessageId?: string;
+  revision?: number;
+  publishedAt?: string;
+  archivedAt?: string;
+  archivePending?: boolean;
+  archiveStatus?: string;
 };
 
 type AssignedWorkNote = WorkNote & {
@@ -369,6 +383,26 @@ type CustomerMessageGroup = {
   status: CustomerMessageStatus;
   resolvedAt?: string;
   statusUpdatedAt?: string;
+  revision?: number;
+  archivedAt?: string;
+  archivePending?: boolean;
+};
+
+type WorkflowServerResult = {
+  ok: boolean;
+  error?: string;
+  code?: string;
+  revision?: number;
+  deletedIds?: string[];
+  notes?: WorkNote[];
+  note?: WorkNote;
+  rows?: DesignProgressRow[];
+  design?: Partial<Record<DesignProgressKind, DesignProgressRow[]>>;
+  tasks?: AssignedDesignTask[];
+  message?: CustomerMessageGroup;
+  archivePending?: boolean;
+  repeated?: boolean;
+  legacyImportPending?: boolean;
 };
 
 type CustomerMessageTaskDraft = {
@@ -501,6 +535,7 @@ const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
 const adminSessionStorageKey = "gm-manager-admin-session-v1";
+const workflowSessionStorageKey = "gm-manager-workflow-session-v1";
 function isCurrentAdminSession(session: { token: string; scriptUrl: string } | null, scriptUrl: string) {
   if (!session?.token || session.scriptUrl !== scriptUrl.trim()) return false;
   try {
@@ -510,6 +545,13 @@ function isCurrentAdminSession(session: { token: string; scriptUrl: string } | n
     // the signature and remains the authority for every create/delete request.
     const claims = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
     return claims.version === 1 && claims.account === "admin" && claims.purpose === "customer-admin" && Number.isFinite(claims.expiresAt) && claims.expiresAt > Date.now();
+  } catch { return false; }
+}
+function isCurrentWorkflowSession(session: { token: string; account: string; scriptUrl: string } | null, account: string, scriptUrl: string) {
+  if (!session?.token || session.account !== account || session.scriptUrl !== scriptUrl.trim()) return false;
+  try {
+    const claims = JSON.parse(atob(session.token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/")));
+    return claims.version === 2 && claims.purpose === "workflow" && claims.account === account && Number.isFinite(claims.expiresAt) && claims.expiresAt > Date.now();
   } catch { return false; }
 }
 const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
@@ -974,6 +1016,7 @@ const normalizeDesignProgress = (record?: WorkRecord | null, kind: DesignProgres
   const normalized = existing.map((row, index) => {
     const isCustom = row.isCustom ?? !isFixedDesignContent(row.content ?? "", kind);
     return {
+      ...row,
       id: row.id || `${definition.idPrefix}-${isCustom ? "custom" : "fixed"}-legacy-${index}`,
       isCustom,
       content: row.content ?? "",
@@ -1440,6 +1483,16 @@ function workRecordQuality(record: WorkRecord) {
   return score;
 }
 
+function mergeWorkflowDesignRows(preferred?: DesignProgressRow[], other?: DesignProgressRow[]) {
+  if (!preferred && !other) return undefined;
+  const newest = new Map<string, DesignProgressRow>();
+  for (const row of [...(other ?? []), ...(preferred ?? [])]) {
+    const previous = newest.get(row.id);
+    if (!previous || Number(row.revision || 0) > Number(previous.revision || 0) || (Number(row.revision || 0) === Number(previous.revision || 0) && (!previous.assignmentDirty || row.assignmentDirty))) newest.set(row.id, row);
+  }
+  const orderedIds = [...new Set([...(preferred ?? []).map((row) => row.id), ...(other ?? []).map((row) => row.id)])];
+  return orderedIds.map((id) => newest.get(id)!);
+}
 function mergeDuplicateWorkRecords(primary: WorkRecord, secondary: WorkRecord) {
   const primaryWins = workRecordQuality(primary) >= workRecordQuality(secondary);
   const winner = primaryWins ? primary : secondary;
@@ -1448,9 +1501,9 @@ function mergeDuplicateWorkRecords(primary: WorkRecord, secondary: WorkRecord) {
     ...other,
     ...winner,
     details: { ...(other.details ?? {}), ...(winner.details ?? {}) },
-    designProgress: winner.designProgress?.length ? winner.designProgress : other.designProgress,
-    interiorDesignProgress: winner.interiorDesignProgress?.length ? winner.interiorDesignProgress : other.interiorDesignProgress,
-    acceptanceDesignProgress: winner.acceptanceDesignProgress?.length ? winner.acceptanceDesignProgress : other.acceptanceDesignProgress,
+    designProgress: mergeWorkflowDesignRows(winner.designProgress, other.designProgress),
+    interiorDesignProgress: mergeWorkflowDesignRows(winner.interiorDesignProgress, other.interiorDesignProgress),
+    acceptanceDesignProgress: mergeWorkflowDesignRows(winner.acceptanceDesignProgress, other.acceptanceDesignProgress),
     warrantyProgress: winner.warrantyProgress?.length ? winner.warrantyProgress : other.warrantyProgress,
     functionalFloors: winner.functionalFloors?.length ? winner.functionalFloors : other.functionalFloors,
     functionalRows: winner.functionalRows?.length ? winner.functionalRows : other.functionalRows,
@@ -1542,17 +1595,7 @@ function formatWorkNoteDate(date = new Date()) {
 }
 
 function workNoteStatus(note: Pick<WorkNote, "acceptedAt" | "dueDate">): WorkNoteStatus {
-  if (!note.acceptedAt) return "Đen";
-  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(note.dueDate || "");
-  if (!match) return "Xanh";
-  const due = new Date(Number(match[3]), Number(match[2]) - 1, Number(match[1]));
-  due.setHours(0, 0, 0, 0);
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const days = Math.floor((due.getTime() - today.getTime()) / 86_400_000);
-  if (days < 0) return "Tím";
-  if (days <= 3) return "Đỏ";
-  if (days <= 7) return "Cam";
-  return "Xanh";
+  return workflowStatus(note);
 }
 
 function designTaskStatus(task: Pick<DesignProgressRow, "acceptedAt" | "plannedDate">): WorkNoteStatus {
@@ -1560,9 +1603,15 @@ function designTaskStatus(task: Pick<DesignProgressRow, "acceptedAt" | "plannedD
 }
 
 function shouldKeepWorkNote(note: WorkNote, now = Date.now()) {
-  if (!note.actualDate || !note.completedAt) return true;
-  const completedAt = new Date(note.completedAt).getTime();
-  return !Number.isFinite(completedAt) || now - completedAt < 2 * 24 * 60 * 60 * 1000;
+  return keepCompletedWorkflow(note, now);
+}
+function newestWorkflowItems<T extends { id: string; revision?: number }>(items: T[]) {
+  const newest = new Map<string, T>();
+  for (const item of items) {
+    const previous = newest.get(item.id);
+    if (!previous || Number(item.revision || 0) >= Number(previous.revision || 0)) newest.set(item.id, item);
+  }
+  return [...newest.values()];
 }
 
 function nameInitials(name: string) {
@@ -1694,7 +1743,7 @@ function removeDriveCache(key: string) {
 
 function clearDriveClientCache() {
   try {
-    Object.keys(window.localStorage).filter((key) => key.startsWith(driveCachePrefix)).forEach((key) => window.localStorage.removeItem(key));
+    Object.keys(window.localStorage).filter((key) => key.startsWith(driveCachePrefix) && !key.startsWith(`${driveCachePrefix}work-note-editor:`)).forEach((key) => window.localStorage.removeItem(key));
   } catch {
     // Cache cleanup is optional; the next Drive refresh remains authoritative.
   }
@@ -1736,6 +1785,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
           // overwrite cached form/progress data.
           const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const merged = localRecord ? { ...record, ...localRecord } : { ...record };
+          for (const field of ["designProgress", "interiorDesignProgress", "acceptanceDesignProgress"] as const) merged[field] = mergeWorkflowDesignRows(localRecord?.[field], record[field]);
           const driveRecordKnown = driveProjectIds.has(record.projectId) || Boolean(record.houseId?.trim() && driveProjectIds.has(record.houseId.trim()));
           return {
             ...merged,
@@ -1788,6 +1838,7 @@ function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFo
           const localUpdatedAt = Number(localRecord?.cacheUpdatedAt ?? 0);
           const sharedUpdatedAt = Number(record.cacheUpdatedAt ?? 0);
           const merged = localRecord && localUpdatedAt > sharedUpdatedAt ? { ...record, ...localRecord } : { ...localRecord, ...record };
+          for (const field of ["designProgress", "interiorDesignProgress", "acceptanceDesignProgress"] as const) merged[field] = mergeWorkflowDesignRows(localUpdatedAt > sharedUpdatedAt ? localRecord?.[field] : record[field], localUpdatedAt > sharedUpdatedAt ? record[field] : localRecord?.[field]);
           return isKnownDriveRecord(merged) ? { ...merged, pendingDriveSync: false } : merged;
         });
         localRecords.filter((record) => !sharedProjectIds.has(record.projectId)).forEach((record) => records.unshift(record));
@@ -1840,6 +1891,9 @@ export default function Home() {
   const [employeeAuthBusy, setEmployeeAuthBusy] = useState(false);
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
   const [adminSession, setAdminSession] = useState<{ token: string; scriptUrl: string } | null>(null);
+  const [workflowSession, setWorkflowSession] = useState<{ token: string; scriptUrl: string; account: string } | null>(null);
+  const [workflowOutbox, setWorkflowOutbox] = useState<WorkflowOutboxEntry[]>([]);
+  const [legacyImportScopes, setLegacyImportScopes] = useState<Record<string, boolean>>({});
   const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
@@ -1918,7 +1972,6 @@ export default function Home() {
   const customerCreateRequestsInFlight = useRef(new Set<string>());
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
-  const locallyDeletedWorkNoteIds = useRef(new Set<string>());
   const workspaceSyncTimer = useRef<number | null>(null);
   const workspaceSyncPending = useRef<YearFolder[] | null>(null);
   const workspaceSyncInFlight = useRef(false);
@@ -1932,7 +1985,19 @@ export default function Home() {
   const driveIndexFingerprints = useRef(new Map<string, string>());
   const driveRefreshRequested = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
-  const pendingWorkNotesSync = useRef(new Map<string, WorkNote[]>());
+  const workflowClient = useRef<WorkflowClient | null>(null);
+  const workflowResultHandler = useRef<(entry: WorkflowOutboxEntry, result: WorkflowServerResult) => void>(() => {});
+  const workflowReadRevisions = useRef(new Map<string, number>());
+  const assignedDesignTasksRef = useRef<AssignedDesignTask[]>([]);
+  assignedDesignTasksRef.current = assignedDesignTasks;
+  const workflowDeletedNotes = useRef(new Map<string, Set<string>>());
+  const workNoteDraftScope = useRef("");
+  const workflowRequestInFlight = useRef(new Set<string>());
+  const workflowAuthorization = useRef({ workflowSessionToken: "", adminSessionToken: "" });
+  const currentWorkflowToken = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token : loggedInEmployeeEmail === builtInAdminAccount && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
+  workflowAuthorization.current = { workflowSessionToken: currentWorkflowToken, adminSessionToken: currentWorkflowToken };
+  const workflowView = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, activeFolder, account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl });
+  workflowView.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, activeFolder, account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl };
   const personnelLoadRevision = useRef(0);
   const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
   const documentViewContext = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId });
@@ -2051,8 +2116,37 @@ export default function Home() {
       setLoggedInEmployeeEmail(String(window.localStorage.getItem(personnelSessionEmailKey) ?? "").trim().toLowerCase());
       const savedAdminSession = JSON.parse(window.localStorage.getItem(adminSessionStorageKey) ?? "null");
       if (typeof savedAdminSession?.token === "string" && typeof savedAdminSession?.scriptUrl === "string") setAdminSession(savedAdminSession);
+      const savedWorkflowSession = JSON.parse(window.localStorage.getItem(workflowSessionStorageKey) ?? "null");
+      if (typeof savedWorkflowSession?.token === "string" && typeof savedWorkflowSession?.scriptUrl === "string" && typeof savedWorkflowSession?.account === "string") setWorkflowSession(savedWorkflowSession);
     } catch { /* A shared roster can still be loaded when local storage is unavailable. */ }
   }, []);
+
+  useEffect(() => {
+    try {
+      workflowClient.current = createWorkflowClient({
+        storage: window.localStorage,
+        isOnline: () => navigator.onLine !== false,
+        send: async (payload, identity) => {
+          const { response, result } = await postToAppsScript<WorkflowServerResult>({ scriptUrl: identity.scriptUrl }, { ...payload, adminSessionToken: identity.token });
+          return { ...result, status: response.status };
+        },
+        onChange: setWorkflowOutbox,
+        onResult: (entry, result) => workflowResultHandler.current(entry, result as WorkflowServerResult),
+      });
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Không thể mở dữ liệu công việc trên thiết bị."); }
+    const refresh = () => { void workflowClient.current?.flush(); };
+    const refreshPeerCommands = (event: StorageEvent) => { if (event.key?.startsWith("gm-manager-workflow-outbox-v1")) workflowClient.current?.refresh(); };
+    window.addEventListener("online", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("storage", refreshPeerCommands);
+    return () => { window.removeEventListener("online", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("storage", refreshPeerCommands); workflowClient.current?.dispose(); workflowClient.current = null; };
+  }, []);
+
+  useEffect(() => {
+    const token = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token
+      : loggedInEmployeeEmail === builtInAdminAccount && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
+    workflowClient.current?.resumeForAccount(token ? { account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), token } : null);
+  }, [loggedInEmployeeEmail, driveScriptUrl, workflowSession, adminSession]);
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
@@ -2640,103 +2734,175 @@ export default function Home() {
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
   const workNotesCacheKey = (location = selectedCustomerLocation) => location ? `work-notes-draft-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
-  const rememberPendingWorkNotes = (notes: WorkNote[], location = selectedCustomerLocation) => {
-    const cacheKey = workNotesCacheKey(location);
-    if (cacheKey) {
-      pendingWorkNotesSync.current.set(cacheKey, notes);
-      // Ignore an older Drive read that started before this local mutation.
-      workNotesLoadRevision.current += 1;
-    }
+  const workNoteEditorKey = (location = selectedCustomerLocation) => location && loggedInEmployeeEmail ? `work-note-editor:${loggedInEmployeeEmail}:${location.year}-${location.month}-${location.record.projectId}` : "";
+  useEffect(() => {
+    const key = workNoteEditorKey();
+    if (key && workNoteDraftScope.current === key) writeDriveCache(key, { newNote: newWorkNote, editingNote: editingWorkNote });
+  }, [newWorkNote, editingWorkNote, selectedCustomerProjectId, selectedYear, selectedMonth, loggedInEmployeeEmail]);
+  const projectWorkflowScope = (location: CustomerLocation) => `${location.year}-${location.month}-${location.record.projectId}`;
+  const isCurrentWorkflowLocation = (location: CustomerLocation) => {
+    const view = workflowView.current;
+    return view.year === location.year && view.month === location.month && view.projectId === location.record.projectId;
   };
-  const syncWorkNotesToSharedStore = async (notes: WorkNote[], location = selectedCustomerLocation) => {
-    if (!location || !driveScriptUrl.trim()) return;
-    const cacheKey = workNotesCacheKey(location);
-    // An employee may act on a sidebar assignment before the project has
-    // finished loading. Read the full collection before replacing the shared
-    // array so that notes assigned to colleagues cannot be dropped.
-    const loaded = await postToAppsScript<{ ok?: boolean; error?: string; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId });
-    if (!loaded.response.ok || !loaded.result.ok || !Array.isArray(loaded.result.notes)) throw new Error(loaded.result.error || "Chưa thể nạp đầy đủ ghi chú để đồng bộ an toàn. Thay đổi đã lưu trên thiết bị.");
-    const mergedNotes = mergeWorkNotesForSync(loaded.result.notes, notes, locallyDeletedWorkNoteIds.current);
-    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; storage?: string; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "sync-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId, notes: mergedNotes });
-    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ghi chú được giao.");
-    writeDriveCache(cacheKey, mergedNotes);
-    if (pendingWorkNotesSync.current.get(cacheKey) === notes) pendingWorkNotesSync.current.delete(cacheKey);
-    return result;
+  const deletedWorkNotesFor = (year: number, month: number, projectId: string) => {
+    const scope = `${year}-${month}-${projectId}`;
+    if (!workflowDeletedNotes.current.has(scope)) {
+      const saved = readDriveCache<{ revision: number; deletedIds: string[] }>(`work-note-snapshot:${scope}`, DRIVE_DOCUMENT_CACHE_MS);
+      workflowDeletedNotes.current.set(scope, new Set(saved?.deletedIds ?? []));
+      workflowReadRevisions.current.set(`notes:${scope}`, saved?.revision ?? 0);
+    }
+    return workflowDeletedNotes.current.get(scope)!;
+  };
+  const applyWorkflowNotes = (location: CustomerLocation, result: WorkflowServerResult) => {
+    if (!result.notes) return;
+    const scope = projectWorkflowScope(location);
+    const deleted = deletedWorkNotesFor(location.year, location.month, location.record.projectId);
+    const revision = Number(result.revision || 0);
+    if (revision < (workflowReadRevisions.current.get(`notes:${scope}`) ?? 0)) return;
+    result.deletedIds?.forEach((id) => deleted.add(id));
+    const notes = result.notes.filter((note) => !deleted.has(note.id) && shouldKeepWorkNote(note));
+    workflowReadRevisions.current.set(`notes:${scope}`, revision);
+    writeDriveCache(`work-note-snapshot:${scope}`, { revision, deletedIds: [...deleted], legacyImportPending: Boolean(result.legacyImportPending) });
+    setLegacyImportScopes((current) => ({ ...current, [scope]: Boolean(result.legacyImportPending) }));
+    writeDriveCache(workNotesCacheKey(location), notes);
+    workNotesLoadRevision.current += 1;
+    if (isCurrentWorkflowLocation(location)) setWorkNotes(notes);
+    setAssignedWorkNotes((current) => [
+      ...current.filter((note) => note.year !== location.year || note.month !== location.month || note.projectId !== location.record.projectId),
+      ...notes.filter((note) => !note.actualDate && (canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail))).map((note) => ({ ...note, year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId, customerName: location.record.name })),
+    ]);
+    setWorkNotesCacheRevision((revision) => revision + 1);
+  };
+  const applyWorkflowDesign = (location: CustomerLocation, kind: DesignProgressKind, rows: DesignProgressRow[]) => {
+    const field = designProgressDefinitions[kind].field;
+    const nextYears = yearsRef.current.map((year) => year.year !== location.year ? year : { ...year, months: year.months.map((month, index) => index + 1 !== location.month ? month : { ...month, records: month.records.map((record) => {
+      if (record.projectId !== location.record.projectId) return record;
+      const current = record[field] ?? [];
+      const merged = mergeWorkflowDesignRows(rows, current) ?? [];
+      const updated = { ...record, [field]: merged, cacheUpdatedAt: Date.now() };
+      writeDriveCache(`detail:${location.year}:${location.month}:${record.projectId}`, updated);
+      return updated;
+    }) }) });
+    yearsRef.current = nextYears;
+    persist(nextYears, false);
+    setAssignedDesignTasks((current) => [
+      ...current.filter((row) => row.year !== location.year || row.month !== location.month || row.projectId !== location.record.projectId || row.kind !== kind),
+      ...rows.filter((row) => row.publishedAt && !row.actualDate && (canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(row.assigneeEmail || ""))).map((row) => ({ ...row, kind, title: designProgressDefinitions[kind].title, year: location.year, month: location.month, projectId: location.record.projectId, customerName: location.record.name, houseId: location.record.houseId })),
+    ]);
+  };
+  const workflowMessageVisible = (message: CustomerMessageGroup) => message.status !== "resolved" || Boolean(message.archivePending);
+  const applyWorkflowMessage = (message: CustomerMessageGroup) => {
+    const normalized = normalizeCustomerMessageGroup(message);
+    writeDriveCache(`workflow-message-state:${message.id}`, normalized);
+    setCustomerMessages((current) => {
+      const previous = current.find((item) => item.id === normalized.id);
+      if (Number(previous?.revision || 0) > Number(normalized.revision || 0)) return current;
+      const next = current.filter((item) => item.id !== normalized.id);
+      if (workflowMessageVisible(normalized)) next.push(normalized);
+      writeDriveCache(customerMessagesCacheKey(), next);
+      return next;
+    });
+  };
+  workflowResultHandler.current = (entry, result) => {
+    const payload = entry.payload;
+    const location = { year: Number(payload.year), month: Number(payload.month), record: { projectId: String(payload.projectId || ""), houseId: String(payload.houseId || ""), name: String(payload.customerName || "") } } as CustomerLocation;
+    if (!isVirtualPancakeLocation(location) && !yearsRef.current.some((year) => year.year === location.year && year.months?.[location.month - 1]?.records.some((record) => record.projectId === location.record.projectId))) return;
+    if (result.notes) applyWorkflowNotes(location, result);
+    if (result.rows && ["architecture", "interior", "acceptance"].includes(String(payload.kind))) applyWorkflowDesign(location, payload.kind as DesignProgressKind, result.rows);
+    if (payload.operation === "archive.retry" && result.design) for (const kind of ["architecture", "interior", "acceptance"] as const) {
+      if (kind !== payload.kind && result.design[kind]) applyWorkflowDesign(location, kind, result.design[kind]!);
+    }
+    if (result.message) applyWorkflowMessage(result.message);
+    if (entry.payload.operation === "note.publish") setNewWorkNote((draft) => draft?.id === (payload.note as WorkNote)?.id ? null : draft);
+    if (entry.payload.operation === "note.edit") setEditingWorkNote((draft) => draft?.id === (payload.note as WorkNote)?.id ? null : draft);
+    const labels: Record<string, string> = { "note.publish": "Đã phát hành ghi chú.", "note.edit": "Đã lưu sửa đổi.", "note.delete": "Đã xóa ghi chú.", "note.accept": "Đã xác nhận nhận việc.", "note.complete": "Đã ghi nhận hoàn thành.", "design.publish": "Đã phát hành thiết kế.", "design.accept": "Đã xác nhận nhận việc thiết kế.", "design.complete": "Đã ghi nhận hoàn thành hạng mục.", "message.assign": "Đã giao việc từ tin nhắn.", "message.status": "Đã cập nhật trạng thái tin nhắn.", "archive.retry": "Đã kiểm tra lưu trữ công việc." };
+    setNotice(result.archivePending ? "Đã ghi nhận thay đổi. Chưa lưu được Drive; dữ liệu được giữ lại để thử lại." : labels[String(payload.operation)] || "Đã đồng bộ công việc.");
+  };
+  const hasWorkflowPending = (operation: string, id: string, location = selectedCustomerLocation) => Boolean(location && workflowOutbox.some((entry) => entry.account === loggedInEmployeeEmail && entry.scriptUrl === driveScriptUrl.trim() && entry.scope === projectWorkflowScope(location) && entry.logicalKey === `${operation}:${id}`));
+  const runWorkflowCommand = async (operation: string, values: Record<string, unknown>, location = selectedCustomerLocation, onQueued?: () => void): Promise<WorkflowServerResult | null> => {
+    const token = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token
+      : isBuiltInAdminLoggedIn && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
+    if (!location || !loggedInEmployeeEmail || !token) {
+      setEmployeeLoginError("");
+      setEmployeeLoginPassword("");
+      setEmployeeLoginEmail(loggedInEmployee?.name ?? "");
+      setLoginOpen(true);
+      setNotice("Hãy đăng nhập lại để xác thực quyền giao và hoàn thành công việc.");
+      return null;
+    }
+    const client = workflowClient.current;
+    if (!client) { setNotice("Chưa thể mở dữ liệu công việc trên thiết bị."); return null; }
+    const id = String(values.noteId || (values.note as WorkNote)?.id || values.rowId || values.messageId || values.kind || operation);
+    const logical = `${operation}:${id}`;
+    const requestKey = `${projectWorkflowScope(location)}:${logical}`;
+    if (workflowRequestInFlight.current.has(requestKey)) return null;
+    workflowRequestInFlight.current.add(requestKey);
+    try {
+      client.resumeForAccount({ account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), token });
+      const entry = client.enqueue(projectWorkflowScope(location), { operation, year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId, customerName: location.record.name, ...values }, logical);
+      onQueued?.();
+      const result = await client.execute(entry.requestId) as WorkflowServerResult;
+      return workflowView.current.account === loggedInEmployeeEmail && workflowView.current.scriptUrl === driveScriptUrl ? result : null;
+    } catch (error) {
+      if (workflowView.current.account === loggedInEmployeeEmail && workflowView.current.scriptUrl === driveScriptUrl) setNotice(error instanceof Error ? error.message : "Thay đổi đang được giữ trên thiết bị, chờ máy chủ xác nhận.");
+      return null;
+    } finally { workflowRequestInFlight.current.delete(requestKey); }
   };
   const loadWorkNotes = async () => {
-    if (!selectedCustomerLocation) return;
+    const location = selectedCustomerLocation;
+    if (!location) return;
+    const editorKey = workNoteEditorKey(location);
+    if (workNoteDraftScope.current !== editorKey) {
+      const saved = editorKey ? readDriveCache<{ newNote?: WorkNote; editingNote?: WorkNote }>(editorKey, DRIVE_DOCUMENT_CACHE_MS) : null;
+      workNoteDraftScope.current = editorKey;
+      setNewWorkNote(saved?.newNote ?? null);
+      setEditingWorkNote(saved?.editingNote ?? null);
+    }
+    const scope = projectWorkflowScope(location);
+    const snapshot = readDriveCache<{ legacyImportPending?: boolean }>(`work-note-snapshot:${scope}`, DRIVE_DOCUMENT_CACHE_MS);
+    if (snapshot?.legacyImportPending) setLegacyImportScopes((current) => ({ ...current, [scope]: true }));
     const loadRevision = ++workNotesLoadRevision.current;
-    setNewWorkNote(null);
-    setEditingWorkNote(null);
+    const deleted = deletedWorkNotesFor(location.year, location.month, location.record.projectId);
+    const cached = (readDriveCache<WorkNote[]>(workNotesCacheKey(location), DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => !deleted.has(note.id) && shouldKeepWorkNote(note));
+    setWorkNotes(cached);
     setWorkNoteMenuId(null);
-    const cacheKey = workNotesCacheKey();
-    // Keep the complete project collection in storage. Visibility belongs to
-    // rendering; filtering this array would erase colleagues' notes on save.
-    const cachedNotes = (readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? []).filter((note) => shouldKeepWorkNote(note));
-    setWorkNotes(cachedNotes);
-    if (cachedNotes.length) writeDriveCache(cacheKey, cachedNotes);
-    else removeDriveCache(cacheKey);
     setLoadingWorkNotes(false);
     if (!driveScriptUrl.trim()) return;
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId });
-      if (loadRevision !== workNotesLoadRevision.current) return;
-      if (response.ok && result.ok && Array.isArray(result.notes)) {
-        const serverNotes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id));
-        const assignedForProject = assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId && !locallyDeletedWorkNoteIds.current.has(note.id));
-        const pendingNotes = pendingWorkNotesSync.current.get(cacheKey) ?? [];
-        const mergedNotes = Array.from(new Map([...serverNotes, ...assignedForProject, ...pendingNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note));
-        setWorkNotes(mergedNotes);
-        writeDriveCache(cacheKey, mergedNotes);
-        setWorkNotesCacheRevision((revision) => revision + 1);
-      }
-    } catch { /* Keep the local cache available while offline. */ }
+      const { response, result } = await postToAppsScript<WorkflowServerResult>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", ...workflowAuthorization.current, year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId });
+      if (loadRevision !== workNotesLoadRevision.current || !isCurrentWorkflowLocation(location)) return;
+      if (response.ok && result.ok && result.notes) applyWorkflowNotes(location, result);
+    } catch { /* The confirmed local snapshot remains available offline. */ }
   };
   const saveCompletedWorkNoteToDrive = async (note: WorkNote, location = selectedCustomerLocation) => {
-    if (!location || !driveScriptUrl.trim()) {
-      openDriveSettings();
-      setNotice("Cần kết nối Google Apps Script trước khi lưu công việc hoàn thành vào Drive.");
-      return;
-    }
+    if (!note.acceptedAt) { setNotice("Hãy xác nhận nhận việc trước khi hoàn thành."); return; }
     setSavingWorkNotes(true);
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; virtual?: boolean; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "complete-work-note",
-        year: location.year,
-        month: location.month,
-        projectId: location.record.projectId,
-        houseId: location.record.houseId,
-        actorEmail: loggedInEmployeeEmail,
-        note,
-      });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu công việc hoàn thành vào Drive.");
-      const nextNotes = [...workNotes.filter((item) => item.id !== note.id), note];
-      persistWorkNotes(nextNotes, location);
-      setNotice(result.virtual ? (result.driveWarning || "Đã hoàn thành công việc khách ảo; không tạo tệp Drive.") : "Đã xuất công việc hoàn thành vào Drive. Việc sẽ nằm cuối danh sách trong 2 ngày.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể lưu công việc hoàn thành vào Drive.");
-    } finally {
-      setSavingWorkNotes(false);
-    }
+    try { await runWorkflowCommand("note.complete", { noteId: note.id }, location); }
+    finally { setSavingWorkNotes(false); }
   };
   const persistWorkNotes = (nextNotes: WorkNote[], location = selectedCustomerLocation) => {
-    setWorkNotes(nextNotes);
-    const cacheKey = workNotesCacheKey(location);
-    if (!cacheKey) return;
-    if (nextNotes.length) writeDriveCache(cacheKey, nextNotes);
-    else removeDriveCache(cacheKey);
+    if (!location) return;
+    writeDriveCache(workNotesCacheKey(location), nextNotes);
+    if (isCurrentWorkflowLocation(location)) setWorkNotes(nextNotes);
     setWorkNotesCacheRevision((revision) => revision + 1);
   };
   const customerMessagesCacheKey = (location?: CustomerLocation | null) => location
     ? "customer-messages:" + location.year + "-" + location.month + "-" + location.record.projectId
     : "customer-messages:all";
+  const reconcileWorkflowMessage = (message: CustomerMessageGroup) => {
+    const next = normalizeCustomerMessageGroup(message);
+    const cached = readDriveCache<CustomerMessageGroup>(`workflow-message-state:${message.id}`, DRIVE_DOCUMENT_CACHE_MS);
+    if (cached && Number(cached.revision || 0) > Number(next.revision || 0)) return cached;
+    writeDriveCache(`workflow-message-state:${message.id}`, next);
+    return next;
+  };
   const loadCustomerMessages = async (location?: CustomerLocation | null, refresh = false) => {
     const cacheKey = customerMessagesCacheKey(location);
     const requestKey = `customer-messages:${cacheKey}`;
     if (driveRequestsInFlight.current.has(requestKey)) return;
     const cached = readDriveCache<CustomerMessageGroup[]>(cacheKey, 10 * 60 * 1000);
     if (cached && !refresh) {
-      setCustomerMessages(cached.map(normalizeCustomerMessageGroup));
+      setCustomerMessages(cached.map(reconcileWorkflowMessage).filter(workflowMessageVisible));
       setCustomerMessagesError("");
     }
     if (!driveScriptUrl.trim()) return;
@@ -2766,7 +2932,7 @@ export default function Home() {
         setCustomerMessagesError("Chưa cấu hình Pancake trong Apps Script.");
         return;
       }
-      const next = (Array.isArray(result.messages) ? result.messages : []).map(normalizeCustomerMessageGroup);
+      const next = (Array.isArray(result.messages) ? result.messages : []).map(reconcileWorkflowMessage).filter(workflowMessageVisible);
       setCustomerMessages(next);
       writeDriveCache(cacheKey, next);
     } catch (error) {
@@ -2777,37 +2943,20 @@ export default function Home() {
     }
   };
   const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
-    if (customerMessageStatusBusyId) return;
-    const previous = customerMessages;
-    const next = status === "resolved"
-      ? previous.filter((item) => item.id !== message.id)
-      : previous.map((item) => item.id === message.id ? { ...item, status, resolvedAt: "" } : item);
-    setCustomerMessages(next);
+    if (customerMessageStatusBusyId || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))) return;
+    const location = customerLocationForMessage(message);
+    if (!location) { setNotice("Tin nhắn chưa ghép được với hồ sơ khách hàng."); return; }
     setCustomerMessageStatusBusyId(message.id);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; exported?: boolean }>({ scriptUrl: driveScriptUrl.trim() }, { action: "update-customer-message-status", message: { ...message, status }, status });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật trạng thái tin nhắn.");
-      writeDriveCache(customerMessagesCacheKey(), next);
-      if (selectedCustomerLocation) writeDriveCache(customerMessagesCacheKey(selectedCustomerLocation), next);
-      if (status === "resolved") {
-        setNotice(result.exported ? "Đã lưu Tin nhắn khách vào Excel trong Tài liệu của khách và xoá khỏi web." : "Đã hoàn thành tin nhắn test; không xuất Drive.");
-      } else if (status === "new") {
-        setActiveFolder(customerMessageReturnFolder.current || "Tư vấn");
-        setNotice("Đã chuyển về Chưa xem; Tin nhắn khách vẫn nhấp đỏ.");
-      } else {
-        setNotice("Đã chuyển Tin nhắn khách sang “Đang xử lý”; tin nhắn sẽ nhấp xanh.");
-      }
-    } catch (error) {
-      setCustomerMessages(previous);
-      setNotice(error instanceof Error ? error.message : "Không thể cập nhật trạng thái tin nhắn.");
-    } finally {
-      setCustomerMessageStatusBusyId("");
-    }
+      const result = await runWorkflowCommand("message.status", { messageId: message.id, message, status, expectedRevision: Number(message.revision || 0) }, location);
+      if (result && status === "new" && isCurrentWorkflowLocation(location) && workflowView.current.activeFolder === "Tin nhắn") setActiveFolder(customerMessageReturnFolder.current || "Tư vấn");
+    } finally { setCustomerMessageStatusBusyId(""); }
   };
-  const customerLocationForMessage = (message: CustomerMessageGroup) => isVirtualPancakeTestMessage(message)
-    ? createVirtualPancakeLocation(message.year, message.month)
-    : customerLocations.find((item) => message.projectId && item.record.projectId === message.projectId)
-      ?? customerLocations.find((item) => customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId));
+  const customerLocationForMessage = (message: CustomerMessageGroup) => {
+    if (isVirtualPancakeTestMessage(message)) return createVirtualPancakeLocation(message.year, message.month);
+    const candidates = customerLocations.filter((item) => item.year === message.year && item.month === message.month && (message.projectId ? item.record.projectId === message.projectId : customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId)));
+    return candidates.length === 1 ? candidates[0] : undefined;
+  };
   const openCustomerMessageTask = (message: CustomerMessageGroup) => {
     if (!canAssignCustomerMessages) {
       setNotice("Bạn có thể xem Tin nhắn khách, nhưng chỉ Admin và Quản lý chung được dùng để giao việc.");
@@ -2842,65 +2991,20 @@ export default function Home() {
   const publishCustomerMessageTask = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const draft = customerMessageTaskDraft;
-    if (!draft || customerMessageTaskBusy) return;
-    if (!canAssignCustomerMessages) {
-      setCustomerMessageTaskDraft(null);
-      setNotice("Chỉ Admin và Quản lý chung được giao việc từ Tin nhắn khách.");
-      return;
-    }
+    if (!draft || customerMessageTaskBusy || !canAssignCustomerMessages) return;
     const location = customerLocationForMessage(draft.message);
-    const selectedLines = draft.message.messages.filter((line) => draft.selectedLineIds.includes(line.id));
     if (!location) { setNotice("Tin nhắn chưa ghép với hồ sơ khách hàng."); return; }
-    if (!selectedLines.length) { setNotice("Hãy chọn ít nhất một dòng tin nhắn."); return; }
-    const assignee = assignablePersonnel.find((member) => personnelAssignmentKey(member) === draft.assigneeEmail);
-    if (!assignee) { setNotice("Hãy chọn Người phụ trách."); return; }
+    if (!draft.selectedLineIds.length) { setNotice("Hãy chọn ít nhất một dòng tin nhắn."); return; }
+    if (!assignablePersonnel.some((member) => personnelAssignmentKey(member) === draft.assigneeEmail)) { setNotice("Hãy chọn Người phụ trách đang hoạt động."); return; }
     if (!draft.request.trim()) { setNotice("Hãy nhập yêu cầu giao việc."); return; }
     if (!parseDesignDate(draft.dueDate) || isPastVietnamDate(draft.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
-
-    const messageContext = selectedLines.map((line) => `${line.senderName}: ${line.content} (${customerMessageDate(line.sentAt)})`).join("\n");
-    const note: WorkNote = {
-      id: `work-note-message-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      priority: draft.priority,
-      workType: draft.workType,
-      assignee: assignee.name,
-      content: draft.request.trim(),
-      dueDate: draft.dueDate,
-      actualDate: "",
-      creatorEmail: loggedInEmployeeEmail,
-      creatorName: loggedInEmployee?.name ?? loggedInEmployeeEmail,
-      assigneeEmail: personnelAssignmentKey(assignee),
-      status: "Đen",
-      messageContext,
-      sourceMessageId: draft.message.id,
-    };
-    const cacheKey = workNotesCacheKey(location);
-    const cachedNotes = readDriveCache<WorkNote[]>(cacheKey, DRIVE_FILE_LIST_CACHE_MS) ?? [];
-    let baseNotes = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId
-      ? workNotes
-      : cachedNotes;
     setCustomerMessageTaskBusy(true);
     try {
-      const isOpenedLocation = selectedCustomerLocation?.year === location.year && selectedCustomerLocation.month === location.month && selectedCustomerLocation.record.projectId === location.record.projectId;
-      if (!isOpenedLocation && driveScriptUrl.trim()) {
-        // The overview may not have loaded this customer's notes yet. Read
-        // them once before replacing the shared array so a new assignment
-        // cannot erase older notes that are not in this device cache.
-        try {
-          const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: WorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-work-notes", year: location.year, month: location.month, projectId: location.record.projectId, houseId: location.record.houseId });
-          if (response.ok && result.ok && Array.isArray(result.notes)) baseNotes = Array.from(new Map([...result.notes, ...baseNotes].map((item) => [item.id, item])).values());
-        } catch { /* The local cache remains the safe fallback while offline. */ }
-      }
-      const nextNotes = [...baseNotes.filter((item) => item.id !== note.id), note];
-      persistWorkNotes(nextNotes, location);
-      rememberPendingWorkNotes(nextNotes, location);
-      setCustomerMessageTaskDraft(null);
-      const result = await syncWorkNotesToSharedStore(nextNotes, location);
-      setNotice(result?.driveWarning ? `Đã phát hành giao việc. ${result.driveWarning}` : "Đã phát hành giao việc và thông báo cho Người phụ trách.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Đã lưu giao việc vào cache; chưa thể đồng bộ dùng chung.");
-    } finally {
-      setCustomerMessageTaskBusy(false);
-    }
+      await runWorkflowCommand("message.assign", {
+        messageId: draft.message.id, message: draft.message, selectedLineIds: draft.selectedLineIds,
+        assignment: { id: `work-note-message-${crypto.randomUUID()}`, priority: draft.priority, workType: draft.workType, assigneeEmail: draft.assigneeEmail, content: draft.request.trim(), dueDate: draft.dueDate },
+      }, location, () => setCustomerMessageTaskDraft(null));
+    } finally { setCustomerMessageTaskBusy(false); }
   };
   const addWorkNote = () => {
     if (!loggedInEmployee) { setNotice("Hãy đăng nhập trước khi tạo và giao việc."); setLoginOpen(true); return; }
@@ -2923,75 +3027,49 @@ export default function Home() {
     setNewWorkNote((note) => note ? { ...note, [field]: value } as WorkNote : note);
   };
   const publishNewWorkNote = async () => {
-    if (!newWorkNote) return;
-    if (!newWorkNote.assigneeEmail) { setNotice("Hãy chọn Người phụ trách trước khi phát hành ghi chú."); return; }
-    if (!parseDesignDate(newWorkNote.dueDate) || isPastVietnamDate(newWorkNote.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
-    const next = [...workNotes, { ...newWorkNote, status: workNoteStatus(newWorkNote) }];
-    persistWorkNotes(next);
-    rememberPendingWorkNotes(next);
-    setNewWorkNote(null);
-    try {
-      const result = await syncWorkNotesToSharedStore(next);
-      setNotice(result?.driveWarning ? `Đã giao việc và lưu dùng chung. ${result.driveWarning}` : "Đã giao việc và đồng bộ cho người được gắn.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc."); }
-  };
-  const updateWorkNote = (id: string, field: Exclude<keyof WorkNote, "id">, value: string) => {
-    persistWorkNotes(workNotes.map((note) => note.id === id ? { ...note, [field]: value } as WorkNote : note));
+    const note = newWorkNote;
+    if (workNoteDraftScope.current !== workNoteEditorKey()) { setNotice("Bản nháp thuộc hồ sơ khác. Hãy mở đúng khách hàng để tiếp tục."); return; }
+    if (!note || hasWorkflowPending("note.publish", note.id)) return;
+    if (!note.content.trim()) { setNotice("Hãy nhập nội dung công việc."); return; }
+    if (!assignablePersonnel.some((member) => personnelAssignmentKey(member) === note.assigneeEmail)) { setNotice("Hãy chọn Người phụ trách đang hoạt động."); return; }
+    if (!parseDesignDate(note.dueDate) || isPastVietnamDate(note.dueDate)) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
+    await runWorkflowCommand("note.publish", { note }, selectedCustomerLocation, () => setNewWorkNote(null));
   };
   const updateEditingWorkNote = (field: Exclude<keyof WorkNote, "id">, value: string) => {
     setEditingWorkNote((note) => note ? { ...note, [field]: value } as WorkNote : note);
   };
   const startEditingWorkNote = (note: WorkNote) => {
+    if (note.creatorEmail !== loggedInEmployeeEmail || note.actualDate) { setNotice("Chỉ người tạo có thể sửa công việc chưa hoàn thành."); return; }
+    if (hasWorkflowPending("note.edit", note.id)) { setNotice("Sửa đổi của công việc này đang chờ đồng bộ."); return; }
     setWorkNoteMenuId(null);
     setEditingWorkNote({ ...note });
   };
   const saveEditingWorkNote = async () => {
-    if (!editingWorkNote) return;
-    if (!editingWorkNote.assigneeEmail) { setNotice("Hãy chọn Người phụ trách trước khi lưu ghi chú."); return; }
-    const original = workNotes.find((note) => note.id === editingWorkNote.id);
-    if (!parseDesignDate(editingWorkNote.dueDate) || (editingWorkNote.dueDate !== original?.dueDate && isPastVietnamDate(editingWorkNote.dueDate))) { setNotice("Hoàn thành dự kiến phải là ngày hôm nay hoặc tương lai, theo dạng dd/mm/yyyy."); return; }
-    const next = workNotes.map((note) => {
-      if (note.id !== editingWorkNote.id) return note;
-      return reconcileWorkNoteEdit(note, editingWorkNote);
-    });
-    persistWorkNotes(next);
-    rememberPendingWorkNotes(next);
-    setEditingWorkNote(null);
-    try { await syncWorkNotesToSharedStore(next); setNotice("Đã lưu thay đổi và đồng bộ người được giao."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ thay đổi."); }
+    const note = editingWorkNote;
+    if (workNoteDraftScope.current !== workNoteEditorKey()) { setNotice("Bản sửa thuộc hồ sơ khác. Hãy mở đúng khách hàng để tiếp tục."); return; }
+    if (!note || hasWorkflowPending("note.edit", note.id)) return;
+    if (!note.content.trim() || !note.assigneeEmail) { setNotice("Hãy nhập nội dung và chọn Người phụ trách."); return; }
+    const original = workNotes.find((item) => item.id === note.id);
+    if (!parseDesignDate(note.dueDate) || (note.dueDate !== original?.dueDate && isPastVietnamDate(note.dueDate))) { setNotice("Ngày dự kiến mới phải là hôm nay hoặc tương lai."); return; }
+    await runWorkflowCommand("note.edit", { note, expectedRevision: Number(note.revision || 0) }, selectedCustomerLocation, () => setEditingWorkNote(null));
   };
   const removeWorkNote = async (id: string) => {
     const note = workNotes.find((item) => item.id === id);
     if (!note || note.creatorEmail !== loggedInEmployeeEmail) { setNotice("Chỉ người tạo ghi chú mới có thể xóa."); return; }
-    locallyDeletedWorkNoteIds.current.add(id);
-    workNotesLoadRevision.current += 1;
-    const next = workNotes.filter((item) => item.id !== id);
-    persistWorkNotes(next);
-    rememberPendingWorkNotes(next);
-    setAssignedWorkNotes((current) => current.filter((item) => item.id !== id));
-    if (editingWorkNote?.id === id) setEditingWorkNote(null);
+    await runWorkflowCommand("note.delete", { noteId: id, expectedRevision: Number(note.revision || 0) });
     setWorkNoteMenuId(null);
-    try {
-      await syncWorkNotesToSharedStore(next);
-      setNotice("Đã xóa ghi chú và cập nhật người được giao.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ việc xóa ghi chú.");
-    }
   };
   const confirmWorkNoteCompletion = () => {
-    if (!pendingWorkNoteCompletionId) return;
-    const noteId = pendingWorkNoteCompletionId;
+    const id = pendingWorkNoteCompletionId;
+    if (!id) return;
     setPendingWorkNoteCompletionId(null);
-    const note = workNotes.find((item) => item.id === noteId) ?? assignedWorkNotes.find((item) => item.id === noteId);
-    if (!note || !isAssignedToLoggedInEmployee(note.assigneeEmail)) { setNotice("Chỉ người được giao việc mới có thể xác nhận hoàn thành."); return; }
-    if (note) void saveCompletedWorkNoteToDrive({ ...note, actualDate: formatWorkNoteDate(), completedAt: new Date().toISOString() });
+    const note = workNotes.find((item) => item.id === id);
+    if (!note || !isAssignedToLoggedInEmployee(note.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới được hoàn thành công việc."); return; }
+    void saveCompletedWorkNoteToDrive(note);
   };
   const acceptAssignedWorkNote = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!location || !isAssignedToLoggedInEmployee(note.assigneeEmail)) return;
-    const accepted = { ...note, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail, status: workNoteStatus({ ...note, acceptedAt: new Date().toISOString() }) };
-    const next = [...workNotes.filter((item) => item.id !== note.id), accepted];
-    persistWorkNotes(next, location);
-    rememberPendingWorkNotes(next, location);
-    try { await syncWorkNotesToSharedStore(next, location); setNotice("Đã xác nhận nhận việc."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận nhận việc."); }
+    await runWorkflowCommand("note.accept", { noteId: note.id }, location);
   };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
@@ -3542,8 +3620,10 @@ export default function Home() {
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
+  const canModifyDesignRow = (row: DesignProgressRow) => Boolean(loggedInEmployee && !row.actualDate && (!row.publishedAt || row.creatorEmail === loggedInEmployeeEmail || canViewAllNotesAndMessages));
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
     const currentRows = progressRowsFor(kind);
+    if (!currentRows[rowIndex] || !canModifyDesignRow(currentRows[rowIndex])) return;
     let nextValue = value;
     if (key === "plannedDate" || key === "actualDate") {
       nextValue = formatDesignDateInput(value);
@@ -3552,7 +3632,7 @@ export default function Home() {
         return;
       }
     }
-    const nextRows = currentRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue } : row);
+    const nextRows = currentRows.map((row, index) => index === rowIndex ? { ...row, [key]: nextValue, assignmentDirty: Boolean(row.publishedAt) } : row);
     if ((key === "plannedDate" || key === "actualDate") && nextValue.length === 10 && !hasSequentialDesignDates(nextRows, key)) {
       setNotice(`${key === "plannedDate" ? "Ngày dự kiến" : "Ngày thực tế"} phải tăng dần theo thứ tự từ trên xuống.`);
       return;
@@ -3561,72 +3641,38 @@ export default function Home() {
   };
 
   const updateDesignAssignee = (kind: DesignProgressKind, rowIndex: number, email: string) => {
+    const row = progressRowsFor(kind)[rowIndex];
+    if (!row || !canModifyDesignRow(row)) return;
     const member = assignablePersonnel.find((item) => personnelAssignmentKey(item) === email);
     const nextRows = progressRowsFor(kind).map((row, index) => index === rowIndex ? {
       ...row,
       assignee: member?.name ?? "",
       assigneeEmail: member ? personnelAssignmentKey(member) : "",
-      acceptedAt: "",
-      acceptedBy: "",
-      publishedAt: "",
-      actualDate: row.actualDate,
+      assignmentDirty: Boolean(row.publishedAt),
     } : row);
     commitDesignProgressRows(kind, nextRows);
   };
 
-  const syncDesignTasksToSharedStore = async (kind: DesignProgressKind, rows: DesignProgressRow[], location = selectedCustomerLocation) => {
-    if (!location || !driveScriptUrl.trim()) return;
-    const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-      action: "sync-design-tasks",
-      year: location.year,
-      month: location.month,
-      projectId: location.record.projectId,
-      customerName: location.record.name,
-      houseId: location.record.houseId,
-      kind,
-      title: designProgressDefinitions[kind].title,
-      rows,
-    });
-    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ tiến độ được giao.");
-  };
-
   const publishDesignTasks = async (kind: DesignProgressKind) => {
-    const pendingRows = progressRowsFor(kind).filter((row) => row.content.trim() && !row.actualDate);
-    if (!pendingRows.length) { setNotice("Chưa có hạng mục chưa hoàn thành để phát hành."); return; }
-    if (pendingRows.some((row) => !row.assigneeEmail || !parseDesignDate(row.plannedDate) || isPastVietnamDate(row.plannedDate))) {
-      setNotice("Mỗi hạng mục chưa hoàn thành phải có Người phụ trách và ngày dự kiến hôm nay hoặc tương lai trước khi phát hành.");
+    if (hasWorkflowPending("design.publish", kind)) return;
+    const rows = progressRowsFor(kind);
+    const candidates = rows.filter((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt));
+    if (!candidates.length) { setNotice("Hãy chọn Người phụ trách và ngày dự kiến cho hạng mục cần phát hành."); return; }
+    if (candidates.some((row) => !row.assigneeEmail || !parseDesignDate(row.plannedDate) || (!row.publishedAt && isPastVietnamDate(row.plannedDate)))) {
+      setNotice("Hạng mục được giao phải có Người phụ trách và ngày dự kiến hợp lệ; ngày mới phải là hôm nay hoặc tương lai.");
       return;
     }
-    const publishedAt = new Date().toISOString();
-    const nextRows = progressRowsFor(kind).map((row) => !row.actualDate && row.content.trim() ? { ...row, publishedAt } : row);
-    commitDesignProgressRows(kind, nextRows);
-    try {
-      await syncDesignTasksToSharedStore(kind, nextRows);
-      setNotice(`Đã phát hành ${designProgressDefinitions[kind].title.toLocaleLowerCase("vi")} cho người phụ trách.`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Đã lưu tạm trên thiết bị; chưa thể đồng bộ giao việc.");
-    }
+    await runWorkflowCommand("design.publish", { kind, title: designProgressDefinitions[kind].title, rows });
   };
-
   const acceptDesignTask = async (kind: DesignProgressKind, rowId: string) => {
-    const rows = progressRowsFor(kind);
-    const row = rows.find((item) => item.id === rowId);
+    const row = progressRowsFor(kind).find((item) => item.id === rowId);
     if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới có thể xác nhận nhận việc."); return; }
-    const nextRows = rows.map((item) => item.id === rowId ? { ...item, acceptedAt: new Date().toISOString(), acceptedBy: loggedInEmployeeEmail } : item);
-    commitDesignProgressRows(kind, nextRows);
-    try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã xác nhận nhận việc thiết kế."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ xác nhận."); }
+    await runWorkflowCommand("design.accept", { kind, rowId });
   };
-
   const completeDesignTask = async (kind: DesignProgressKind, rowId: string) => {
-    const rows = progressRowsFor(kind);
-    const row = rows.find((item) => item.id === rowId);
-    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới có thể hoàn thành hạng mục."); return; }
-    if (!row.acceptedAt) { setNotice("Hãy xác nhận nhận việc trước khi hoàn thành."); return; }
-    const today = getVietnamDate();
-    const actualDate = `${String(today.day).padStart(2, "0")}/${String(today.month).padStart(2, "0")}/${today.year}`;
-    const nextRows = rows.map((item) => item.id === rowId ? { ...item, actualDate } : item);
-    commitDesignProgressRows(kind, nextRows);
-    try { await syncDesignTasksToSharedStore(kind, nextRows); setNotice("Đã ghi nhận hoàn thành hạng mục."); } catch (error) { setNotice(error instanceof Error ? error.message : "Chưa thể đồng bộ hoàn thành."); }
+    const row = progressRowsFor(kind).find((item) => item.id === rowId);
+    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt) { setNotice("Người phụ trách cần xác nhận nhận việc trước khi hoàn thành."); return; }
+    await runWorkflowCommand("design.complete", { kind, rowId });
   };
 
   const confirmDesignTaskCompletion = () => {
@@ -3641,7 +3687,7 @@ export default function Home() {
   const deleteDesignProgressRow = (kind: DesignProgressKind, rowIndex: number) => {
     const rows = progressRowsFor(kind);
     const row = rows[rowIndex];
-    if (!row?.isCustom) return;
+    if (!row?.isCustom || row.publishedAt || !canModifyDesignRow(row)) return;
     commitDesignProgressRows(kind, rows.filter((_, index) => index !== rowIndex));
   };
 
@@ -3754,9 +3800,14 @@ export default function Home() {
       persist(nextYears);
       const matchesTarget = (item: { year: number; month: number; projectId: string }) => item.year === year && item.month === month && item.projectId === record.projectId;
       if (type === "delete") {
+        const scope = `${year}-${month}-${record.projectId}`;
+        try { workflowClient.current?.pending().filter((entry) => entry.scope === scope).forEach((entry) => workflowClient.current?.discard(entry.requestId)); } catch { /* A retained intent will be rejected by the server's deletion tombstone. */ }
+        try { for (const key of Object.keys(window.localStorage)) if (key === `${driveCachePrefix}work-note-snapshot:${scope}` || key === `${driveCachePrefix}detail:${year}:${month}:${record.projectId}` || (key.startsWith(`${driveCachePrefix}work-note-editor:`) && key.endsWith(`:${scope}`))) window.localStorage.removeItem(key); } catch { /* Optional local cleanup cannot invalidate a confirmed Drive deletion. */ }
+        if (workNoteDraftScope.current === workNoteEditorKey({ year, month, record })) { workNoteDraftScope.current = ""; setNewWorkNote(null); setEditingWorkNote(null); }
         const notesKey = `work-notes-draft-v1:${year}-${month}-${record.projectId}`;
         removeDriveCache(notesKey);
-        pendingWorkNotesSync.current.delete(notesKey);
+        workflowDeletedNotes.current.delete(`${year}-${month}-${record.projectId}`);
+        workflowReadRevisions.current.delete(`notes:${year}-${month}-${record.projectId}`);
         setAssignedWorkNotes((current) => current.filter((item) => !matchesTarget(item)));
         setAssignedDesignTasks((current) => current.filter((item) => !matchesTarget(item)));
         setCustomerMessages((current) => current.filter((item) => !matchesTarget(item)));
@@ -4028,6 +4079,9 @@ export default function Home() {
       }
     }
     clearDriveClientCache();
+    workflowReadRevisions.current.clear();
+    workflowDeletedNotes.current.clear();
+    workNoteDraftScope.current = "";
     driveIndexProjectIds.current.clear();
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
@@ -4198,15 +4252,16 @@ export default function Home() {
       if (cancelled || navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop) || driveRequestsInFlight.current.has(requestKey)) return;
       driveRequestsInFlight.current.add(requestKey);
       try {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", email: loggedInEmployeeEmail });
+        const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", ...workflowAuthorization.current, email: loggedInEmployeeEmail });
         if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
-        const serverNoteIds = new Set(result.notes.map((note) => note.id));
-        locallyDeletedWorkNoteIds.current.forEach((id) => { if (!serverNoteIds.has(id)) locallyDeletedWorkNoteIds.current.delete(id); });
-        const notes = result.notes.filter((note) => !locallyDeletedWorkNoteIds.current.has(note.id)).map((note) => ({ ...note, status: workNoteStatus(note) }));
+        const notes = result.notes.map((note) => {
+          const cached = readDriveCache<WorkNote[]>(`work-notes-draft-v1:${note.year}-${note.month}-${note.projectId}`, DRIVE_FILE_LIST_CACHE_MS)?.find((item) => item.id === note.id);
+          return cached && Number(cached.revision || 0) > Number(note.revision || 0) ? { ...note, ...cached } : note;
+        }).filter((note) => !note.actualDate && !deletedWorkNotesFor(note.year, note.month, note.projectId).has(note.id)).map((note) => ({ ...note, status: workNoteStatus(note) }));
         setAssignedWorkNotes(notes);
-        if (selectedCustomerLocation && activeFolder === "Ghi chú") {
+        if (selectedCustomerLocation && isCurrentWorkflowLocation(selectedCustomerLocation) && workflowView.current.activeFolder === "Ghi chú") {
           const forOpenedProject = notes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
-          if (forOpenedProject.length) setWorkNotes((current) => Array.from(new Map([...current, ...forOpenedProject].map((note) => [note.id, note])).values()));
+          if (forOpenedProject.length) setWorkNotes((current) => newestWorkflowItems([...current, ...forOpenedProject]));
         }
         const pending = notes.filter((note) => !note.acceptedAt);
         const now = Date.now();
@@ -4297,9 +4352,16 @@ export default function Home() {
       if (cancelled || navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop) || driveRequestsInFlight.current.has(requestKey)) return;
       driveRequestsInFlight.current.add(requestKey);
       try {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; tasks?: AssignedDesignTask[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-design-tasks", email: loggedInEmployeeEmail });
+        const { response, result } = await postToAppsScript<{ ok?: boolean; tasks?: AssignedDesignTask[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-design-tasks", ...workflowAuthorization.current, email: loggedInEmployeeEmail });
         if (!response.ok || !result.ok || !Array.isArray(result.tasks) || cancelled) return;
-        const tasks = result.tasks.filter((task) => !task.actualDate);
+        const tasks = result.tasks.map((task) => {
+          const record = yearsRef.current.find((year) => year.year === task.year)?.months?.[task.month - 1]?.records.find((item) => item.projectId === task.projectId);
+          const cached = record?.[designProgressDefinitions[task.kind].field]?.find((row) => row.id === task.id);
+          const assigned = assignedDesignTasksRef.current.find((row) => row.year === task.year && row.month === task.month && row.projectId === task.projectId && row.kind === task.kind && row.id === task.id);
+          let latest = task;
+          for (const row of [cached, assigned]) if (row && Number(row.revision || 0) > Number(latest.revision || 0)) latest = { ...latest, ...row };
+          return latest;
+        }).filter((task) => !task.actualDate);
         setAssignedDesignTasks(tasks);
         const pending = tasks.filter((task) => isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt);
         const now = Date.now();
@@ -4477,15 +4539,23 @@ export default function Home() {
     return () => { canceled = true; };
   }, [loginOpen]);
 
-  const finishEmployeeLogin = (member: PersonnelMember, account: string, adminSessionToken?: string) => {
-    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* Keep this session open in memory. */ }
+  const finishEmployeeLogin = (member: PersonnelMember, account: string, workflowSessionToken: string, adminSessionToken?: string) => {
     const nextAdminSession = account === builtInAdminAccount && adminSessionToken ? { token: adminSessionToken, scriptUrl: driveScriptUrl.trim() } : null;
+    const nextWorkflowSession = { token: workflowSessionToken, account, scriptUrl: driveScriptUrl.trim() };
     setAdminSession(nextAdminSession);
+    setWorkflowSession(nextWorkflowSession);
     try {
+      window.localStorage.setItem(personnelSessionEmailKey, account);
+      window.localStorage.setItem(workflowSessionStorageKey, JSON.stringify(nextWorkflowSession));
       if (nextAdminSession) window.localStorage.setItem(adminSessionStorageKey, JSON.stringify(nextAdminSession));
       else window.localStorage.removeItem(adminSessionStorageKey);
-    } catch { /* Server authorization remains in memory for this session. */ }
+    } catch { /* The verified session remains in memory. */ }
     setLoggedInEmployeeEmail(account);
+    workflowClient.current?.resumeForAccount({ account, scriptUrl: driveScriptUrl.trim(), token: workflowSessionToken });
+    workflowClient.current?.pending().filter((entry) => entry.account === account && entry.scriptUrl === driveScriptUrl.trim() && entry.code === "AUTH_REQUIRED").forEach((entry) => workflowClient.current?.retry(entry.requestId));
+    setNewWorkNote(null);
+    setEditingWorkNote(null);
+    setCustomerMessageTaskDraft(null);
     setEmployeeLoginPassword("");
     setEmployeeLoginError("");
     setLoginOpen(false);
@@ -4495,32 +4565,36 @@ export default function Home() {
   };
   const loginEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (employeeAuthBusy) return;
     setEmployeeAuthBusy(true);
     setEmployeeLoginError("");
     try {
       await verifyLocalWorkspace();
-      if (employeeNameKey(employeeLoginEmail) === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword) {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; valid?: boolean; account?: string; adminSessionToken?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "verify-employee-login", name: builtInAdminAccount, loginCode: employeeLoginPassword });
-        if (!response.ok || !result.ok || !result.valid || result.account !== builtInAdminAccount || !result.adminSessionToken) throw new Error(result.error || "Chưa thể xác thực tài khoản admin. Hãy kiểm tra kết nối hoặc cập nhật ứng dụng.");
-        finishEmployeeLogin(builtInAdminPersonnel, builtInAdminAccount, result.adminSessionToken);
-        return;
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; valid?: boolean; account?: string; member?: PersonnelMember; workflowSessionToken?: string; adminSessionToken?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "verify-employee-login", name: employeeLoginEmail, loginCode: employeeLoginPassword });
+      if (!response.ok || !result.ok || !result.valid || !result.account || !result.workflowSessionToken) throw new Error(result.error || "Tên nhân viên hoặc mã đăng nhập không đúng, tài khoản đã ngưng hoặc thông tin bị trùng. Hãy kiểm tra với quản lý.");
+      const member = result.account === builtInAdminAccount ? builtInAdminPersonnel : result.member;
+      if (!member || (result.account === builtInAdminAccount && !result.adminSessionToken)) throw new Error("Máy chủ chưa trả đủ thông tin đăng nhập. Hãy cập nhật ứng dụng.");
+      if (result.account !== builtInAdminAccount) {
+        const verifiedMember = { ...member, loginCode: employeeLoginPassword.trim() };
+        setPersonnelByCategory((current) => {
+          let found = false;
+          const next = Object.fromEntries(Object.entries(current).map(([category, members]) => [category, members.map((item) => {
+            if (item.id !== member.id) return item;
+            found = true;
+            return { ...item, ...verifiedMember };
+          })]));
+          if (!found) next.office = [...(next.office ?? []), verifiedMember];
+          return next;
+        });
       }
-      // Refresh the shared roster, so a code changed by an administrator takes
-      // effect on this device without relying on an old cached roster.
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" });
-      if (!response.ok || !result.ok || !result.personnel) throw new Error(result.error || "Chưa thể xác thực danh sách Nhân lực. Hãy kiểm tra kết nối mạng.");
-      const roster = normalizePersonnelMap(result.personnel);
-      const member = employeeByLoginCode(Object.values(roster).flat(), employeeLoginEmail, employeeLoginPassword);
-      if (!member || personnelAssignmentKey(member) === builtInAdminAccount) throw new Error("Tên nhân viên hoặc mã đăng nhập không đúng, tài khoản đã ngưng hoặc thông tin bị trùng. Hãy kiểm tra với quản lý.");
-      setPersonnelByCategory(roster);
-      try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(roster)); } catch { /* Session remains available. */ }
-      finishEmployeeLogin(member, personnelAssignmentKey(member));
-    } catch (error) {
-      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể đăng nhập.");
-    } finally { setEmployeeAuthBusy(false); }
+      finishEmployeeLogin(member, result.account, result.workflowSessionToken, result.adminSessionToken);
+    } catch (error) { setEmployeeLoginError(error instanceof Error ? error.message : "Không thể đăng nhập."); }
+    finally { setEmployeeAuthBusy(false); }
   };
   const logoutEmployee = () => {
-    try { window.localStorage.removeItem(personnelSessionEmailKey); window.localStorage.removeItem(adminSessionStorageKey); } catch { /* Optional device session cleanup. */ }
+    try { window.localStorage.removeItem(personnelSessionEmailKey); window.localStorage.removeItem(adminSessionStorageKey); window.localStorage.removeItem(workflowSessionStorageKey); } catch { /* Optional device session cleanup. */ }
+    workflowClient.current?.resumeForAccount(null);
+    setWorkflowSession(null);
     setAdminSession(null);
     setAddOpen(false);
     setDriveConfigOpen(false);
@@ -4677,14 +4751,15 @@ export default function Home() {
     const assignedForLocation = selectedCustomerLocation
       ? assignedWorkNotes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId)
       : [];
-    const visibleWorkNotes = Array.from(new Map([...assignedForLocation, ...workNotes].map((note) => [note.id, note])).values()).filter((note) => shouldKeepWorkNote(note) && (canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail)));
+    const visibleWorkNotes = newestWorkflowItems([...assignedForLocation, ...workNotes]).filter((note) => shouldKeepWorkNote(note) && (canViewAllNotesAndMessages || isAssignedToLoggedInEmployee(note.assigneeEmail)));
     const renderWorkNote = (note: WorkNote, isNew = false, isEditing = false) => {
       const selectedStatus = workNoteStatus(note);
       const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green", "Tím": "work-note__status--purple" } as Record<WorkNoteStatus, string>)[selectedStatus];
       const isCreator = Boolean(loggedInEmployeeEmail && note.creatorEmail === loggedInEmployeeEmail);
       const isAssignee = isAssignedToLoggedInEmployee(note.assigneeEmail);
-      const canEdit = isNew || (isEditing && isCreator);
-      const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (field: Exclude<keyof WorkNote, "id">, value: string) => updateWorkNote(note.id, field, value);
+      const noteBusy = ["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "archive.retry"].some((operation) => hasWorkflowPending(operation, note.id));
+      const canEdit = !noteBusy && (isNew || (isEditing && isCreator && !note.actualDate));
+      const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (_field: Exclude<keyof WorkNote, "id">, _value: string) => undefined;
       const chooseAssignee = (email: string) => {
         const member = assignablePersonnel.find((personnel) => personnelAssignmentKey(personnel) === email);
         if (isNew) setNewWorkNote((current) => current ? { ...current, assigneeEmail: member ? personnelAssignmentKey(member) : "", assignee: member?.name ?? "", acceptedAt: "", acceptedBy: "", status: "Đen" } : current);
@@ -4699,14 +4774,16 @@ export default function Home() {
         <div className="work-note__line work-note__line--schedule">
           <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
           <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
-          {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote} disabled={!note.assigneeEmail || !parseDesignDate(note.dueDate) || isPastVietnamDate(note.dueDate)}>Phát hành</button></div>
-            : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote}>Lưu thay đổi</button></div>
-              : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
+          {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote} disabled={noteBusy || !note.content.trim() || !note.assigneeEmail || !parseDesignDate(note.dueDate) || isPastVietnamDate(note.dueDate)}>Phát hành</button></div>
+            : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote} disabled={noteBusy || !note.content.trim()}>Lưu thay đổi</button></div>
+              : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)} disabled={noteBusy}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={noteBusy || Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
           <span className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`} aria-label={`Trạng thái ${selectedStatus}`}>●</span>
-          {!isNew && !isEditing && isCreator && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)}>Xóa</button></div>}</div>}
+          {!isNew && !isEditing && isCreator && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} disabled={noteBusy} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)} disabled={noteBusy || Boolean(note.actualDate)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)} disabled={noteBusy}>Xóa</button></div>}</div>}
         </div>
         <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" readOnly={!canEdit} /></label>
         {note.messageContext && <div className="work-note__message-context"><b>Tin nhắn khách đã chọn</b><p>{note.messageContext}</p></div>}
+        {noteBusy && <p className="workflow-item-status" role="status">Đang chờ đồng bộ thay đổi…</p>}
+        {note.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Drive</span><button type="button" disabled={noteBusy} onClick={() => void runWorkflowCommand("archive.retry", { noteId: note.id })}>Thử lưu Drive</button></div>}
       </article>;
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
@@ -4715,6 +4792,7 @@ export default function Home() {
         {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
+        {selectedCustomerLocation && legacyImportScopes[projectWorkflowScope(selectedCustomerLocation)] && <div className="workflow-item-status workflow-item-status--warning"><span>Chưa kiểm tra được ghi chú cũ trên Drive. Công việc mới vẫn được lưu.</span><button type="button" onClick={() => void runWorkflowCommand("archive.retry", {})}>Thử nạp dữ liệu cũ</button></div>}
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
           : visibleWorkNotes.length ? [...visibleWorkNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">{canViewAllNotesAndMessages ? <>Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</> : "Chưa có công việc nào được giao cho tài khoản này."}</p>}
@@ -4820,7 +4898,7 @@ export default function Home() {
     return <section className="design-schedule">
       <header className="design-schedule__heading">
         <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
-        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={!rows.some((row) => row.content.trim() && !row.actualDate)}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
+        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={hasWorkflowPending("design.publish", kind) || !rows.some((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt))}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
       </header>
       <div className="design-progress-table-wrap">
         <table className="design-progress-table">
@@ -4829,19 +4907,19 @@ export default function Home() {
             <tr key={row.id}>
               <td><div className="design-progress-content">
                 {row.isCustom
-                  ? <GrowingTextarea value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
-                  : <b>{row.content}</b>}
+                  ? <GrowingTextarea readOnly={!canModifyDesignRow(row)} value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
+                  : <b>{row.content}</b>}{row.assignmentDirty && <small className="workflow-item-status">Sửa đổi chưa phát hành</small>}
                 <span className="design-progress-content__actions">
                   <button type="button" onClick={() => moveDesignProgressRow(kind, index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
                   <button type="button" onClick={() => moveDesignProgressRow(kind, index, 1)} disabled={index === rows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
-                  {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
+                  {row.isCustom && !row.publishedAt && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
                 </span>
               </div></td>
-              <td><input value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small><label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={Boolean(row.actualDate) || !row.publishedAt || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
-              <td><select className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
-              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && isAssignedToLoggedInEmployee(row.assigneeEmail) && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)}>Xác nhận nhận việc</button>}</td>
-              <td><GrowingTextarea value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+              <td><input readOnly={!canModifyDesignRow(row)} value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small>{row.archivePending && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}<label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
+              <td><select disabled={!canModifyDesignRow(row)} className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
+              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && isAssignedToLoggedInEmployee(row.assigneeEmail) && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
+              <td><GrowingTextarea readOnly={!canModifyDesignRow(row)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
         </table>
@@ -4938,12 +5016,12 @@ export default function Home() {
   </section>;
   const renderCustomerMessages = () => {
     const visibleMessages = selectedCustomerLocation
-      ? customerMessages.filter((message) => (message.projectId && message.projectId === selectedCustomerLocation.record.projectId) || customerMessageHouseKey(message.houseId) === customerMessageHouseKey(selectedCustomerLocation.record.houseId ?? ""))
+      ? customerMessages.filter((message) => message.year === selectedCustomerLocation.year && message.month === selectedCustomerLocation.month && ((message.projectId && message.projectId === selectedCustomerLocation.record.projectId) || customerMessageHouseKey(message.houseId) === customerMessageHouseKey(selectedCustomerLocation.record.houseId ?? "")))
       : customerMessages;
     return <section className="customer-messages" aria-label="Tin nhắn khách">
       <header className="customer-messages__heading">
         <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Chỉ nhóm có dạng <b>Mã nhà-GM-Nội dung</b> mới được ghép với hồ sơ dự án.</p></div>
-        <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Đồng bộ Pancake mỗi phút"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
+        <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Tự động cập nhật"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
       </header>
       <div className="customer-messages__list">
         {customerMessagesError && <p className="customer-messages__empty">{customerMessagesError}</p>}
@@ -4951,7 +5029,8 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
+            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
+            {message.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Excel vào Drive. Tin nhắn vẫn được giữ tại đây.</span><button type="button" onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Thử lưu Drive</button></div>}
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>
     </section>;
@@ -4996,6 +5075,22 @@ export default function Home() {
     </div>
   </section> : null;
 
+  const renderWorkflowOutbox = () => {
+    const pending = workflowOutbox.filter((entry) => entry.account === loggedInEmployeeEmail && entry.scriptUrl === driveScriptUrl.trim());
+    if (!pending.length) return null;
+    const blocked = pending.some((entry) => entry.state === "blocked" || entry.state === "conflict");
+    return <details className={`workflow-sync-panel ${blocked ? "workflow-sync-panel--attention" : ""}`}>
+      <summary><span>{blocked ? "Có thay đổi cần kiểm tra" : "Đang đồng bộ công việc"}</span><b>{pending.length}</b></summary>
+      <div className="workflow-sync-panel__items">{pending.map((entry) => {
+        const content = String((entry.payload.note as WorkNote)?.content || (entry.payload.assignment as { content?: string })?.content || entry.payload.title || "Cập nhật công việc");
+        return <article key={entry.requestId}>
+          <b>{String(entry.payload.houseId || "Khách hàng")} · {content}</b>
+          <p role={entry.error ? "alert" : "status"}>{entry.error || (entry.state === "sending" ? "Đang gửi…" : "Đã giữ trên thiết bị, chờ đồng bộ.")}</p>
+          <div>{entry.code === "AUTH_REQUIRED" && <button type="button" onClick={() => { setEmployeeLoginPassword(""); setEmployeeLoginError(""); setLoginOpen(true); }}>Đăng nhập lại</button>}<button type="button" disabled={entry.state === "sending"} onClick={() => { workflowClient.current?.retry(entry.requestId); void workflowClient.current?.flush(); }}>Thử lại</button><button type="button" disabled={entry.state === "sending"} onClick={() => workflowClient.current?.discard(entry.requestId)}>Hủy yêu cầu</button></div>
+        </article>;
+      })}</div>
+    </details>;
+  };
   return (
     <main className="crm-shell">
       {/* Tin nhắn khách là màn hình tổng hợp, nên phải mở được ngay cả khi
@@ -5527,6 +5622,7 @@ export default function Home() {
           </section>
         </div>
       )}
+      {renderWorkflowOutbox()}
     </main>
   );
 }

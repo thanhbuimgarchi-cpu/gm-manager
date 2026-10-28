@@ -17,6 +17,8 @@ const fixtureScriptUrl = (await readFile(new URL('../app/page.tsx',import.meta.u
 const adminSessionClaims = {version:1,account:'admin',purpose:'customer-admin',expiresAt:Date.parse('2026-11-28T02:00:00Z')};
 const fixtureAdminToken = claims => `${Buffer.from(JSON.stringify(claims)).toString('base64url')}.fixture-signature`;
 const adminSessionToken = fixtureAdminToken(adminSessionClaims);
+const fixtureWorkflowToken = account => fixtureAdminToken({version:2,purpose:'workflow',account,expiresAt:Date.parse('2026-11-28T02:00:00Z'),nonce:`qa-${account}`});
+const workflowTokens = Object.fromEntries(['admin','anh@example.com','manager@example.com'].map(account=>[account,fixtureWorkflowToken(account)]));
 const personnel = { office: [{id:'p1',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',loginCode:'00123',birthDate:'20/09/1995',phone:'0912345678',role:'Nhân viên thiết kế',permissions,address:'Hà Nội'},{id:'p2',status:'Có',name:'Quản lý kiểm thử',email:'manager@example.com',loginCode:'manager-code',birthDate:'',phone:'',role:'Quản lý chung',permissions,address:''}] };
 const records = [
   {id:'c1',name:'Chị Quỳnh',houseId:'DV-75',projectId:'GM28102026CQ',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Nguyễn Thị Quỳnh',SDT:'0912345678','NCT-KT':'Có','NCT-NT':'Có'},designProgress:[{id:'d1',isCustom:false,content:'Triển khai hồ sơ kiến trúc',plannedDate:'10/11/2026',actualDate:'',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',note:'Kiểm tra phương án mặt bằng',publishedAt:'2026-10-28T00:00:00Z'}]},
@@ -24,23 +26,33 @@ const records = [
 ];
 const years = [{year:2026,months:Array.from({length:12},(_,i)=>({label:`T${i+1}`,records:i===9?records:[]}))}];
 const notes = [{id:'n1',priority:'Cần lập tức',workType:'Thiết kế',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',creatorEmail:'admin',content:'Hoàn thiện phương án mặt bằng tầng 1.\nBổ sung bố trí nội thất phòng khách theo ý kiến khách hàng.',dueDate:'05/11/2026',actualDate:'',status:'Đen',acceptedAt:'',acceptedBy:''}];
-const messages = [{id:'m1',projectId:records[0].projectId,houseId:'DV-75',customerName:'Chị Quỳnh',groupName:'DV-75-GM-Thiết kế',status:'new',firstMessageAt:'2026-10-28T02:00:00Z',lastMessageAt:'2026-10-28T02:30:00Z',messageCount:2,messages:[{id:'ml1',senderName:'Chị Quỳnh',content:'Nhờ bên mình kiểm tra lại phương án mặt bằng phòng khách.',sentAt:'2026-10-28T02:00:00Z'},{id:'ml2',senderName:'Chị Quỳnh',content:'Mình muốn thêm một cửa sổ ở phía sân vườn nhé.',sentAt:'2026-10-28T02:30:00Z'}]}];
-await context.addInitScript(({years,personnel,notes,fixtureScriptUrl,adminSessionToken}) => {
+const messages = [{id:'m1',year:2026,month:10,projectId:records[0].projectId,houseId:'DV-75',customerName:'Chị Quỳnh',groupName:'DV-75-GM-Thiết kế',status:'new',firstMessageAt:'2026-10-28T02:00:00Z',lastMessageAt:'2026-10-28T02:30:00Z',messageCount:2,messages:[{id:'ml1',senderName:'Chị Quỳnh',content:'Nhờ bên mình kiểm tra lại phương án mặt bằng phòng khách.',sentAt:'2026-10-28T02:00:00Z'},{id:'ml2',senderName:'Chị Quỳnh',content:'Mình muốn thêm một cửa sổ ở phía sân vườn nhé.',sentAt:'2026-10-28T02:30:00Z'}]}];
+await context.addInitScript(({years,personnel,notes,fixtureScriptUrl,adminSessionToken,workflowToken}) => {
   if (localStorage.getItem('qa-seeded')) return;
   localStorage.setItem('qa-seeded','1');
   localStorage.setItem('gm-manager-consulting',JSON.stringify(years));
   localStorage.setItem('gm-manager-personnel-v1',JSON.stringify(personnel));
   localStorage.setItem('gm-manager-personnel-session-email','admin');
   localStorage.setItem('gm-manager-admin-session-v1',JSON.stringify({token:adminSessionToken,scriptUrl:fixtureScriptUrl}));
+  localStorage.setItem('gm-manager-workflow-session-v1',JSON.stringify({token:workflowToken,scriptUrl:fixtureScriptUrl,account:'admin'}));
   localStorage.setItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-GM28102026CQ',JSON.stringify({savedAt:Date.now(),value:notes}));
-}, {years,personnel,notes,fixtureScriptUrl,adminSessionToken});
+}, {years,personnel,notes,fixtureScriptUrl,adminSessionToken,workflowToken:workflowTokens.admin});
 await context.route('https://script.google.com/**', route => route.fulfill({ contentType:'text/html; charset=utf-8', body:`<meta charset="utf-8"><script>
-const years=${JSON.stringify(years)}, personnel=${JSON.stringify(personnel)}, notes=${JSON.stringify(notes)}, messages=${JSON.stringify(messages)};
+const years=${JSON.stringify(years)}, personnel=${JSON.stringify(personnel)}, notes=${JSON.stringify(notes)}, messages=${JSON.stringify(messages)}, workflowTokens=${JSON.stringify(workflowTokens)};
 window.qaMutationFail=false;window.qaMutationLog=[];window.qaAdminLoginCalls=[];window.qaCreateLog=[];
 addEventListener('message',event=>{if(event.data?.channel!=='gm-manager-apps-script')return; const {id,payload:p}=event.data; let r={ok:true};
 if(p.action==='verify-employee-login'){
   window.qaAdminLoginCalls.push(p);
-  r=p.name==='admin'&&p.loginCode==='1'?{ok:true,valid:true,account:'admin',adminSessionToken:${JSON.stringify(adminSessionToken)}}:{ok:true,valid:false};
+  const member=Object.values(personnel).flat().find(member=>member.name.toLocaleLowerCase('vi')===String(p.name||'').trim().toLocaleLowerCase('vi')&&member.loginCode===p.loginCode);
+  r=p.name==='admin'&&p.loginCode==='1'?{ok:true,valid:true,account:'admin',adminSessionToken:${JSON.stringify(adminSessionToken)},workflowSessionToken:workflowTokens.admin}:member?{ok:true,valid:true,account:member.email,member,workflowSessionToken:workflowTokens[member.email]}:{ok:true,valid:false,error:'Tên nhân viên hoặc mã đăng nhập không đúng.'};
+}
+if(p.action==='workflow-command'){
+  if(!Object.values(workflowTokens).includes(p.workflowSessionToken)&&p.adminSessionToken!==${JSON.stringify(adminSessionToken)})r={ok:false,error:'Phiên đăng nhập không hợp lệ.'};
+  else if(p.operation==='message.status'){
+    const message=messages.find(message=>message.id===(p.messageId||p.message?.id));
+    if(message){Object.assign(message,{status:p.status,revision:(message.revision||0)+1});r={ok:true,message,revision:message.revision,archivePending:false};}
+    else r={ok:false,error:'Không tìm thấy tin nhắn.'};
+  }
 }
 if(p.action==='create-customer-folder'){
   window.qaCreateLog.push(p);
@@ -158,6 +170,7 @@ await composer.getByLabel('Người phụ trách',{exact:true}).selectOption('an
 assert.ok(await composer.getByRole('button',{name:'Phát hành',exact:true}).isDisabled(),'requires due date');
 await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).fill('30102026');
 assert.equal(await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).inputValue(),'30/10/2026');
+await composer.getByLabel('Nội dung công việc',{exact:true}).fill('Kiểm tra điều kiện phát hành ghi chú.');
 assert.ok(await composer.getByRole('button',{name:'Phát hành',exact:true}).isEnabled(),'ready after required fields');
 await composer.getByRole('button',{name:'Hủy',exact:true}).click();
 await page.screenshot({path:'outputs/interface-qa/desktop-notes.png',fullPage:true});
@@ -279,7 +292,8 @@ const verifiedSession=await page.evaluate(()=>JSON.parse(localStorage.getItem('g
 assert.equal(verifiedSession.token,adminSessionToken,'admin stores the token returned by server verification');
 assert.equal(verifiedSession.scriptUrl,fixtureScriptUrl,'admin authorization is bound to this backend');
 const mobileBridgeFrame=page.frames().find(frame=>frame.url().startsWith('https://script.google.com/'));
-assert.equal((await mobileBridgeFrame.evaluate(()=>window.qaAdminLoginCalls)).length,1,'built-in admin login is verified by the server');
+assert.equal((await mobileBridgeFrame.evaluate(()=>window.qaAdminLoginCalls)).filter(call=>call.name==='admin').length,1,'built-in admin login is verified by the server');
+assert.ok((await mobileBridgeFrame.evaluate(()=>window.qaAdminLoginCalls)).some(call=>call.name==='Nguyễn Minh Anh'&&call.loginCode==='00123'),'employee login is verified by the server');
 assert.ok(await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).isVisible(),'phone admin can create');
 assert.ok(await page.getByRole('button',{name:/Thiết lập/}).isVisible(),'phone admin can open settings');
 for (const [sessionLabel,token] of [['expired',fixtureAdminToken({...adminSessionClaims,expiresAt:Date.parse('2026-10-27T02:00:00Z')})],['missing',null]]) {

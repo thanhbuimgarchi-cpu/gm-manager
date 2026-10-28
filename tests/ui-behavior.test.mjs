@@ -7,13 +7,18 @@ import { transform } from "esbuild";
 // Execute the real frontend helpers without mounting React or contacting the
 // production backend. This protects data behavior during interface changes.
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError };`, {
+const workflowSource = await readFile(new URL("../app/workflow-client.ts", import.meta.url), "utf8");
+const workflowCode = await transform(workflowSource, { loader: "ts", format: "cjs" });
+const workflowExports = {};
+const workflowContext = vm.createContext({ module: { exports: workflowExports }, exports: workflowExports, console, Date, Intl, URL, Set, Map });
+vm.runInContext(workflowCode.code, workflowContext);
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError, normalizeDesignProgress, mergeSharedWorkspaceYears, mergeWorkflowDesignRows };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
 });
 const exports = {};
-const context = vm.createContext({ module: { exports }, exports, require: () => ({}), console, Date, Intl, URL, Set, Map });
+const context = vm.createContext({ module: { exports }, exports, require: (name) => name === "./workflow-client" ? workflowContext.module.exports : {}, console, Date, Intl, URL, Set, Map });
 vm.runInContext(code, context);
 const helpers = context.module.exports;
 
@@ -125,4 +130,50 @@ test("legacy mutation-handler validation explains the deployment mismatch instea
   assert.equal(helpers.customerDriveMutationError(new Error("Access denied: DriveApp."), "delete"), "Access denied: DriveApp.");
   assert.equal(helpers.customerDriveMutationError(new Error("Thiếu mã hồ sơ cần xóa."), "delete"), "Thiếu mã hồ sơ cần xóa.");
   assert.equal(helpers.customerDriveMutationError("Thiếu dữ liệu hồ sơ khi nhập công việc", "delete"), "Thiếu dữ liệu hồ sơ khi nhập công việc");
+});
+
+test("design normalization retains canonical revision, creator, archive and unsent-assignment metadata", () => {
+  const row = { id: "design-metadata", isCustom: true, content: "Duyệt hồ sơ", plannedDate: "30/10/2026", actualDate: "28/10/2026", assignee: "Anh", assigneeEmail: "anh@example.com", publishedAt: "2026-10-28T01:00:00Z", revision: 9, creatorEmail: "manager@example.com", creatorName: "Quản lý", completedAt: "2026-10-28T04:00:00Z", archivedAt: "2026-10-28T04:01:00Z", archivePending: false, assignmentDirty: true };
+  for (const [kind, field] of [["architecture", "designProgress"], ["interior", "interiorDesignProgress"], ["acceptance", "acceptanceDesignProgress"]]) {
+    const normalized = helpers.normalizeDesignProgress({ [field]: [row] }, kind).find((item) => item.id === row.id);
+    for (const key of ["revision", "creatorEmail", "creatorName", "completedAt", "archivedAt", "archivePending", "assignmentDirty"]) assert.equal(normalized[key], row[key], `${kind} preserves ${key}`);
+    assert.equal(normalized.actualDate, row.actualDate);
+  }
+  assert.equal(row.revision, 9, "normalization must not mutate its input");
+});
+
+test("shared-cache record timestamps cannot roll back a newer design completion", () => {
+  const progressFields = ["designProgress", "interiorDesignProgress", "acceptanceDesignProgress"];
+  const oldRow = { id: "design-1", isCustom: true, content: "Bản vẽ", plannedDate: "30/10/2026", actualDate: "", assignee: "Anh", assigneeEmail: "anh@example.com", acceptedAt: "2026-10-27T03:00:00Z", publishedAt: "2026-10-26T03:00:00Z", revision: 4 };
+  const completedRow = { ...oldRow, revision: 5, actualDate: "28/10/2026", completedAt: "2026-10-28T03:00:00Z" };
+  const customer = (name, timestamp, row) => ({ id: "customer-1", projectId: "GM-DESIGN", houseId: "DV-75", name, createdAt: "28/10/2026", cacheUpdatedAt: timestamp, details: {}, isHydrated: true, ...Object.fromEntries(progressFields.map((field) => [field, [row]])) });
+  const years = (record) => [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => ({ label: `T${index + 1}`, records: index === 9 ? [record] : [] })) }];
+  for (const [shared, local, expectedName] of [
+    [customer("Shared form", 300, oldRow), customer("Local form", 200, completedRow), "Shared form"],
+    [customer("Shared form", 200, completedRow), customer("Local form", 300, oldRow), "Local form"],
+  ]) {
+    const record = helpers.mergeSharedWorkspaceYears(years(shared), years(local))[0].months[9].records[0];
+    assert.equal(record.name, expectedName, "ordinary customer fields still follow record timestamp preference");
+    for (const field of progressFields) {
+      assert.equal(record[field][0].revision, 5, `${field} keeps the newer task revision`);
+      assert.equal(record[field][0].actualDate, "28/10/2026", `${field} preserves completion`);
+    }
+  }
+});
+
+test("unsent design reassignment survives equal revisions until a newer canonical task supersedes it", () => {
+  const canonical = { id: "design-a", revision: 7, assigneeEmail: "before@example.com", content: "Bản vẽ", publishedAt: "2026-10-26T03:00:00Z" };
+  const draft = { ...canonical, assigneeEmail: "after@example.com", note: "Yêu cầu sửa", assignmentDirty: true };
+  for (const [preferred, other] of [[draft, canonical], [canonical, draft]]) {
+    const merged = helpers.mergeWorkflowDesignRows([preferred], [other]);
+    assert.equal(merged[0].assigneeEmail, "after@example.com");
+    assert.equal(merged[0].note, "Yêu cầu sửa");
+    assert.equal(merged[0].assignmentDirty, true);
+  }
+  const newer = { ...canonical, revision: 8, actualDate: "28/10/2026", completedAt: "2026-10-28T04:00:00Z" };
+  const merged = helpers.mergeWorkflowDesignRows([draft, { id: "design-b", revision: 1 }], [newer, { id: "design-c", revision: 1 }]);
+  assert.deepEqual(Array.from(merged, (row) => row.id), ["design-a", "design-b", "design-c"]);
+  assert.equal(merged[0].revision, 8);
+  assert.equal(merged[0].actualDate, "28/10/2026");
+  assert.equal(Boolean(merged[0].assignmentDirty), false);
 });

@@ -635,6 +635,21 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .sidebar-customer-group__items { display: grid; gap: 4px; padding: 6px; border-top: 1px solid #e9edf3; background: #fff; }
 .sidebar-customer-group__items .sidebar-note { width: 100%; margin: 0; padding: 9px 7px; }
 .sidebar-customer-group__items .sidebar-note b { font-size: 11px; line-height: 1.55; }
+.workflow-item-status { margin: 8px 0 0; color: #65758d; font-size: 12px; line-height: 1.5; }
+.workflow-item-status--warning { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #93611a; }
+.workflow-item-status button, .workflow-archive-retry { padding: 6px 10px; border: 1px solid #decba7; border-radius: 7px; color: #80581c; background: #fff8e9; font-size: 11px; cursor: pointer; }
+.workflow-sync-panel { position: fixed; right: 18px; bottom: 18px; z-index: 65; width: min(390px, calc(100vw - 36px)); color: #26374f; background: #fff; border: 1px solid #d9e2ef; border-radius: 14px; box-shadow: 0 10px 35px #1b2f4826; }
+.workflow-sync-panel > summary { display: flex; justify-content: space-between; gap: 12px; padding: 13px 16px; cursor: pointer; font-size: 12px; font-weight: 600; list-style: none; }
+.workflow-sync-panel > summary b { min-width: 22px; padding: 2px 6px; text-align: center; border-radius: 6px; background: #edf3fb; }
+.workflow-sync-panel--attention { border-color: #e4bfc3; }
+.workflow-sync-panel--attention > summary { color: #a82539; }
+.workflow-sync-panel__items { max-height: 45vh; overflow: auto; padding: 0 12px 12px; }
+.workflow-sync-panel__items article { padding: 12px 3px; border-top: 1px solid #e8edf4; font-size: 12px; line-height: 1.6; }
+.workflow-sync-panel__items article > b { display: block; overflow-wrap: anywhere; white-space: pre-wrap; }
+.workflow-sync-panel__items p { margin: 6px 0; color: #67768c; }
+.workflow-sync-panel__items [role="alert"] { color: #a82539; }
+.workflow-sync-panel__items article > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-sync-panel__items button { padding: 6px 10px; background: #f4f6fa; border: 1px solid #dbe3ee; border-radius: 7px; cursor: pointer; color: inherit; }
 .sidebar-customer-group__items .sidebar-note small { font-size: 9px; line-height: 1.6; }
 .gateway-notes .sidebar-customer-group__trigger { min-height: 59px; padding: 12px; }
 .gateway-notes .sidebar-customer-group__identity b { font-size: 12px; }

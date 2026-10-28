@@ -14,8 +14,9 @@
     "prebuild:github-pages": "node scripts/sync-apps-script-source.mjs",
     "build:github-pages": "vite build --config vite.github.config.ts",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "node --test tests/apps-script-drive.test.mjs tests/ui-behavior.test.mjs tests/desktop-paths.test.mjs tests/notifications.test.mjs tests/sidebar-groups.test.mjs",
+    "test": "node --test tests/apps-script-drive.test.mjs tests/ui-behavior.test.mjs tests/desktop-paths.test.mjs tests/notifications.test.mjs tests/sidebar-groups.test.mjs tests/workflow-client.test.mjs tests/workflow-backend.test.mjs tests/export-archive.test.mjs tests/property-storage.test.mjs",
     "test:ui": "node tests/browser-smoke.mjs",
+    "test:workflow-ui": "node tests/workflow-browser.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },

@@ -165,6 +165,8 @@ function createCustomerFolder_(payload) {
   if (!/^\d{4}$/.test(String(year)) || month < 1 || month > 12 || !validCustomerFolderKey_(folderKey)) {
     throw new Error("Thiếu thông tin hồ sơ hợp lệ để tạo thư mục Drive.");
   }
+  const priorMutations = readPropertyJson_(customerDriveMutationsKey_()) || [];
+  const deletedScopes = priorMutations.filter(function(mutation) { return mutation.deleted && Number(mutation.year) === year && Number(mutation.month) === month && (customerMutationMatches_({ projectId: projectId, houseId: houseId }, mutation) || normalizeDriveName_(mutation.houseId) === normalizeDriveName_(folderKey)); });
   // Creating a project only establishes the folder tree. A blank document day
   // must not appear until the user explicitly creates a day or uploads files.
   const root = rootFolder_();
@@ -188,6 +190,12 @@ function createCustomerFolder_(payload) {
   folder = getOrCreateFolder_(monthFolder, houseId || projectId);
   if (!folder) throw new Error("Không thể tạo thư mục hồ sơ trên Drive.");
   ensureProjectFolders_(folder, false);
+  if (deletedScopes.length) {
+    // Reset every old project masked by the house-code tombstone before it
+    // is cleared. A normal create retry must never reset a live project.
+    deletedScopes.forEach(function(mutation) { workflowResetCustomerProject_(mutation, true); });
+    workflowResetCustomerProject_({ year: year, month: month, projectId: projectId, houseId: houseId }, false);
+  }
   clearCustomerDriveDeletion_({ year: year, month: month, projectId: projectId, houseId: houseId });
   cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + folderKey, folder);
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
@@ -329,6 +337,7 @@ function deleteCustomerFolder_(payload) {
     try {
       const removed = DriveApp.getFolderById(prior.folderId);
       if (removed.isTrashed && removed.isTrashed()) {
+        try { workflowResetCustomerProject_(prior, true); } catch (cleanupError) { /* The Drive deletion mask remains until a strict recreation reset succeeds. */ }
         const result = { ok: true, deleted: true, trashed: true, alreadyDeleted: true, folderId: prior.folderId, year: prior.year, month: prior.month, projectId: prior.projectId, houseId: prior.houseId };
         customerMutationRequest_(payload, "delete", result);
         return result;
@@ -345,6 +354,7 @@ function deleteCustomerFolder_(payload) {
   clearPropertyJson_(workNotesPropertyKey_(details));
   const notes = readPropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY);
   if (Array.isArray(notes)) writePropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY, notes.filter(function(note) { return !(Number(note.year) === details.year && Number(note.month) === details.month && (String(note.projectId) === details.projectId || normalizeDriveName_(note.houseId) === normalizeDriveName_(folderName))); }));
+  try { workflowResetCustomerProject_({ ...details, houseId: payload.houseId || folderName }, true); } catch (cleanupError) { /* Confirmed Drive deletion must not fail solely because optional canonical cleanup is unavailable. */ }
   const result = { ok: true, deleted: true, trashed: true, folderId: folderId, folderName: folderName, year: details.year, month: details.month, projectId: details.projectId, houseId: String(payload.houseId || folderName) };
   customerMutationRequest_(payload, "delete", result);
   return result;
@@ -426,6 +436,7 @@ function doPost(event) {
     lock.waitLock(30000);
     try {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
+      if (payload.action === "workflow-command") return json_(workflowCommand_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "save-personnel-cache") return json_(savePersonnelCache_(payload.personnel || {}));
       if (payload.action === "export-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
@@ -466,7 +477,7 @@ function doPost(event) {
       lock.releaseLock();
     }
   } catch (error) {
-    return json_({ ok: false, error: error && error.message ? error.message : "Kh\u00f4ng th\u1ec3 xu\u1ea5t Excel." });
+    return json_({ ok: false, code: error && error.code || "SERVER_ERROR", error: error && error.message ? error.message : "Kh\u00f4ng th\u1ec3 xu\u1ea5t Excel." });
   }
 }
 
@@ -1317,8 +1328,7 @@ function exportCustomerWorkbook_(record, year, month) {
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     const legacyWorkbook = findFileByName_(customerFolder, fileName);
     if (legacyWorkbook) legacyWorkbook.moveTo(consultingFolder);
-    trashFilesByName_(consultingFolder, fileName);
-    const xlsxFile = consultingFolder.createFile(xlsxBlob);
+    const xlsxFile = replaceWorkbookFile_(consultingFolder, fileName, xlsxBlob);
     return {
       fileId: xlsxFile.getId(),
       fileUrl: xlsxFile.getUrl(),
@@ -1326,7 +1336,7 @@ function exportCustomerWorkbook_(record, year, month) {
       fileName: fileName,
     };
   } finally {
-    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+    try { DriveApp.getFileById(spreadsheet.getId()).setTrashed(true); } catch (error) { /* Preserve the original export result. */ }
   }
 }
 
@@ -1358,11 +1368,10 @@ function exportDesignProgressWorkbook_(record, year, month, progressKind) {
     sheet.hideColumns(6, 6);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
-    trashFilesByName_(designFolder, fileName);
-    const xlsxFile = designFolder.createFile(xlsxBlob);
+    const xlsxFile = replaceWorkbookFile_(designFolder, fileName, xlsxBlob);
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: designFolder.getUrl(), fileName: fileName };
   } finally {
-    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+    try { DriveApp.getFileById(spreadsheet.getId()).setTrashed(true); } catch (error) { /* Preserve the original export result. */ }
   }
 }
 
@@ -1390,11 +1399,10 @@ function exportWarrantyWorkbook_(record, year, month) {
     sheet.hideColumns(6, 2);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
-    trashFilesByName_(warrantyFolder, fileName);
-    const xlsxFile = warrantyFolder.createFile(xlsxBlob);
+    const xlsxFile = replaceWorkbookFile_(warrantyFolder, fileName, xlsxBlob);
     return { fileId: xlsxFile.getId(), fileUrl: xlsxFile.getUrl(), folderUrl: warrantyFolder.getUrl(), fileName: fileName };
   } finally {
-    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+    try { DriveApp.getFileById(spreadsheet.getId()).setTrashed(true); } catch (error) { /* Preserve the original export result. */ }
   }
 }
 
@@ -1477,9 +1485,35 @@ function writeWorkbook_(spreadsheet, record) {
 }
 
 function exportXlsx_(spreadsheetId) {
+  SpreadsheetApp.flush();
   const url = "https://www.googleapis.com/drive/v3/files/" + spreadsheetId + "/export?mimeType=" + encodeURIComponent(EXCEL_MIME);
-  const response = UrlFetchApp.fetch(url, { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } });
-  return response.getBlob();
+  const response = UrlFetchApp.fetch(url, { method: "get", muteHttpExceptions: true, headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } });
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300) throw new Error("Không thể xuất Excel từ Google Sheets (HTTP " + response.getResponseCode() + "). Dữ liệu và tệp cũ được giữ nguyên.");
+  const blob = response.getBlob();
+  const mime = String(blob.getContentType() || "").split(";")[0].toLowerCase();
+  const bytes = blob.getBytes();
+  if ([EXCEL_MIME, "application/zip", "application/octet-stream"].indexOf(mime) < 0 || bytes.length < 4 || (bytes[0] & 255) !== 80 || (bytes[1] & 255) !== 75 || (bytes[2] & 255) !== 3 || (bytes[3] & 255) !== 4) throw new Error("Google chưa trả về tệp Excel hợp lệ. Dữ liệu và tệp cũ được giữ nguyên; hãy thử xuất lại.");
+  return blob.setContentType(EXCEL_MIME);
+}
+
+function replaceWorkbookFile_(folder, fileName, blob, metadata) {
+  const previous = [];
+  const matches = folder.getFilesByName(fileName);
+  while (matches.hasNext()) previous.push(matches.next());
+  const created = folder.createFile(blob.setName(fileName));
+  if (metadata && metadata.description) {
+    try { created.setDescription(metadata.description); }
+    catch (error) {
+      try { created.setTrashed(true); } catch (cleanupError) { /* Keep old archives available even if cleanup is unavailable. */ }
+      throw new Error("Chưa thể xác nhận thông tin tệp Excel mới. Tệp cũ vẫn được giữ nguyên để thử lưu lại.");
+    }
+  }
+  previous.forEach(function(file) {
+    if (file.getId() !== created.getId()) {
+      try { file.setTrashed(true); } catch (error) { /* The new valid workbook exists; old copies remain recoverable. */ }
+    }
+  });
+  return created;
 }
 
 function getOrCreateFolder_(parent, name) {
@@ -1669,30 +1703,99 @@ function workNotesPropertyKey_(details) {
 
 function readPropertyJson_(key) {
   const properties = PropertiesService.getScriptProperties();
-  const count = Number(properties.getProperty(key + ":count") || 0);
-  if (!count) return null;
-  let text = "";
-  for (let index = 0; index < count; index += 1) text += properties.getProperty(key + ":" + index) || "";
-  if (!text) return null;
-  try { return JSON.parse(text); } catch (error) { return null; }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const head = properties.getProperty(key + ":manifest");
+    if (!head) {
+      const legacyCount = properties.getProperty(key + ":count");
+      const count = Number(legacyCount || 0);
+      if (!legacyCount || legacyCount === "0") return null;
+      if (!Number.isInteger(count) || count < 1 || count > 1000) throw workflowError_("STORAGE_CORRUPT", "Dữ liệu cache cũ không hợp lệ. Hệ thống giữ nguyên dữ liệu và chưa nhận thay đổi mới.");
+      let text = "";
+      let missing = false;
+      for (let index = 0; index < count; index += 1) { const chunk = properties.getProperty(key + ":" + index); if (typeof chunk !== "string") { missing = true; break; } text += chunk; }
+      if (properties.getProperty(key + ":manifest")) continue;
+      if (missing) throw workflowError_("STORAGE_CORRUPT", "Dữ liệu cache cũ bị thiếu một phần. Hệ thống chưa ghi đè dữ liệu hiện có.");
+      try { return JSON.parse(text); } catch (error) { throw workflowError_("STORAGE_CORRUPT", "Dữ liệu cache cũ không thể đọc. Hệ thống chưa ghi đè dữ liệu hiện có."); }
+    }
+    let manifest;
+    try { manifest = JSON.parse(head); } catch (error) { throw workflowError_("STORAGE_CORRUPT", "Thông tin phiên bản cache không thể đọc. Hệ thống chưa ghi đè dữ liệu hiện có."); }
+    if (!manifest || manifest.version !== 2) throw workflowError_("STORAGE_CORRUPT", "Phiên bản cache không được hỗ trợ. Hệ thống chưa ghi đè dữ liệu hiện có.");
+    if (manifest.deleted) return null;
+    if (typeof manifest.generation !== "string" || !Number.isInteger(manifest.count) || manifest.count < 1 || manifest.count > 1000 || !Number.isInteger(manifest.length) || manifest.length < 1) throw workflowError_("STORAGE_CORRUPT", "Thông tin cache không đầy đủ. Hệ thống chưa ghi đè dữ liệu hiện có.");
+    let text = "";
+    let missing = false;
+    for (let index = 0; index < manifest.count; index += 1) {
+      const chunk = properties.getProperty(key + ":g:" + manifest.generation + ":" + index);
+      if (typeof chunk !== "string") { missing = true; break; }
+      text += chunk;
+    }
+    // A reader that captured the previous head may race old-generation
+    // cleanup. Retry the newly published immutable generation in that case.
+    if (missing || text.length !== manifest.length) {
+      if (properties.getProperty(key + ":manifest") !== head) continue;
+      throw workflowError_("STORAGE_CORRUPT", "Dữ liệu cache bị thiếu một phần. Hệ thống giữ nguyên dữ liệu và chưa nhận thay đổi mới.");
+    }
+    try { return JSON.parse(text); }
+    catch (error) { if (properties.getProperty(key + ":manifest") === head) throw workflowError_("STORAGE_CORRUPT", "Dữ liệu cache không thể đọc. Hệ thống giữ nguyên dữ liệu và chưa nhận thay đổi mới."); }
+  }
+  throw workflowError_("RETRYABLE", "Cache đang được cập nhật trên thiết bị khác. Hãy thử đồng bộ lại.");
 }
 
 function writePropertyJson_(key, value) {
   const properties = PropertiesService.getScriptProperties();
   const text = JSON.stringify(value);
+  if (typeof text !== "string") throw new Error("Dữ liệu cache không hợp lệ. Giá trị cũ được giữ nguyên.");
   const chunks = [];
-  for (let offset = 0; offset < text.length; offset += SCRIPT_PROPERTY_CHUNK_SIZE) chunks.push(text.slice(offset, offset + SCRIPT_PROPERTY_CHUNK_SIZE));
-  const previousCount = Number(properties.getProperty(key + ":count") || 0);
-  chunks.forEach(function(chunk, index) { properties.setProperty(key + ":" + index, chunk); });
-  for (let index = chunks.length; index < previousCount; index += 1) properties.deleteProperty(key + ":" + index);
-  properties.setProperty(key + ":count", String(chunks.length));
+  let chunk = "";
+  let byteLength = 0;
+  for (const character of text) {
+    const code = character.charCodeAt(0);
+    const bytes = character.length === 2 ? 4 : code < 128 ? 1 : code < 2048 ? 2 : 3;
+    if (byteLength + bytes > SCRIPT_PROPERTY_CHUNK_SIZE && chunk) { chunks.push(chunk); chunk = ""; byteLength = 0; }
+    chunk += character;
+    byteLength += bytes;
+  }
+  if (chunk) chunks.push(chunk);
+  const generation = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + Math.random().toString(36).slice(2);
+  const previousHead = properties.getProperty(key + ":manifest");
+  const legacyCount = Number(properties.getProperty(key + ":count") || 0);
+  const nextHead = JSON.stringify({ version: 2, generation: generation, count: chunks.length, length: text.length });
+  const written = [];
+  try {
+    chunks.forEach(function(chunk, index) {
+      const chunkKey = key + ":g:" + generation + ":" + index;
+      written.push(chunkKey);
+      properties.setProperty(chunkKey, chunk);
+    });
+    properties.setProperty(key + ":manifest", nextHead);
+  } catch (error) {
+    let observed = false;
+    let committed = false;
+    try { committed = properties.getProperty(key + ":manifest") === nextHead; observed = true; } catch (readError) { /* A timeout may follow a successful commit. */ }
+    if (!committed) {
+      if (observed) written.forEach(function(chunkKey) { try { properties.deleteProperty(chunkKey); } catch (cleanupError) { /* Preserve the last committed generation. */ } });
+      throw workflowError_("RETRYABLE", "Chưa thể xác nhận lưu cache dùng chung. Hệ thống giữ nguyên dữ liệu đã ghi; hãy thử đồng bộ lại.");
+    }
+  }
+  try {
+    const previous = previousHead ? JSON.parse(previousHead) : null;
+    if (previous && previous.version === 2 && previous.generation && Number.isInteger(previous.count) && previous.count <= 1000) for (let index = 0; index < previous.count; index += 1) properties.deleteProperty(key + ":g:" + previous.generation + ":" + index);
+    if (Number.isInteger(legacyCount) && legacyCount <= 1000) for (let index = 0; index < legacyCount; index += 1) properties.deleteProperty(key + ":" + index);
+    properties.deleteProperty(key + ":count");
+  } catch (cleanupError) { /* Committed data remains valid if old chunks cannot be removed. */ }
 }
 
 function clearPropertyJson_(key) {
   const properties = PropertiesService.getScriptProperties();
+  const head = properties.getProperty(key + ":manifest");
   const count = Number(properties.getProperty(key + ":count") || 0);
-  for (let index = 0; index < count; index += 1) properties.deleteProperty(key + ":" + index);
-  properties.deleteProperty(key + ":count");
+  properties.setProperty(key + ":manifest", JSON.stringify({ version: 2, deleted: true }));
+  try {
+    const manifest = head ? JSON.parse(head) : null;
+    if (manifest && manifest.generation && Number.isInteger(manifest.count) && manifest.count <= 1000) for (let index = 0; index < manifest.count; index += 1) properties.deleteProperty(key + ":g:" + manifest.generation + ":" + index);
+    if (Number.isInteger(count) && count <= 1000) for (let index = 0; index < count; index += 1) properties.deleteProperty(key + ":" + index);
+    properties.deleteProperty(key + ":count");
+  } catch (cleanupError) { /* The committed tombstone prevents old chunks from reappearing. */ }
 }
 
 const WORKSPACE_CACHE_PROPERTY_KEY = "gmcrm-workspace-cache-v1";
@@ -1702,7 +1805,7 @@ function loadWorkspaceCache_() {
   return {
     ok: true,
     updatedAt: stored && Number(stored.updatedAt || 0) || 0,
-    years: stored && Array.isArray(stored.years) ? applyCustomerDriveMutations_(stored.years) : [],
+    years: stored && Array.isArray(stored.years) ? workflowProtectWorkspace_(applyCustomerDriveMutations_(stored.years), true) : [],
   };
 }
 
@@ -1714,7 +1817,7 @@ function saveWorkspaceCache_(payload) {
   }
   const incoming = applyCustomerDriveMutations_(Array.isArray(payload.years) ? payload.years : []);
   const previous = applyCustomerDriveMutations_(current && Array.isArray(current.years) ? current.years : []);
-  const years = protectedCustomerCacheYears_(incoming, previous, payload);
+  const years = workflowProtectWorkspace_(protectedCustomerCacheYears_(incoming, previous, payload));
   writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { version: 1, updatedAt: incomingUpdatedAt, years: years });
   return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
 }
@@ -1882,7 +1985,7 @@ function normalizeWorkNoteDate_(value) {
 }
 
 function normalizeWorkNotes_(notes) {
-  return (Array.isArray(notes) ? notes : []).slice(0, 500).map(function(note, index) {
+  return (Array.isArray(notes) ? notes : []).map(function(note, index) {
     const priority = workNoteText_(note && note.priority, 30);
     const workType = workNoteText_(note && note.workType, 50);
     const status = workNoteText_(note && note.status, 20);
@@ -1918,11 +2021,9 @@ function normalizeWorkNotes_(notes) {
 
 function workNoteStatus_(acceptedAt, dueDate) {
   if (!acceptedAt) return "Đen";
-  const matched = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(dueDate || "");
-  if (!matched) return "Xanh";
-  const due = new Date(Number(matched[3]), Number(matched[2]) - 1, Number(matched[1]));
-  const now = new Date(); now.setHours(0, 0, 0, 0);
-  const days = Math.floor((due.getTime() - now.getTime()) / 86400000);
+  const due = workflowDayNumber_(dueDate);
+  if (due === null) return "Đen";
+  const days = due - workflowDayNumber_(workflowToday_());
   if (days < 0) return "Tím";
   if (days <= 3) return "Đỏ";
   if (days <= 7) return "Cam";
@@ -1938,13 +2039,12 @@ function activeWorkNotesFile_() {
 function readActiveWorkNotes_() {
   const shared = readPropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY);
   if (Array.isArray(shared)) return shared;
-  try { const value = JSON.parse(activeWorkNotesFile_().getBlob().getDataAsString() || "[]"); return Array.isArray(value) ? value : []; } catch (error) { return []; }
+  try { const file = findFileByName_(rootFolder_(), ACTIVE_WORK_NOTES_FILE_NAME); if (!file) return []; const value = JSON.parse(file.getBlob().getDataAsString() || "[]"); return Array.isArray(value) ? value : []; } catch (error) { return []; }
 }
 
 function saveActiveWorkNotes_(records) {
-  const normalized = records.slice(-3000);
+  const normalized = records;
   writePropertyJson_(ACTIVE_WORK_NOTES_PROPERTY_KEY, normalized);
-  try { activeWorkNotesFile_().setContent(JSON.stringify(normalized)); } catch (error) { /* Shared property storage is the fallback when Drive is read-only. */ }
 }
 
 function syncActiveWorkNotes_(details, notes, payload) {
@@ -1954,23 +2054,33 @@ function syncActiveWorkNotes_(details, notes, payload) {
 }
 
 function loadAssignedWorkNotes_(payload) {
-  const email = workNoteText_(payload.email, 240).toLowerCase();
+  const actor = payload.workflowSessionToken || payload.adminSessionToken ? workflowActor_(payload) : null;
+  if (actor) workflowMayUse_(actor, "Ghi chú");
+  const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const activeNotes = readActiveWorkNotes_().filter(function(note) { return !note.actualDate && !isCustomerDriveRecordDeleted_(note); });
+  const activeNotes = workflowAssignedRegistry_("notes").filter(function(note) { return !note.actualDate && !isCustomerDriveRecordDeleted_(note) && (actor || note.collectionRevision === undefined); });
   // The built-in manager account needs an overview across every customer,
   // while each employee continues to receive only work assigned to them.
-  if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
+  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, notes: activeNotes };
   // Only legacy ID-based assignments need a roster lookup. Email assignments
   // can be matched directly and this keeps the overview usable when Drive is
   // unavailable (for example in a read-only test/cache environment).
   const needsMemberLookup = activeNotes.some(function(note) { return /^member:/i.test(workNoteText_(note.assigneeEmail, 240)); });
-  const member = needsMemberLookup ? employeeRosterMember_(email) : null;
+  const member = employeeRosterMember_(email);
+  if (member && member.role === "Quản lý chung") return { ok: true, notes: activeNotes };
   return { ok: true, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
 }
 
 function loadWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
   if (isCustomerDriveRecordDeleted_(details)) return { ok: true, notes: [], deleted: true };
+  const canonical = workflowReadProject_(details, true);
+  if (canonical) {
+    if (canonical.customerDeleted) return { ok: true, notes: [], deleted: true, revision: canonical.revision, deletedIds: canonical.deletedIds || [] };
+    const actor = workflowActor_(payload);
+    workflowMayUse_(actor, "Ghi chú");
+    return workflowSnapshot_(canonical, { source: "workflow-v2", archivePending: canonical.notes.some(function(note) { return note.archivePending; }) }, actor);
+  }
   const cacheKey = workNotesCacheKey_(details);
   const shared = readPropertyJson_(workNotesPropertyKey_(details));
   if (Array.isArray(shared)) return { ok: true, notes: normalizeWorkNotes_(shared), source: "script-properties" };
@@ -1997,6 +2107,7 @@ function loadWorkNotes_(payload) {
 
 function syncWorkNotes_(payload) {
   const details = workNotesPayload_(payload);
+  if (workflowReadProject_(details)) throw workflowError_("UPDATE_REQUIRED", "Ghi chú đã chuyển sang cơ chế giao việc mới. Hãy cập nhật ứng dụng trước khi sửa.");
   if (isCustomerDriveRecordDeleted_(details)) throw new Error("Hồ sơ đã được xóa trên Drive. Không thể đồng bộ ghi chú vào hồ sơ đã xóa.");
   const notes = normalizeWorkNotes_(payload.notes);
   const propertyKey = workNotesPropertyKey_(details);
@@ -2030,6 +2141,7 @@ function completedWorkNotesFolder_(details) {
 
 function completeWorkNote_(payload) {
   const details = workNotesPayload_(payload);
+  if (workflowReadProject_(details)) throw workflowError_("UPDATE_REQUIRED", "Ghi chú đã chuyển sang cơ chế giao việc mới. Hãy cập nhật ứng dụng trước khi hoàn thành.");
   const note = normalizeWorkNotes_([payload.note || {}])[0];
   if (!note || !note.actualDate) throw new Error("Cần xác nhận ngày hoàn thành trước khi lưu công việc vào Drive.");
   const actorEmail = workNoteText_(payload.actorEmail, 240).toLowerCase();
@@ -2181,14 +2293,18 @@ function pancakeMessageStateFile_() {
 }
 
 function readPancakeMessageStates_() {
+  const shared = readPropertyJson_(WORKFLOW_MESSAGE_STATES);
+  if (Array.isArray(shared)) return shared;
   try {
-    const value = JSON.parse(pancakeMessageStateFile_().getBlob().getDataAsString() || "[]");
+    const file = findFileByName_(rootFolder_(), PANCAKE_MESSAGE_STATE_FILE_NAME);
+    if (!file) return [];
+    const value = JSON.parse(file.getBlob().getDataAsString() || "[]");
     return Array.isArray(value) ? value : [];
   } catch (error) { return []; }
 }
 
 function savePancakeMessageStates_(states) {
-  pancakeMessageStateFile_().setContent(JSON.stringify(states.slice(-5000)));
+  writePropertyJson_(WORKFLOW_MESSAGE_STATES, states);
 }
 
 function pancakeHouseIdFromGroupName_(groupName) {
@@ -2333,26 +2449,33 @@ function pancakeTargetForGroupName_(targets, groupName) {
   return null;
 }
 
-function groupPancakeMessages_(conversation, rawMessages, target) {
+function groupPancakeMessages_(conversation, rawMessages, target, priorGroups) {
   const fallbackName = workNoteText_(conversation && conversation.page_customer && conversation.page_customer.name, 240) || workNoteText_(conversation && conversation.from && conversation.from.name, 240) || "Khách hàng";
   const normalized = rawMessages.map(function(message, index) {
     const content = pancakeMessageText_(message);
     const sentAt = pancakeDateIso_(message && (message.inserted_at || message.created_at || message.sent_at || message.timestamp || message.time));
     return { id: workNoteText_(message && (message.id || message.message_id), 180) || "message-" + index, senderName: pancakeMessageSender_(message, fallbackName), content: content, sentAt: sentAt };
   }).filter(function(message) { return message.content && message.sentAt; }).sort(function(left, right) { return new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime(); });
+  const prior = (Array.isArray(priorGroups) ? priorGroups : []).filter(function(group) { return String(group.conversationId) === String(conversation.id); });
   const groups = [];
   normalized.forEach(function(message) {
-    const last = groups[groups.length - 1];
     const messageTime = new Date(message.sentAt).getTime();
-    if (!last || messageTime - new Date(last.lastMessageAt).getTime() > 2 * 60 * 60 * 1000) {
+    let last = groups.find(function(group) { const first = new Date(group.firstMessageAt).getTime(); return messageTime >= first && messageTime - first < 2 * 60 * 60 * 1000; });
+    if (!last) {
+      const anchor = prior.find(function(group) { const first = new Date(group.firstMessageAt).getTime(); return messageTime >= first && messageTime - first < 2 * 60 * 60 * 1000; });
+      if (anchor) { last = { ...anchor, ...target, messages: (anchor.messages || []).slice(), messageCount: (anchor.messages || []).length }; groups.push(last); }
+    }
+    if (!last) {
       groups.push({ id: "pancake-" + String(conversation.id) + "-" + message.sentAt, conversationId: String(conversation.id), groupName: workNoteText_(conversation && conversation.from && conversation.from.name, 400), houseId: target.houseId, projectId: target.projectId, customerName: target.customerName || fallbackName, year: target.year, month: target.month, messages: [message], firstMessageAt: message.sentAt, lastMessageAt: message.sentAt, messageCount: 1 });
     } else {
-      last.messages.push(message);
-      last.lastMessageAt = message.sentAt;
-      last.messageCount += 1;
+      const existing = last.messages.findIndex(function(line) { return line.id === message.id; });
+      if (existing >= 0) last.messages[existing] = message; else last.messages.push(message);
+      last.messages.sort(function(left, right) { return new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime(); });
+      last.lastMessageAt = last.messages[last.messages.length - 1].sentAt;
+      last.messageCount = last.messages.length;
     }
   });
-  return groups;
+  return groups.sort(function(left, right) { return new Date(left.firstMessageAt).getTime() - new Date(right.firstMessageAt).getTime(); });
 }
 
 function loadCustomerMessages_(payload) {
@@ -2361,10 +2484,15 @@ function loadCustomerMessages_(payload) {
   const targets = pancakeTargetMap_(payload);
   const context = pancakePageContext_();
   const targetFingerprint = Object.keys(targets).sort().map(function(key) { return key + ":" + normalizePancakeGroupName_(targets[key].zaloGroupName || ""); });
-  const cacheKey = "gmcrm-pancake-messages-" + Utilities.base64EncodeWebSafe(JSON.stringify(targetFingerprint)).slice(0, 100);
+  const cacheKey = "gmcrm-pancake-messages-" + workflowHash_(JSON.stringify(targetFingerprint));
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    const states = workflowIngestMessages_(cached.messages || []);
+    return { ...cached, messages: workflowMessagesView_(cached.messages || [], states) };
+  }
   const conversations = pancakeConversationPages_(context);
+  const priorStates = readPancakeMessageStates_();
+  const eligibleConversations = new Set();
   const groups = [];
   conversations.forEach(function(conversation) {
     const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
@@ -2379,22 +2507,15 @@ function loadCustomerMessages_(payload) {
     // customer record exists; every other conversation keeps the strict rule.
     if (!isSpecialTestConversation && !overrideTarget && (!/\bGM\b/i.test(groupName) || !targets[houseKey])) return;
     const target = isSpecialTestConversation ? (targets[houseKey] || pancakeSpecialTestTarget_(targets)) : (overrideTarget || targets[houseKey]);
+    eligibleConversations.add(String(conversation.id));
     let messages;
     try { messages = pancakeConversationMessages_(context, conversation); } catch (error) { return; }
-    groupPancakeMessages_(conversation, messages.filter(function(message) { return isSpecialTestConversation || !pancakeIsPageMessage_(message, context.pageId); }), target).forEach(function(group) { groups.push(group); });
+    groupPancakeMessages_(conversation, messages.filter(function(message) { return isSpecialTestConversation || !pancakeIsPageMessage_(message, context.pageId); }), target, priorStates).forEach(function(group) { groups.push(group); });
   });
-  const states = readPancakeMessageStates_();
-  const stateById = {};
-  states.forEach(function(state) {
-    stateById[String(state.id || "")] = { ...state, status: normalizePancakeMessageStatus_(state.status) };
-  });
-  const active = groups.map(function(group) {
-    const state = stateById[group.id];
-    return state ? { ...group, status: state.status, resolvedAt: state.resolvedAt || "", statusUpdatedAt: state.statusUpdatedAt || "" } : { ...group, status: "new", resolvedAt: "", statusUpdatedAt: "" };
-  // A completed group is archived in the customer's Excel workbook and is
-  // removed from the live web feed immediately. Its state file remains only
-  // to prevent the same Pancake history from being exported twice.
-  }).filter(function(group) { return group.status !== "resolved"; });
+  const states = workflowIngestMessages_(groups);
+  const loadedIds = new Set(groups.map(function(group) { return group.id; }));
+  const retained = states.filter(function(state) { return !loadedIds.has(state.id) && eligibleConversations.has(String(state.conversationId)) && (state.status !== "resolved" || state.archivePending); });
+  const active = workflowMessagesView_(groups.concat(retained), states);
   const result = { ok: true, configured: true, pageName: context.pageName, messages: active };
   cacheJson_(cacheKey, result, 30);
   return result;
@@ -2411,10 +2532,10 @@ function normalizePancakeMessageGroup_(group) {
     customerName: workNoteText_(group.customerName, 240),
     year: Number(group.year) || 0,
     month: Number(group.month) || 0,
-    messages: (Array.isArray(group.messages) ? group.messages : []).slice(0, 200).map(function(message) { return { id: workNoteText_(message && message.id, 180), senderName: workNoteText_(message && message.senderName, 160) || "Khách hàng", content: pancakePlainText_(workNoteText_(message && message.content, 4000)), sentAt: pancakeDateIso_(message && message.sentAt) }; }).filter(function(message) { return message.content && message.sentAt; }),
+    messages: (Array.isArray(group.messages) ? group.messages : []).map(function(message) { return { id: workNoteText_(message && message.id, 180), senderName: workNoteText_(message && message.senderName, 160) || "Khách hàng", content: pancakePlainText_(workNoteText_(message && message.content, 4000)), sentAt: pancakeDateIso_(message && message.sentAt) }; }).filter(function(message) { return message.content && message.sentAt; }),
     firstMessageAt: pancakeDateIso_(group.firstMessageAt),
     lastMessageAt: pancakeDateIso_(group.lastMessageAt),
-    messageCount: Math.min(200, Number(group.messageCount) || 0),
+    messageCount: (Array.isArray(group.messages) ? group.messages : []).length,
   };
 }
 
@@ -2431,7 +2552,7 @@ function pancakeMessageExportRows_(group) {
 }
 
 function appendPancakeMessageWorkbook_(group) {
-  if (!group || !/\bGM\b/i.test(workNoteText_(group.groupName, 400)) || !workNoteText_(group.houseId, 160)) {
+  if (!group || (!group.workflowVerified && !/\bGM\b/i.test(workNoteText_(group.groupName, 400))) || !workNoteText_(group.houseId, 160)) {
     throw new Error("Tin nhắn chưa gắn được với nhóm GM và mã nhà hợp lệ.");
   }
   const year = Number(group.year);
@@ -2440,34 +2561,53 @@ function appendPancakeMessageWorkbook_(group) {
   const customerFolder = customerFolderForRecord_(group, year, month, true);
   const documentsFolder = documentsFolderForCustomerFolder_(customerFolder, true);
   if (!documentsFolder) throw new Error("Không tìm thấy thư mục Tài liệu của khách hàng.");
-  const existingFile = findFileByName_(documentsFolder, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+  const existingFiles = [];
+  const existingIterator = documentsFolder.getFilesByName(PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+  while (existingIterator.hasNext()) existingFiles.push(existingIterator.next());
   let rows = [["Ngày", "Nội dung tin nhắn"]];
-  if (existingFile) {
+  const archivedLineKeys = new Set();
+  const maximumCounts = new Map();
+  existingFiles.forEach(function(existingFile) {
     try {
       const sheets = readXlsxSheets_(existingFile);
       const source = sheets["Tin nhắn khách"] || sheets[Object.keys(sheets)[0]] || [];
+      if (!source.length) throw new Error("empty archive");
+      let history = [];
       if (source.length) {
         const header = source[0] || [];
         if (String(header[0] || "").trim() === "Ngày" && String(header[1] || "").trim()) {
-          rows = source.map(function(row, index) { return index === 0 ? ["Ngày", "Nội dung tin nhắn"] : [String(row[0] || ""), String(row[1] || "")]; });
+          history = source.slice(1).map(function(row) { return [String(row[0] || ""), String(row[1] || "")]; });
         } else {
           // Migrate the old nine-column export format into the requested
           // two-column sheet instead of creating a second workbook.
-          rows = [["Ngày", "Nội dung tin nhắn"]].concat(source.slice(1).map(function(row) {
+          history = source.slice(1).map(function(row) {
             return [String(row[6] || row[0] || ""), String(row[5] || row[1] || "")];
-          }).filter(function(row) { return row[0] || row[1]; }));
+          }).filter(function(row) { return row[0] || row[1]; });
         }
       }
+      const fileCounts = new Map();
+      history.forEach(function(row) {
+        const key = JSON.stringify(row);
+        const count = Number(fileCounts.get(key) || 0) + 1;
+        fileCounts.set(key, count);
+        if (count > Number(maximumCounts.get(key) || 0)) { rows.push(row); maximumCounts.set(key, count); }
+      });
+      if (existingFile.getDescription) {
+        try {
+          const info = JSON.parse(existingFile.getDescription() || "{}");
+          if (info.format === "gmcrm-message-archive-v2" && Array.isArray(info.lineKeys)) info.lineKeys.forEach(function(key) { archivedLineKeys.add(String(key)); });
+        } catch (error) { /* Legacy workbooks have no line-identity metadata. */ }
+      }
     } catch (error) {
-      // A malformed/locked old workbook is replaced with a clean two-column
-      // workbook below; the live message remains available if Drive fails.
+      throw new Error("Không thể đọc tệp Tin nhắn khách.xlsx hiện có. Giữ nguyên tệp cũ và tin nhắn để thử lưu lại.");
     }
-  }
+  });
   const existingKeys = {};
   rows.slice(1).forEach(function(row) { existingKeys[String(row[0]) + "\n" + String(row[1])] = true; });
-  pancakeMessageExportRows_(group).forEach(function(row) {
+  const deltaMessages = (group.messages || []).filter(function(line) { return !group.workflowVerified || !archivedLineKeys.has(workflowMessageLineKey_(line)); });
+  pancakeMessageExportRows_({ ...group, messages: deltaMessages }).forEach(function(row) {
     const key = String(row[0]) + "\n" + String(row[1]);
-    if (!existingKeys[key]) { rows.push(row); existingKeys[key] = true; }
+    if (group.workflowVerified || !existingKeys[key]) { rows.push(row); existingKeys[key] = true; }
   });
   const temporary = SpreadsheetApp.create("GM-CRM Tin nhắn khách temporary " + workNoteText_(group.houseId, 100));
   try {
@@ -2480,17 +2620,19 @@ function appendPancakeMessageWorkbook_(group) {
     sheet.setColumnWidth(2, 520);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     SpreadsheetApp.flush();
-    const blob = DriveApp.getFileById(temporary.getId()).getBlob().getAs(EXCEL_MIME).setName(PANCAKE_MESSAGE_EXPORT_FILE_NAME);
-    trashFilesByName_(documentsFolder, PANCAKE_MESSAGE_EXPORT_FILE_NAME);
-    const file = documentsFolder.createFile(blob);
+    const blob = exportXlsx_(temporary.getId()).setName(PANCAKE_MESSAGE_EXPORT_FILE_NAME);
+    const lineKeys = group.workflowVerified ? Array.from(new Set(Array.from(archivedLineKeys).concat((group.messages || []).map(workflowMessageLineKey_)))).slice(-600) : Array.from(archivedLineKeys);
+    const metadata = group.workflowVerified || lineKeys.length ? { description: JSON.stringify({ format: "gmcrm-message-archive-v2", lineKeys: lineKeys }) } : undefined;
+    const file = replaceWorkbookFile_(documentsFolder, PANCAKE_MESSAGE_EXPORT_FILE_NAME, blob, metadata);
     return { fileId: file.getId(), fileUrl: file.getUrl(), folderUrl: documentsFolder.getUrl(), fileName: PANCAKE_MESSAGE_EXPORT_FILE_NAME };
   } finally {
-    DriveApp.getFileById(temporary.getId()).setTrashed(true);
+    try { DriveApp.getFileById(temporary.getId()).setTrashed(true); } catch (error) { /* Cleanup must not hide an export failure or success. */ }
   }
 }
 
 function updateCustomerMessageStatus_(payload) {
   const group = normalizePancakeMessageGroup_(payload.message);
+  if (workflowMessageSource_(group.id)) throw workflowError_("UPDATE_REQUIRED", "Tin nhắn đã chuyển sang cơ chế xử lý mới. Hãy cập nhật ứng dụng.");
   const status = normalizePancakeMessageStatus_(payload.status);
   if (!group.id || PANCAKE_MESSAGE_STATUSES.indexOf(status) === -1) throw new Error("Trạng thái tin nhắn không hợp lệ.");
   const states = readPancakeMessageStates_();
@@ -2512,6 +2654,619 @@ function updateCustomerMessageStatus_(payload) {
 // cross-device assignment queue; the Excel files remain optional exports.
 const ACTIVE_DESIGN_TASKS_FILE_NAME = "_gmcrm_thiet_ke_dang_giao.json";
 const DESIGN_TASK_KINDS = ["architecture", "interior", "acceptance"];
+const WORKFLOW_PROJECT_PREFIX = "gmcrm-workflow-project-v2-";
+const WORKFLOW_PROJECT_INDEX = "gmcrm-workflow-project-index-v2";
+const WORKFLOW_MESSAGE_STATES = "gmcrm-workflow-message-states-v2";
+const WORKFLOW_MESSAGE_SOURCE_PREFIX = "gmcrm-workflow-message-source-v2-";
+const WORKFLOW_DESIGN_REGISTRY = "gmcrm-active-design-tasks-v2";
+
+function workflowError_(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function workflowHash_(value) {
+  return customerAdminSessionSignature_(String(value), "gmcrm-workflow-fingerprint-v2");
+}
+
+function issueWorkflowSession_(account) {
+  const claims = { version: 2, purpose: "workflow", account: account, expiresAt: Date.now() + CUSTOMER_ADMIN_SESSION_LIFETIME_MS, nonce: Utilities.getUuid() };
+  const body = Utilities.base64EncodeWebSafe(JSON.stringify(claims), Utilities.Charset.UTF_8).replace(/=+$/g, "");
+  return body + "." + customerAdminSessionSignature_(body, customerAdminSessionSecret_());
+}
+
+function workflowActor_(payload) {
+  let account = "";
+  if (payload.workflowSessionToken) {
+    try {
+      const token = String(payload.workflowSessionToken);
+      const parts = token.split(".");
+      const secret = PropertiesService.getScriptProperties().getProperty(CUSTOMER_ADMIN_SESSION_SECRET_KEY);
+      if (token.length > 2048 || parts.length !== 2 || !secret || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[A-Za-z0-9_-]+$/.test(parts[1])) throw new Error("invalid token");
+      const expected = customerAdminSessionSignature_(parts[0], secret);
+      let difference = expected.length ^ parts[1].length;
+      for (let i = 0; i < expected.length; i += 1) difference |= expected.charCodeAt(i) ^ (parts[1].charCodeAt(i) || 0);
+      if (difference) throw new Error("invalid signature");
+      const claims = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString("UTF-8"));
+      if (claims.version === 1 && claims.purpose === "customer-admin" && payload.workflowSessionToken === payload.adminSessionToken) account = requireCustomerAdminSession_(payload).account;
+      else {
+        if (claims.version !== 2 || claims.purpose !== "workflow" || !Number.isFinite(claims.expiresAt) || claims.expiresAt <= Date.now()) throw new Error("expired token");
+        account = String(claims.account || "").trim().toLowerCase();
+      }
+    } catch (error) { throw workflowError_("AUTH_REQUIRED", "Phiên đăng nhập đã hết hạn hoặc không hợp lệ. Hãy đăng nhập lại để cập nhật công việc."); }
+  } else if (payload.adminSessionToken) {
+    try { account = requireCustomerAdminSession_(payload).account; }
+    catch (error) { throw workflowError_("AUTH_REQUIRED", "Hãy đăng nhập lại tài khoản admin để cập nhật công việc."); }
+  }
+  if (!account) throw workflowError_("AUTH_REQUIRED", "Hãy đăng nhập để cập nhật công việc.");
+  if (account === "admin") return { account: account, name: "Admin", admin: true, manager: true, member: null, permissions: ["Ghi chú", "Thiết kế", "Tin nhắn"] };
+  const member = employeeRosterMember_(account);
+  if (!member) throw workflowError_("AUTH_REQUIRED", "Nhân viên không còn hoạt động trong danh sách Nhân lực. Hãy đăng nhập lại hoặc liên hệ admin.");
+  return { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160), admin: false, manager: member.role === "Quản lý chung", member: member, permissions: Array.isArray(member.permissions) ? member.permissions : [] };
+}
+
+function workflowMayUse_(actor, permission) {
+  if (!actor.manager && actor.permissions.indexOf(permission) < 0) throw workflowError_("FORBIDDEN", "Bạn không có quyền cập nhật phần " + permission + ".");
+}
+
+function workflowAssigned_(actor, item) {
+  return assignmentMatchesEmployee_(item.assigneeEmail, actor.account, actor.member);
+}
+
+function workflowAssignee_(value) {
+  const account = workNoteText_(value, 240).toLowerCase();
+  if (account === "admin") return { account: "admin", name: "Admin" };
+  const member = employeeRosterMember_(account);
+  if (!member) throw workflowError_("VALIDATION", "Người phụ trách không tồn tại hoặc đã ngưng hoạt động trong Nhân lực.");
+  return { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160) };
+}
+
+function workflowDayNumber_(text) {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(text || ""));
+  if (!match) return null;
+  const day = Number(match[1]), month = Number(match[2]), year = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (year < 1900 || year > 2200 || date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  return Math.floor(date.getTime() / 86400000);
+}
+
+function workflowToday_() { return Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy"); }
+
+function workflowDueDate_(value, allowPast) {
+  const text = String(value || "").trim();
+  const day = workflowDayNumber_(text);
+  if (day === null || (!allowPast && day < workflowDayNumber_(workflowToday_()))) throw workflowError_("VALIDATION", "Hoàn thành dự kiến phải là ngày hợp lệ hôm nay hoặc tương lai, dạng dd/mm/yyyy.");
+  return text;
+}
+
+function workflowProjectKey_(details) { return WORKFLOW_PROJECT_PREFIX + workflowHash_(details.year + ":" + details.month + ":" + details.projectId); }
+
+function workflowReadCacheKey_(key) { return "gmcrm-workflow-read-v2:" + workflowHash_(key); }
+
+function workflowReadSnapshot_(key, useReadCache) {
+  const cacheKey = workflowReadCacheKey_(key);
+  if (useReadCache) {
+    try {
+      const cached = CacheService.getScriptCache().get(cacheKey);
+      if (typeof cached === "string" && cached) return JSON.parse(cached);
+    } catch (error) { /* Cache is optional; the committed property store remains authoritative. */ }
+  }
+  const value = readPropertyJson_(key);
+  if (useReadCache) {
+    const serialized = JSON.stringify(value);
+    let bytes = 0;
+    for (const character of serialized) { const code = character.charCodeAt(0); bytes += character.length === 2 ? 4 : code < 128 ? 1 : code < 2048 ? 2 : 3; if (bytes > 90000) break; }
+    if (bytes <= 90000) {
+      try { CacheService.getScriptCache().put(cacheKey, serialized, 6); } catch (error) { /* Oversized/unavailable cache never blocks a read. */ }
+    }
+  }
+  return value;
+}
+
+function workflowInvalidateReadCache_(key) {
+  try { CacheService.getScriptCache().remove(workflowReadCacheKey_(key)); } catch (error) { /* A failed invalidation expires within six seconds. */ }
+}
+
+function workflowReadProject_(details, useReadCache) {
+  const key = workflowProjectKey_(details);
+  // Commands omit useReadCache and always re-read the committed state under
+  // the script write lock. Only UI polling uses the six-second snapshot.
+  const state = workflowReadSnapshot_(key, Boolean(useReadCache));
+  return state && state.version === 2 ? state : null;
+}
+
+function workflowWriteProject_(state) {
+  const key = workflowProjectKey_(state.details);
+  const index = readPropertyJson_(WORKFLOW_PROJECT_INDEX) || [];
+  if (!index.some(function(item) { return Number(item.year) === state.details.year && Number(item.month) === state.details.month && item.projectId === state.details.projectId; })) { writePropertyJson_(WORKFLOW_PROJECT_INDEX, index.concat([state.details])); workflowInvalidateReadCache_(WORKFLOW_PROJECT_INDEX); }
+  // Publish a pointer only after every chunk has been written. Readers never
+  // observe a half-written note collection while a command is in progress.
+  writePropertyJson_(key, state);
+  workflowInvalidateReadCache_(key);
+}
+
+function workflowResetCustomerProject_(payload, customerDeleted) {
+  const details = { year: Number(payload.year), month: Number(payload.month), projectId: String(payload.projectId || "").trim(), houseId: String(payload.houseId || "").trim(), customerName: "" };
+  if (!details.projectId) return;
+  const existing = workflowReadProject_(details);
+  if (existing && existing.customerDeleted === customerDeleted && !existing.notes.length && DESIGN_TASK_KINDS.every(function(kind) { return !(existing.design[kind] || []).length; }) && !existing.legacyImportPending) return;
+  const deletedIds = Array.from(new Set((existing && existing.deletedIds || []).concat((existing && existing.notes || []).map(function(note) { return note.id; }))));
+  const design = {};
+  DESIGN_TASK_KINDS.forEach(function(kind) { design[kind] = []; });
+  workflowWriteProject_({ version: 2, details: details, revision: Number(existing && existing.revision || 0) + 1, notes: [], deletedIds: deletedIds, design: design, requests: existing && existing.requests || [], legacyImportPending: false, legacyImportError: "", customerDeleted: Boolean(customerDeleted) });
+}
+
+function workflowWorkspaceRecord_(details) {
+  const workspace = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
+  const year = workspace && Array.isArray(workspace.years) && workspace.years.find(function(item) { return Number(item.year) === details.year; });
+  const month = year && (year.months || []).find(function(item, index) { return String(item.label) === "T" + details.month || (!item.label && index + 1 === details.month); });
+  return month && (month.records || []).find(function(item) { return item.projectId === details.projectId; }) || null;
+}
+
+function workflowProject_(details) {
+  const existing = workflowReadProject_(details);
+  if (existing && existing.customerDeleted) throw workflowError_("NOT_FOUND", "Khách hàng đã được xóa. Không thể cập nhật công việc cũ.");
+  if (existing) return existing.legacyImportPending ? workflowTryLegacyImport_(existing) : existing;
+  const stored = readPropertyJson_(workNotesPropertyKey_(details));
+  let notes = Array.isArray(stored) ? normalizeWorkNotes_(stored) : [];
+  let legacyImportPending = false;
+  let legacyImportError = "";
+  if (!Array.isArray(stored)) {
+    try { notes = workflowLegacyDriveNotes_(details); }
+    catch (error) {
+      if (error.code === "STORAGE_CORRUPT" || error.code === "RETRYABLE") throw error;
+      legacyImportPending = true;
+      legacyImportError = workNoteText_(error.message || "Chưa thể đọc lịch sử Drive. Giao việc mới vẫn được giữ trong cache.", 300);
+    }
+  }
+  const record = workflowWorkspaceRecord_(details);
+  const active = readActiveDesignTasks_().filter(function(row) { return row.year === details.year && row.month === details.month && row.projectId === details.projectId; });
+  const design = {};
+  DESIGN_TASK_KINDS.forEach(function(kind) {
+    const field = kind === "interior" ? "interiorDesignProgress" : kind === "acceptance" ? "acceptanceDesignProgress" : "designProgress";
+    const rows = normalizeDesignTaskRows_(record && record[field] || []);
+    const byId = new Map(rows.map(function(row) { return [row.id, row]; }));
+    active.filter(function(row) { return row.kind === kind; }).forEach(function(row) { byId.set(row.id, { ...byId.get(row.id), ...row }); });
+    design[kind] = Array.from(byId.values());
+  });
+  return { version: 2, details: details, revision: 0, notes: notes || [], deletedIds: [], design: design, requests: [], legacyImportPending: legacyImportPending, legacyImportError: legacyImportError };
+}
+
+function workflowLegacyDriveNotes_(details) {
+  if (isVirtualPancakeTestProject_(details)) return [];
+  const record = workflowWorkspaceRecord_(details);
+  const folder = workNotesFolder_(details.year, details.month, details.projectId, false, record && record.houseId || details.houseId);
+  if (!folder) return [];
+  const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
+  if (!file) return [];
+  const raw = JSON.parse(file.getBlob().getDataAsString("UTF-8") || "[]");
+  if (!Array.isArray(raw)) throw new Error("Lịch sử ghi chú Drive không hợp lệ. Tệp cũ được giữ nguyên để thử đọc lại.");
+  return normalizeWorkNotes_(raw);
+}
+
+function workflowTryLegacyImport_(state) {
+  try {
+    const legacy = workflowLegacyDriveNotes_(state.details);
+    const known = new Set(state.notes.map(function(note) { return note.id; }));
+    const deleted = new Set(state.deletedIds || []);
+    legacy.forEach(function(note) { if (!known.has(note.id) && !deleted.has(note.id)) { state.notes.push(note); known.add(note.id); } });
+    state.legacyImportPending = false;
+    state.legacyImportError = "";
+    state.revision += 1;
+    state._legacyImportChanged = true;
+  } catch (error) {
+    if (error.code === "STORAGE_CORRUPT" || error.code === "RETRYABLE") throw error;
+    state.legacyImportError = workNoteText_(error.message || "Chưa thể đọc lịch sử Drive. Dữ liệu mới vẫn được giữ trong cache.", 300);
+  }
+  return state;
+}
+
+function workflowDetails_(payload) {
+  const details = workNotesPayload_(payload);
+  if (!/^\d{4}$/.test(String(details.year)) || details.month % 1 || !validCustomerFolderKey_(details.projectId)) throw workflowError_("VALIDATION", "Thông tin khách hàng không hợp lệ.");
+  if (isCustomerDriveRecordDeleted_(details)) throw workflowError_("NOT_FOUND", "Khách hàng đã được xóa. Không thể cập nhật công việc.");
+  return { ...details, customerName: workNoteText_(payload.customerName, 240) };
+}
+
+function workflowSnapshot_(state, extra, actor) {
+  const now = Date.now();
+  const notes = state.notes.filter(function(note) { return (!actor || actor.manager || actor.permissions.indexOf("Ghi chú") >= 0 && (note.creatorEmail === actor.account || workflowAssigned_(actor, note))) && (!note.completedAt || note.archivePending || !note.archivedAt || now - new Date(note.completedAt).getTime() < 2 * 86400000); }).map(function(note) { return { ...note, status: workNoteStatus_(note.acceptedAt, note.dueDate) }; });
+  return { ok: true, revision: state.revision, notes: notes, deletedIds: state.deletedIds || [], legacyImportPending: Boolean(state.legacyImportPending), legacyImportError: state.legacyImportError || "", ...extra };
+}
+
+function workflowCheckRevision_(payload, item) {
+  if (payload.expectedRevision !== undefined && Number(payload.expectedRevision) !== Number(item.revision || 0)) throw workflowError_("CONFLICT", "Công việc đã được cập nhật trên thiết bị khác. Hãy tải lại trước khi sửa.");
+}
+
+function workflowRequestSignature_(payload, actor) {
+  const excluded = ["workflowSessionToken", "adminSessionToken", "token", "requestId"];
+  const stable = function(value) {
+    if (Array.isArray(value)) return value.map(stable);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.keys(value).sort().filter(function(key) { return excluded.indexOf(key) < 0; }).map(function(key) { return [key, stable(value[key])]; }));
+  };
+  return workflowHash_(actor.account + ":" + JSON.stringify(stable(payload)));
+}
+
+function workflowRememberRequest_(state, payload, signature, actor, targetId) {
+  state.requests = (state.requests || []).concat([{ id: payload.requestId, signature: signature, actor: actor.account, operation: payload.operation, targetId: targetId || "", at: Date.now() }]).slice(-100);
+}
+
+function workflowNewNote_(draft, actor, previous) {
+  draft = draft || {};
+  const assignee = workflowAssignee_(draft.assigneeEmail);
+  const dueDate = workflowDueDate_(draft.dueDate, Boolean(previous && previous.dueDate === draft.dueDate));
+  const content = workNoteText_(draft.content, 4000);
+  if (!content) throw workflowError_("VALIDATION", "Hãy nhập nội dung công việc trước khi phát hành.");
+  if (WORK_NOTE_PRIORITIES.indexOf(draft.priority) < 0 || WORK_NOTE_TYPES.indexOf(draft.workType) < 0) throw workflowError_("VALIDATION", "Ưu tiên hoặc loại công việc không hợp lệ.");
+  const reassigned = previous && previous.assigneeEmail !== assignee.account;
+  const note = {
+    ...previous, id: workNoteText_(draft.id || previous && previous.id, 100), priority: draft.priority, workType: draft.workType,
+    assigneeEmail: assignee.account, assignee: assignee.name, content: content, dueDate: dueDate,
+    creatorEmail: previous && previous.creatorEmail || actor.account, creatorName: previous && previous.creatorName || actor.name,
+    createdAt: previous && previous.createdAt || new Date().toISOString(), publishedAt: previous && previous.publishedAt || new Date().toISOString(),
+    acceptedAt: reassigned ? "" : previous && previous.acceptedAt || "", acceptedBy: reassigned ? "" : previous && previous.acceptedBy || "",
+    actualDate: reassigned ? "" : previous && previous.actualDate || "", completedAt: reassigned ? "" : previous && previous.completedAt || "",
+    revision: Number(previous && previous.revision || 0) + 1, updatedAt: new Date().toISOString(),
+  };
+  if (!note.id || !/^[A-Za-z0-9_.:-]{1,100}$/.test(note.id)) throw workflowError_("VALIDATION", "Mã công việc không hợp lệ.");
+  note.status = workNoteStatus_(note.acceptedAt, note.dueDate);
+  return note;
+}
+
+function workflowProjectItems_(state, domain) {
+  if (domain === "notes") return state.notes;
+  return DESIGN_TASK_KINDS.reduce(function(all, kind) { return all.concat((state.design[kind] || []).map(function(row) { return { ...row, kind: kind }; })); }, []);
+}
+
+function workflowArchiveItem_(details, item, kind) {
+  if (isVirtualPancakeTestProject_(details)) return { virtual: true };
+  const root = rootFolder_();
+  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const year = customers && findFolder_(customers, String(details.year));
+  const month = year && findFolder_(year, "T" + details.month);
+  if (!month || !customerFolderForPayload_(details, false)) throw new Error("Thư mục khách hàng không còn tồn tại trên Drive. Giữ công việc hoàn thành trong cache.");
+  const fileName = COMPLETED_WORK_NOTES_FILE_NAME;
+  const file = findFileByName_(month, fileName);
+  let records = [];
+  if (file) {
+    try { records = JSON.parse(file.getBlob().getDataAsString("UTF-8") || "[]"); }
+    catch (error) { throw new Error("Không thể đọc kho hoàn thành hiện có. Giữ nguyên tệp cũ để thử lưu lại."); }
+    if (!Array.isArray(records)) throw new Error("Kho hoàn thành hiện có không hợp lệ. Tệp cũ được giữ nguyên.");
+  }
+  const archiveKey = details.year + ":" + details.month + ":" + details.projectId + ":" + kind + ":" + item.id;
+  const kept = records.filter(function(record) { return (record.archiveKey || (record.projectId === details.projectId && String(record.id) === String(item.id) && !record.kind ? archiveKey : "")) !== archiveKey; });
+  kept.push({ ...item, ...details, kind: kind, archiveKey: archiveKey, savedAt: Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss") });
+  if (file) file.setContent(JSON.stringify(kept));
+  else month.createFile(fileName, JSON.stringify(kept), MimeType.PLAIN_TEXT);
+  return { folderUrl: month.getUrl() };
+}
+
+function workflowAttemptArchives_(state, onlyId) {
+  let changed = false;
+  let attempted = 0;
+  const archive = function(item, kind) {
+    if (!item.actualDate || !item.completedAt || (onlyId && item.id !== onlyId) || item.archivedAt || attempted >= 10) return item;
+    attempted += 1;
+    let result;
+    try {
+      const delivered = workflowArchiveItem_(state.details, item, kind);
+      result = { ...item, archivePending: false, archivedAt: new Date().toISOString(), archiveError: "", virtual: Boolean(delivered.virtual) };
+    } catch (error) {
+      result = { ...item, archivePending: true, archiveError: workNoteText_(error.message || "Chưa thể lưu Drive. Công việc đã được giữ trong cache dùng chung.", 300) };
+    }
+    if (result.archivePending !== item.archivePending || result.archiveError !== item.archiveError || result.archivedAt !== item.archivedAt) {
+      changed = true;
+      return { ...result, revision: Number(item.revision || 0) + 1, updatedAt: new Date().toISOString() };
+    }
+    return item;
+  };
+  state.notes = state.notes.map(function(note) { return archive(note, "note"); });
+  DESIGN_TASK_KINDS.forEach(function(kind) { state.design[kind] = (state.design[kind] || []).map(function(row) { return archive(row, "design:" + kind); }); });
+  return changed;
+}
+
+function workflowPruneArchived_(state) {
+  const expired = state.notes.filter(function(note) { return note.completedAt && note.archivedAt && !note.archivePending && Date.now() - new Date(note.completedAt).getTime() >= 2 * 86400000; });
+  if (!expired.length) return false;
+  const ids = new Set(expired.map(function(note) { return note.id; }));
+  state.notes = state.notes.filter(function(note) { return !ids.has(note.id); });
+  state.deletedIds = Array.from(new Set((state.deletedIds || []).concat(Array.from(ids))));
+  state.revision += 1;
+  return true;
+}
+
+function workflowProjectResponse_(state, payload, targetId, repeated, actor) {
+  const kind = payload.kind;
+  const note = state.notes.find(function(item) { return item.id === (targetId || payload.noteId || payload.note && payload.note.id); });
+  const canViewDesign = !actor || actor.manager || actor.permissions.indexOf("Thiết kế") >= 0;
+  const rows = canViewDesign && DESIGN_TASK_KINDS.indexOf(kind) >= 0 ? state.design[kind] || [] : undefined;
+  const items = state.notes.concat(workflowProjectItems_(state, "design"));
+  return workflowSnapshot_(state, { note: note, rows: rows, design: canViewDesign ? state.design : undefined, tasks: canViewDesign ? workflowProjectItems_(state, "design").filter(function(row) { return row.publishedAt && !row.actualDate; }) : [], archivePending: items.some(function(item) { return item.archivePending; }), repeated: Boolean(repeated), deleted: payload.operation === "note.delete" }, actor);
+}
+
+function workflowCommand_(payload) {
+  const actor = workflowActor_(payload);
+  const operation = workNoteText_(payload.operation, 60);
+  const requestId = workNoteText_(payload.requestId, 160);
+  if (!requestId || requestId !== payload.requestId || !/^[A-Za-z0-9_.:-]{1,160}$/.test(requestId)) throw workflowError_("VALIDATION", "Thiếu mã yêu cầu cập nhật công việc hợp lệ.");
+  if (["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "design.publish", "design.accept", "design.complete", "message.status", "message.assign", "archive.retry"].indexOf(operation) < 0) throw workflowError_("VALIDATION", "Thao tác công việc không được hỗ trợ. Hãy cập nhật ứng dụng.");
+  if (operation === "message.status") return workflowMessageStatus_(payload, actor);
+  let messageSource = null;
+  let details;
+  if (operation === "message.assign") {
+    if (!actor.manager) throw workflowError_("FORBIDDEN", "Chỉ admin và quản lý mới có quyền giao việc từ tin nhắn.");
+    messageSource = workflowMessageSource_(payload.messageId || payload.message && payload.message.id);
+    if (!messageSource) throw workflowError_("NOT_FOUND", "Tin nhắn chưa có trong dữ liệu máy chủ. Hãy nạp lại tin nhắn rồi thử giao việc.");
+    const special = pancakeIsSpecialTestConversation_(messageSource.groupName, { page_customer: { name: messageSource.customerName } });
+    details = workflowDetails_({ ...messageSource, projectId: special ? VIRTUAL_PANCAKE_TEST_PROJECT_ID : messageSource.projectId, houseId: special ? "Bùi Đức Thành" : messageSource.houseId });
+  } else details = workflowDetails_(payload);
+  if (operation === "archive.retry") {
+    if (!actor.manager && actor.permissions.indexOf("Ghi chú") < 0 && actor.permissions.indexOf("Thiết kế") < 0) throw workflowError_("FORBIDDEN", "Bạn không có quyền lưu trữ công việc.");
+  } else workflowMayUse_(actor, operation.indexOf("design.") === 0 ? "Thiết kế" : "Ghi chú");
+  const state = workflowProject_(details);
+  const legacyImported = Boolean(state._legacyImportChanged);
+  delete state._legacyImportChanged;
+  const pruned = workflowPruneArchived_(state);
+  const signature = workflowRequestSignature_(payload, actor);
+  const previousRequest = (state.requests || []).find(function(item) { return item.id === requestId; });
+  if (previousRequest) {
+    if (previousRequest.signature !== signature || previousRequest.actor !== actor.account) throw workflowError_("CONFLICT", "Mã yêu cầu đã được dùng cho nội dung hoặc nhân viên khác.");
+    const archiveChanged = workflowAttemptArchives_(state, previousRequest.targetId);
+    if (archiveChanged) state.revision += 1;
+    if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state); }
+    return workflowProjectResponse_(state, payload, previousRequest.targetId, true, actor);
+  }
+  let targetId = String(payload.noteId || payload.rowId || "");
+  const now = new Date().toISOString();
+  if (operation === "note.publish" || operation === "message.assign") {
+    let draft = payload.note || {};
+    if (messageSource) {
+      const selected = Array.isArray(payload.selectedLineIds) ? Array.from(new Set(payload.selectedLineIds.map(String))) : [];
+      if (!selected.length) throw workflowError_("VALIDATION", "Hãy chọn ít nhất một dòng tin nhắn để giao việc.");
+      const lines = messageSource.messages.filter(function(line) { return selected.indexOf(line.id) >= 0; });
+      if (lines.length !== selected.length) throw workflowError_("VALIDATION", "Dòng tin nhắn đã thay đổi. Hãy nạp lại trước khi giao việc.");
+      draft = { ...(payload.assignment || {}), id: payload.assignment && payload.assignment.id || "message-task-" + workflowHash_(messageSource.id + ":" + requestId).slice(0, 40) };
+      draft.messageContext = lines.map(function(line) { return line.senderName + ": " + line.content + " (" + Utilities.formatDate(new Date(line.sentAt), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm") + ")"; }).join("\n");
+    }
+    targetId = String(draft.id || "");
+    if (state.notes.some(function(note) { return note.id === targetId; }) || state.deletedIds.indexOf(targetId) >= 0) throw workflowError_("CONFLICT", "Mã công việc đã được sử dụng. Không tạo thêm bản trùng.");
+    const note = workflowNewNote_(draft, actor, null);
+    if (messageSource) { note.sourceMessageId = messageSource.id; note.messageContext = draft.messageContext; }
+    state.notes.push(note);
+  } else if (operation.indexOf("note.") === 0) {
+    targetId = String(payload.noteId || payload.note && payload.note.id || "");
+    const index = state.notes.findIndex(function(note) { return note.id === targetId; });
+    if (index < 0 || state.deletedIds.indexOf(targetId) >= 0) throw workflowError_("NOT_FOUND", "Ghi chú không còn tồn tại. Hãy nạp lại danh sách.");
+    const current = state.notes[index];
+    if (operation === "note.edit" || operation === "note.delete") {
+      if (current.creatorEmail !== actor.account) throw workflowError_("FORBIDDEN", "Chỉ người tạo ghi chú mới có thể sửa hoặc xóa.");
+      workflowCheckRevision_(payload, current);
+      if (current.actualDate) throw workflowError_("FORBIDDEN", "Ghi chú đã hoàn thành được giữ nguyên để lưu lịch sử.");
+      if (operation === "note.delete") { state.notes.splice(index, 1); state.deletedIds.push(targetId); }
+      else state.notes[index] = workflowNewNote_({ ...payload.note, id: current.id }, actor, current);
+    } else {
+      if (!workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách mới được nhận hoặc hoàn thành công việc này.");
+      if (!current.actualDate) {
+        if (operation === "note.accept") state.notes[index] = { ...current, acceptedAt: current.acceptedAt || now, acceptedBy: actor.account, revision: Number(current.revision || 0) + (current.acceptedAt ? 0 : 1), updatedAt: now, status: workNoteStatus_(now, current.dueDate) };
+        else {
+          if (!current.acceptedAt) throw workflowError_("VALIDATION", "Hãy xác nhận nhận việc trước khi hoàn thành.");
+          state.notes[index] = { ...current, actualDate: workflowToday_(), completedAt: now, archivePending: true, revision: Number(current.revision || 0) + 1, updatedAt: now };
+        }
+      }
+    }
+  } else if (operation.indexOf("design.") === 0) {
+    workflowDesignCommand_(state, payload, actor);
+    targetId = String(payload.rowId || "");
+  }
+  state.revision += 1;
+  workflowRememberRequest_(state, payload, signature, actor, targetId);
+  workflowWriteProject_(state);
+  if (operation === "note.complete" || operation === "design.complete" || operation === "archive.retry") {
+    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId)) { state.revision += 1; workflowWriteProject_(state); }
+  }
+  workflowProjectProjection_(state);
+  return workflowProjectResponse_(state, payload, targetId, false, actor);
+}
+
+function workflowDesignCommand_(state, payload, actor) {
+  const kind = String(payload.kind || "");
+  if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw workflowError_("VALIDATION", "Loại thiết kế không hợp lệ.");
+  const currentRows = state.design[kind] || [];
+  const now = new Date().toISOString();
+  if (payload.operation === "design.publish") {
+    const incoming = Array.isArray(payload.rows) ? payload.rows : [];
+    if (!incoming.length || incoming.length > 300) throw workflowError_("VALIDATION", "Hãy chọn các hạng mục thiết kế cần phát hành.");
+    const seen = new Set();
+    let published = 0;
+    const next = currentRows.slice();
+    incoming.forEach(function(draft) {
+      const id = workNoteText_(draft.id, 140);
+      if (!id || seen.has(id)) throw workflowError_("VALIDATION", "Hạng mục thiết kế bị thiếu hoặc trùng mã.");
+      seen.add(id);
+      const previousIndex = next.findIndex(function(row) { return row.id === id; });
+      const current = previousIndex >= 0 ? next[previousIndex] : null;
+      const content = workNoteText_(draft.content, 800);
+      if (!content || (!draft.assigneeEmail && !draft.plannedDate && !draft.publishedAt)) return;
+      const assignee = workflowAssignee_(draft.assigneeEmail);
+      const dueDate = workflowDueDate_(draft.plannedDate, Boolean(current && current.plannedDate === draft.plannedDate));
+      const changed = current && current.publishedAt && (current.content !== content || current.assigneeEmail !== assignee.account || current.plannedDate !== dueDate || current.note !== workNoteText_(draft.note, 4000));
+      const dirtyAcknowledgement = draft.assignmentDirty === true;
+      const editingPublished = Boolean(current && current.publishedAt && (changed || dirtyAcknowledgement));
+      if (editingPublished && (!actor.manager && current.creatorEmail !== actor.account)) throw workflowError_("FORBIDDEN", "Chỉ người phát hành hoặc quản lý mới được thay đổi hạng mục đã giao.");
+      if (editingPublished && current.actualDate) throw workflowError_("FORBIDDEN", "Hạng mục đã hoàn thành được giữ nguyên để lưu lịch sử.");
+      if (editingPublished && Number(draft.revision || 0) !== Number(current.revision || 0)) throw workflowError_("CONFLICT", "Hạng mục thiết kế đã được cập nhật trên thiết bị khác. Hãy tải lại.");
+      const reassigned = current && current.assigneeEmail !== assignee.account;
+      const row = { ...current, id: id, isCustom: Boolean(draft.isCustom), content: content, plannedDate: dueDate, assigneeEmail: assignee.account, assignee: assignee.name, note: workNoteText_(draft.note, 4000),
+        publishedAt: current && current.publishedAt || now, creatorEmail: current && current.creatorEmail || actor.account, creatorName: current && current.creatorName || actor.name,
+        acceptedAt: reassigned ? "" : current && current.acceptedAt || "", acceptedBy: reassigned ? "" : current && current.acceptedBy || "", actualDate: current && current.actualDate || "", completedAt: current && current.completedAt || "",
+        revision: Number(current && current.revision || 0) + (!current || !current.publishedAt || changed || dirtyAcknowledgement ? 1 : 0), updatedAt: now, title: workNoteText_(payload.title, 160) || "Tiến độ thiết kế" };
+      if (previousIndex >= 0) next[previousIndex] = row; else next.push(row);
+      published += 1;
+    });
+    if (!published) throw workflowError_("VALIDATION", "Hãy chọn Người phụ trách và ngày dự kiến cho ít nhất một hạng mục.");
+    state.design[kind] = next;
+    return;
+  }
+  const index = currentRows.findIndex(function(row) { return row.id === payload.rowId; });
+  const current = currentRows[index];
+  if (!current || !current.publishedAt) throw workflowError_("NOT_FOUND", "Hạng mục chưa được phát hành hoặc không còn tồn tại.");
+  if (!workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách hạng mục mới được nhận hoặc hoàn thành.");
+  if (current.actualDate) return;
+  if (payload.operation === "design.accept") currentRows[index] = { ...current, acceptedAt: current.acceptedAt || now, acceptedBy: actor.account, revision: Number(current.revision || 0) + (current.acceptedAt ? 0 : 1), updatedAt: now };
+  else {
+    if (!current.acceptedAt) throw workflowError_("VALIDATION", "Hãy xác nhận nhận việc trước khi hoàn thành hạng mục.");
+    currentRows[index] = { ...current, actualDate: workflowToday_(), completedAt: now, archivePending: true, revision: Number(current.revision || 0) + 1, updatedAt: now };
+  }
+  state.design[kind] = currentRows;
+}
+
+function workflowProjectProjection_(state) {
+  // Compatibility projections are rebuilt from the committed snapshot. A
+  // failed projection never rolls back an accepted/completed canonical item.
+  try {
+    cacheJson_(workNotesCacheKey_(state.details), state.notes, 21600);
+    // Canonical projects are discovered through WORKFLOW_PROJECT_INDEX.
+    // Do not duplicate their notes/tasks into legacy Property arrays: keeping
+    // those historic sources untouched also makes deferred imports safe.
+    const workspace = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
+    if (workspace && Array.isArray(workspace.years)) { workspace.years = workflowProtectWorkspace_(workspace.years); workspace.updatedAt = Date.now(); writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, workspace); }
+  } catch (error) { /* All readers can recover directly from the canonical snapshot. */ }
+}
+
+function workflowProtectWorkspace_(years, useReadCache) {
+  return years.map(function(year) { return { ...year, months: (year.months || []).map(function(month, index) { return { ...month, records: (month.records || []).map(function(record) {
+    const details = { year: Number(year.year), month: /^T\d+$/.test(month.label) ? Number(month.label.slice(1)) : index + 1, projectId: record.projectId };
+    const state = workflowReadProject_(details, Boolean(useReadCache));
+    if (!state) return record;
+    if (state.customerDeleted) return null;
+    const next = { ...record };
+    DESIGN_TASK_KINDS.forEach(function(kind) {
+      const field = kind === "interior" ? "interiorDesignProgress" : kind === "acceptance" ? "acceptanceDesignProgress" : "designProgress";
+      const canonical = (state.design[kind] || []).filter(function(row) { return row.publishedAt; });
+      const byId = new Map(canonical.map(function(row) { return [row.id, row]; }));
+      const existing = Array.isArray(record[field]) ? record[field] : [];
+      next[field] = existing.map(function(row) { const current = byId.get(row.id); byId.delete(row.id); return current || (row.publishedAt ? null : row); }).filter(Boolean).concat(Array.from(byId.values()));
+    });
+    return next;
+  }).filter(Boolean) }; }) }; });
+}
+
+function workflowMessageSource_(id) {
+  const key = workNoteText_(id, 220);
+  return key ? readPropertyJson_(WORKFLOW_MESSAGE_SOURCE_PREFIX + workflowHash_(key)) : null;
+}
+
+function workflowMessageLineKey_(line) {
+  return workflowHash_(JSON.stringify([line.id, line.sentAt, line.senderName, line.content]));
+}
+
+function workflowIngestMessages_(groups) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const states = readPancakeMessageStates_();
+    const byId = new Map(states.map(function(state) { return [state.id, state]; }));
+    let changed = false;
+    groups.forEach(function(raw) {
+      const group = normalizePancakeMessageGroup_(raw);
+      group.messages = Array.from(new Map(group.messages.map(function(line) { return [line.id || workflowMessageLineKey_(line), line]; })).values());
+      group.messageCount = group.messages.length;
+      const sourceKey = WORKFLOW_MESSAGE_SOURCE_PREFIX + workflowHash_(group.id);
+      const previousSource = readPropertyJson_(sourceKey);
+      if (JSON.stringify(previousSource) !== JSON.stringify(group)) writePropertyJson_(sourceKey, group);
+      const previous = byId.get(group.id);
+      if (!previous) { byId.set(group.id, { ...group, status: "new", revision: 1, archivedLineKeys: [], resolvedAt: "" }); changed = true; return; }
+      const archivedKeys = Array.isArray(previous.archivedLineKeys) ? previous.archivedLineKeys : previous.status === "resolved" && !previous.archivePending ? (previous.messages || []).map(workflowMessageLineKey_) : [];
+      const fresh = group.messages.some(function(line) { return archivedKeys.indexOf(workflowMessageLineKey_(line)) < 0; });
+      const sourceChanged = JSON.stringify(previous.messages || []) !== JSON.stringify(group.messages);
+      const reopened = previous.status === "resolved" && fresh && sourceChanged;
+      if (sourceChanged || reopened || !Array.isArray(previous.archivedLineKeys)) {
+        byId.set(group.id, { ...previous, ...group, archivedLineKeys: archivedKeys, archivedAt: previous.archivedAt || (previous.status === "resolved" && !previous.archivePending ? previous.resolvedAt || previous.statusUpdatedAt || "" : ""), status: reopened ? "new" : normalizePancakeMessageStatus_(previous.status), resolvedAt: reopened ? "" : previous.resolvedAt || "", revision: Number(previous.revision || 0) + 1 });
+        changed = true;
+      }
+    });
+    if (changed) savePancakeMessageStates_(Array.from(byId.values()));
+    return Array.from(byId.values());
+  } finally { lock.releaseLock(); }
+}
+
+function workflowArchiveMessage_(state) {
+  const special = pancakeIsSpecialTestConversation_(state.groupName, { page_customer: { name: state.customerName } });
+  const archived = Array.isArray(state.archivedLineKeys) ? state.archivedLineKeys : [];
+  const pendingLines = (state.messages || []).filter(function(line) { return archived.indexOf(workflowMessageLineKey_(line)) < 0; });
+  try {
+    if (!special && pendingLines.length) appendPancakeMessageWorkbook_({ ...state, messages: pendingLines, workflowVerified: true });
+    return { ...state, archivePending: false, archiveError: "", archivedAt: new Date().toISOString(), archivedLineKeys: Array.from(new Set(archived.concat((state.messages || []).map(workflowMessageLineKey_)))), virtual: special };
+  } catch (error) {
+    return { ...state, archivePending: true, archiveError: workNoteText_(error.message || "Chưa thể lưu Excel lên Drive. Tin nhắn vẫn được giữ trong cache dùng chung.", 300) };
+  }
+}
+
+function workflowMessageStatus_(payload, actor) {
+  const id = workNoteText_(payload.messageId || payload.message && payload.message.id, 220);
+  const source = workflowMessageSource_(id);
+  if (!source) throw workflowError_("NOT_FOUND", "Tin nhắn chưa có trong dữ liệu máy chủ. Hãy nạp lại tin nhắn rồi thử tiếp.");
+  const status = String(payload.status || "");
+  if (PANCAKE_MESSAGE_STATUSES.indexOf(status) < 0) throw workflowError_("VALIDATION", "Trạng thái tin nhắn không hợp lệ.");
+  const states = readPancakeMessageStates_();
+  const index = states.findIndex(function(item) { return item.id === id; });
+  let state = { ...source, ...(index >= 0 ? states[index] : {}), messages: source.messages };
+  const signature = workflowRequestSignature_(payload, actor);
+  const prior = (state.requests || []).find(function(item) { return item.id === payload.requestId; });
+  if (prior && (prior.signature !== signature || prior.actor !== actor.account)) throw workflowError_("CONFLICT", "Mã yêu cầu tin nhắn đã được dùng cho nội dung hoặc nhân viên khác.");
+  if (!prior) {
+    workflowCheckRevision_(payload, state);
+    if (state.status === "resolved" && !state.archivePending && status !== "resolved") throw workflowError_("CONFLICT", "Tin nhắn đã được hoàn thành và lưu Drive. Hãy nạp lại danh sách.");
+    const now = new Date().toISOString();
+    const firstResolution = status === "resolved" && state.status !== "resolved";
+    state = { ...state, status: status, revision: Number(state.revision || 0) + 1, statusUpdatedAt: now, statusUpdatedBy: actor.account,
+      resolvedAt: status === "resolved" ? state.resolvedAt || now : "", completedBy: status === "resolved" ? actor.account : state.completedBy || "", archivePending: status === "resolved" ? !state.archivedAt || state.archivePending || source.messages.some(function(line) { return (state.archivedLineKeys || []).indexOf(workflowMessageLineKey_(line)) < 0; }) : state.archivePending || false };
+    if (firstResolution) state.completionHistory = (state.completionHistory || []).concat([{ at: now, by: actor.account, messageIds: source.messages.map(function(line) { return line.id; }) }]).slice(-50);
+    state.requests = (state.requests || []).concat([{ id: payload.requestId, signature: signature, actor: actor.account, at: Date.now() }]).slice(-100);
+    if (index >= 0) states[index] = state; else states.push(state);
+    savePancakeMessageStates_(states);
+  }
+  let exported = false;
+  if (state.status === "resolved" && (state.archivePending || !state.archivedAt)) {
+    const archived = workflowArchiveMessage_(state);
+    if (archived.archivePending !== state.archivePending || archived.archiveError !== state.archiveError || archived.archivedAt !== state.archivedAt) state = { ...archived, revision: Number(state.revision || 0) + 1 };
+    const stateIndex = states.findIndex(function(item) { return item.id === id; });
+    states[stateIndex] = state;
+    savePancakeMessageStates_(states);
+    exported = !state.archivePending && !state.virtual;
+  }
+  return { ok: true, id: id, status: state.status, message: workflowPublicMessage_(state), revision: state.revision, resolvedAt: state.resolvedAt || "", archivePending: Boolean(state.archivePending), exported: exported, repeated: Boolean(prior) };
+}
+
+function workflowPublicMessage_(state) {
+  const { requests, archivedLineKeys, completionHistory, ...publicState } = state;
+  return publicState;
+}
+
+function workflowMessagesView_(groups, states) {
+  const byId = new Map(states.map(function(state) { return [state.id, state]; }));
+  return groups.map(function(group) {
+    const state = byId.get(group.id);
+    return state ? { ...workflowPublicMessage_(state), ...workflowPublicMessage_(group), status: normalizePancakeMessageStatus_(state.status), resolvedAt: state.resolvedAt || "", statusUpdatedAt: state.statusUpdatedAt || "", revision: Number(state.revision || 0), archivePending: Boolean(state.archivePending), archiveError: state.archiveError || "", archivedAt: state.archivedAt || "" } : { ...group, status: "new", revision: 1, resolvedAt: "" };
+  }).filter(function(group) { return group.status !== "resolved" || group.archivePending || !group.archivedAt; });
+}
+
+function workflowAssignedRegistry_(domain) {
+  const index = workflowReadSnapshot_(WORKFLOW_PROJECT_INDEX, true) || [];
+  const migrated = new Set();
+  let result = [];
+  index.forEach(function(details) {
+    const state = workflowReadProject_(details, true);
+    if (!state) return;
+    migrated.add(details.year + ":" + details.month + ":" + details.projectId);
+    if (state.customerDeleted || isCustomerDriveRecordDeleted_(details)) return;
+    result = result.concat(workflowProjectItems_(state, domain).filter(function(item) { return !item.actualDate && (domain === "notes" || item.publishedAt); }).map(function(item) { return { ...item, ...state.details, collectionRevision: state.revision }; }));
+  });
+  const legacy = domain === "notes" ? readActiveWorkNotes_() : readActiveDesignTasks_();
+  return result.concat(legacy.filter(function(item) { return !migrated.has(Number(item.year) + ":" + Number(item.month) + ":" + item.projectId) && !isCustomerDriveRecordDeleted_(item); }));
+}
 
 function activeDesignTasksFile_() {
   const root = rootFolder_();
@@ -2520,14 +3275,18 @@ function activeDesignTasksFile_() {
 }
 
 function readActiveDesignTasks_() {
+  const shared = readPropertyJson_(WORKFLOW_DESIGN_REGISTRY);
+  if (Array.isArray(shared)) return shared;
   try {
-    const value = JSON.parse(activeDesignTasksFile_().getBlob().getDataAsString() || "[]");
+    const file = findFileByName_(rootFolder_(), ACTIVE_DESIGN_TASKS_FILE_NAME);
+    if (!file) return [];
+    const value = JSON.parse(file.getBlob().getDataAsString() || "[]");
     return Array.isArray(value) ? value : [];
   } catch (error) { return []; }
 }
 
 function saveActiveDesignTasks_(records) {
-  activeDesignTasksFile_().setContent(JSON.stringify(records.slice(-5000)));
+  writePropertyJson_(WORKFLOW_DESIGN_REGISTRY, records);
 }
 
 function normalizeDesignTaskRows_(rows) {
@@ -2550,6 +3309,7 @@ function normalizeDesignTaskRows_(rows) {
 
 function syncDesignTasks_(payload) {
   const details = workNotesPayload_(payload);
+  if (workflowReadProject_(details)) throw workflowError_("UPDATE_REQUIRED", "Thiết kế đã chuyển sang cơ chế giao việc mới. Hãy cập nhật ứng dụng.");
   if (isCustomerDriveRecordDeleted_(details)) throw new Error("Hồ sơ đã được xóa trên Drive. Không thể đồng bộ thiết kế vào hồ sơ đã xóa.");
   const kind = workNoteText_(payload.kind, 40);
   if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw new Error("Loại tiến độ thiết kế không hợp lệ.");
@@ -2576,12 +3336,15 @@ function syncDesignTasks_(payload) {
 }
 
 function loadAssignedDesignTasks_(payload) {
-  const email = workNoteText_(payload.email, 240).toLowerCase();
+  const actor = payload.workflowSessionToken || payload.adminSessionToken ? workflowActor_(payload) : null;
+  if (actor) workflowMayUse_(actor, "Thiết kế");
+  const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
   if (!email) throw new Error("Thiếu email nhân viên.");
-  const tasks = readActiveDesignTasks_().filter(function(task) { return !task.actualDate && !isCustomerDriveRecordDeleted_(task); });
-  if (email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
+  const tasks = workflowAssignedRegistry_("design").filter(function(task) { return !task.actualDate && !isCustomerDriveRecordDeleted_(task) && (actor || task.collectionRevision === undefined); });
+  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ok: true, tasks: tasks };
   const needsMemberLookup = tasks.some(function(task) { return /^member:/i.test(workNoteText_(task.assigneeEmail, 240)); });
-  const member = needsMemberLookup ? employeeRosterMember_(email) : null;
+  const member = employeeRosterMember_(email);
+  if (member && member.role === "Quản lý chung") return { ok: true, tasks: tasks };
   return { ok: true, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
 }
 
@@ -3192,11 +3955,10 @@ function syncPersonnelWorkbook_(personnel) {
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const fileName = "Danh sách nhân lực.xlsx";
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
-    trashFilesByName_(folder, fileName);
-    const file = folder.createFile(xlsxBlob);
+    const file = replaceWorkbookFile_(folder, fileName, xlsxBlob);
     return { ok: true, fileId: file.getId(), fileUrl: file.getUrl(), fileName: fileName };
   } finally {
-    DriveApp.getFileById(spreadsheet.getId()).setTrashed(true);
+    try { DriveApp.getFileById(spreadsheet.getId()).setTrashed(true); } catch (error) { /* Preserve the original export result. */ }
   }
 }
 
@@ -3271,7 +4033,7 @@ function saveEmployeeAccount_(email, password) {
 function verifyEmployeeLogin_(payload) {
   if (employeeLoginName_(payload.name) === "admin") {
     if (employeeLoginCode_(payload.loginCode) !== "1") return { ok: true, valid: false };
-    return { ok: true, valid: true, account: "admin", adminSessionToken: issueCustomerAdminSession_() };
+    return { ok: true, valid: true, account: "admin", adminSessionToken: issueCustomerAdminSession_(), workflowSessionToken: issueWorkflowSession_("admin") };
   }
   // New clients authenticate directly against the roster. Keep the legacy
   // email/password path for older installed applications during rollout.
@@ -3366,6 +4128,7 @@ function verifyEmployeeCodeLogin_(payload) {
     ok: true,
     valid: true,
     account: personnelAssignmentKey_(member),
+    workflowSessionToken: issueWorkflowSession_(personnelAssignmentKey_(member)),
     member: {
       id: String(member.id || ""),
       status: "Có",
