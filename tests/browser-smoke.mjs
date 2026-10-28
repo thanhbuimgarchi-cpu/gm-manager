@@ -80,27 +80,21 @@ if(p.action==='list-documents'){r.snapshots=[{id:'s1',name:'28-10-2026-DV-75',da
 if(p.action==='list-3d-library')r.folders=[];
 setTimeout(()=>event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*'),p.action==='rename-customer-folder'||p.action==='delete-customer-folder'?250:0);});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
 async function assertRestrictedCustomerActions(accountLabel) {
+  const manager = accountLabel === 'manager';
   await page.locator('.overview-metrics').waitFor();
-  assert.equal(await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).count(),0,`${accountLabel}: no create button`);
-  assert.equal(await page.getByRole('button',{name:/Thiết lập/}).count(),0,`${accountLabel}: no settings button`);
+  assert.equal(await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/Thiết lập/}).count(),0);
   const row=page.locator('.customer-result-row').filter({hasText:'DV-75'});
-  await row.getByRole('button',{name:/Tùy chọn khách hàng/}).click();
-  assert.equal(await page.getByRole('menuitem',{name:'Delete',exact:true}).count(),0,`${accountLabel}: no directory delete`);
-  assert.ok(await page.getByRole('menuitem',{name:'Rename',exact:true}).isVisible(),`${accountLabel}: rename remains available`);
-  await row.getByRole('button',{name:/Tùy chọn khách hàng/}).click();
+  const menu=row.getByRole('button',{name:/Tùy chọn khách hàng/});
+  if(manager){await menu.click();assert.equal(await page.getByRole('menuitem',{name:'Delete',exact:true}).count(),0);assert.ok(await page.getByRole('menuitem',{name:'Rename',exact:true}).isVisible());await menu.click();}
+  else assert.ok(await menu.isDisabled(),accountLabel+': customer identity is read only');
   await row.locator('.customer-result').click();
-  await page.locator('.record-detail--inline').waitFor();
-  assert.equal(await page.getByRole('button',{name:/Thiết lập/}).count(),0,`${accountLabel}: no project settings button`);
-  const projectMenu=page.locator('.consulting-profile-actions .more-button');
-  await projectMenu.click();
-  assert.equal(await page.getByRole('button',{name:'Xóa hồ sơ',exact:true}).count(),0,`${accountLabel}: no project delete`);
-  assert.ok(await page.getByRole('button',{name:'Sửa thông tin',exact:true}).isVisible(),`${accountLabel}: existing edit permission is preserved`);
-  await projectMenu.click();
+  const consulting=page.locator('.record-detail--inline');await consulting.waitFor();
+  if(manager){const projectMenu=consulting.locator('.more-button');await projectMenu.click();assert.equal(await page.getByRole('button',{name:'Xóa hồ sơ',exact:true}).count(),0);assert.ok(await page.getByRole('button',{name:'Sửa thông tin',exact:true}).isVisible());await projectMenu.click();}
+  else {assert.ok(await consulting.getByLabel('Tên khách hàng',{exact:true}).isDisabled());assert.equal(await consulting.getByRole('button',{name:'Export Excel'}).count(),0);assert.ok(await consulting.getByText('Chỉ xem · Quản lý cập nhật thông tin tư vấn',{exact:true}).isVisible());}
   await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
-  await page.getByLabel('Tìm khách hàng',{exact:true}).fill('no-such-test-house');
-  await page.locator('.customer-search-empty').waitFor();
-  assert.equal(await page.getByRole('button',{name:'Tạo khách hàng mới',exact:true}).count(),0,`${accountLabel}: empty search cannot create`);
-  await page.getByLabel('Tìm khách hàng',{exact:true}).fill('');
+  await page.getByLabel('Tìm khách hàng',{exact:true}).fill('no-such-test-house');await page.locator('.customer-search-empty').waitFor();
+  assert.equal(await page.getByRole('button',{name:'Tạo khách hàng mới',exact:true}).count(),0);await page.getByLabel('Tìm khách hàng',{exact:true}).fill('');
 }
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
@@ -266,7 +260,8 @@ await page.locator('.overview-metrics').waitFor();
 await assertRestrictedCustomerActions('ordinary employee');
 await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
 await page.locator('.customer-message__body').waitFor();
-assert.ok(await page.getByRole('button',{name:'Giao việc',exact:true}).isDisabled(),'employee reads messages without assigning');
+assert.equal(await page.getByRole('button',{name:'Giao việc',exact:true}).count(),0,'employee reads messages without action buttons');
+assert.equal(await page.locator('.customer-message__status-actions').getByRole('button').count(),0,'employees cannot change message state');
 await page.evaluate(()=>localStorage.setItem('gm-manager-personnel-session-email','manager@example.com'));
 await page.reload();
 await assertRestrictedCustomerActions('manager');

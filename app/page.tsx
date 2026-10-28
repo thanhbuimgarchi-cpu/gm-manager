@@ -766,7 +766,12 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
   if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
-  const requestPayload = { ...payload, token: deployedAppsScriptCompatibilityToken };
+  const requestPayload: Record<string, unknown> = { ...payload, token: deployedAppsScriptCompatibilityToken };
+  try {
+    const session = JSON.parse(window.localStorage.getItem(workflowSessionStorageKey) || "null");
+    const account = window.localStorage.getItem(personnelSessionEmailKey);
+    if (!requestPayload.workflowSessionToken && session?.scriptUrl === config.scriptUrl.trim() && session?.account === account && typeof session?.token === "string") requestPayload.workflowSessionToken = session.token;
+  } catch { /* Public reads and login do not require a saved session. */ }
   const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
@@ -3027,6 +3032,7 @@ export default function Home() {
     }
   };
   const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (customerMessageStatusBusyId || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))) return;
     const location = customerLocationForMessage(message);
     if (!location) { setNotice("Tin nhắn chưa ghép được với hồ sơ khách hàng."); return; }
@@ -3693,6 +3699,7 @@ export default function Home() {
   const progressAnalysisFor = (kind: DesignProgressKind) => kind === "architecture" ? designScheduleAnalysis : kind === "interior" ? interiorDesignScheduleAnalysis : acceptanceDesignScheduleAnalysis;
 
   const commitDesignProgressRows = (kind: DesignProgressKind, nextRows: DesignProgressRow[]) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!activeCustomerRecord || !selectedCustomerLocation) return;
     const field = designProgressDefinitions[kind].field;
     const updatedRecord = { ...activeCustomerRecord, [field]: nextRows };
@@ -3705,7 +3712,7 @@ export default function Home() {
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
-  const canModifyDesignRow = (row: DesignProgressRow, kind: DesignProgressKind) => Boolean(loggedInEmployee && !row.actualDate && !hasWorkflowPending("design.publish", kind) && !hasWorkflowPending("design.accept", row.id) && !hasWorkflowPending("design.complete", row.id) && (!row.publishedAt || row.creatorEmail === loggedInEmployeeEmail || canViewAllNotesAndMessages));
+  const canModifyDesignRow = (row: DesignProgressRow, kind: DesignProgressKind) => Boolean(canManageCustomerWorkflows && !row.actualDate && !hasWorkflowPending("design.publish", kind) && !hasWorkflowPending("design.accept", row.id) && !hasWorkflowPending("design.complete", row.id));
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
     const currentRows = progressRowsFor(kind);
     if (!currentRows[rowIndex] || !canModifyDesignRow(currentRows[rowIndex], kind)) return;
@@ -3739,6 +3746,7 @@ export default function Home() {
   };
 
   const publishDesignTasks = async (kind: DesignProgressKind) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (hasWorkflowPending("design.publish", kind)) return;
     const rows = progressRowsFor(kind);
     const candidates = rows.filter((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt));
@@ -3750,13 +3758,15 @@ export default function Home() {
     await runWorkflowCommand("design.publish", { kind, title: designProgressDefinitions[kind].title, rows });
   };
   const acceptDesignTask = async (kind: DesignProgressKind, rowId: string) => {
+    if (!requireCustomerWorkflowManager()) return;
     const row = progressRowsFor(kind).find((item) => item.id === rowId);
-    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới có thể xác nhận nhận việc."); return; }
+    if (!row || !row.publishedAt) return;
     await runWorkflowCommand("design.accept", { kind, rowId });
   };
   const completeDesignTask = async (kind: DesignProgressKind, rowId: string) => {
+    if (!requireCustomerWorkflowManager()) return;
     const row = progressRowsFor(kind).find((item) => item.id === rowId);
-    if (!row || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt) { setNotice("Người phụ trách cần xác nhận nhận việc trước khi hoàn thành."); return; }
+    if (!row || !row.acceptedAt) { setNotice("Cần xác nhận nhận việc trước khi hoàn thành."); return; }
     await runWorkflowCommand("design.complete", { kind, rowId });
   };
 
@@ -3827,6 +3837,7 @@ export default function Home() {
   };
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord, year = selectedYear, month = selectedMonth) => {
+    if (type === "rename" && !requireCustomerWorkflowManager()) return;
     if (customerMutationInFlight.current) return;
     if (type === "delete" && !requireAdminCustomerSession()) return;
     setOpenMenuId(null);
@@ -3848,6 +3859,7 @@ export default function Home() {
   };
 
   const runCustomerDriveMutation = async (type: "rename" | "delete") => {
+    if (type === "rename" && !requireCustomerWorkflowManager()) return;
     if (!protectedAction || protectedAction.type !== type || customerMutationInFlight.current) return;
     const adminSessionToken = type === "delete" ? requireAdminCustomerSession() : null;
     if (type === "delete" && !adminSessionToken) return;
@@ -3914,6 +3926,7 @@ export default function Home() {
   const renameRecord = (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); void runCustomerDriveMutation("rename"); };
 
   const updateRecordDetail = (key: string, value: string) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!selectedRecord) return;
     const nextValue = dateDetailCodes.has(key) ? formatDesignDateInput(value) : value;
     if (dateDetailCodes.has(key) && nextValue.length === 10 && !parseDesignDate(nextValue)) {
@@ -3928,11 +3941,13 @@ export default function Home() {
   };
 
   const updateRecordName = (value: string) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!selectedRecord) return;
     persistRecord({ ...selectedRecord, name: value }, selectedYear, selectedMonth);
   };
 
   const processAudioCheckpoint = async (startingRecord: WorkRecord, year: number, month: number) => {
+    if (!requireCustomerWorkflowManager()) throw new Error("Chỉ quản lý mới được cập nhật Tư vấn.");
     if (!startingRecord.audioNote) throw new Error("Chưa có tiến độ ghi âm để tiếp tục.");
     const config = { scriptUrl: driveScriptUrl.trim() };
     let workingRecord = startingRecord;
@@ -3989,6 +4004,7 @@ export default function Home() {
   };
 
   const resumeAudioProcessing = async (record: WorkRecord) => {
+    if (!requireCustomerWorkflowManager()) return;
     setAudioProcessingId(record.id);
     try {
       const completedRecord = await processAudioCheckpoint(record, selectedYear, selectedMonth);
@@ -4003,6 +4019,7 @@ export default function Home() {
   };
 
   const importAudioNote = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (!requireCustomerWorkflowManager()) return;
     const input = event.currentTarget;
     const file = input.files?.[0];
     if (!file || !selectedRecord) {
@@ -4069,6 +4086,7 @@ export default function Home() {
   };
 
   const deleteAudioNote = async (record: WorkRecord) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!record.audioNote || audioProcessingId) return;
     if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${customerDisplayName(record)}?`)) return;
     const config = { scriptUrl: driveScriptUrl.trim() };
@@ -4104,6 +4122,7 @@ export default function Home() {
   const functionalFloors = selectedRecord ? normalizeFunctionalFloors(selectedRecord) : [createFunctionalFloor()];
 
   const updateFunctionalFloors = (nextFloors: FunctionalFloor[]) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!selectedRecord) return;
     persistRecord({ ...selectedRecord, functionalFloors: nextFloors, functionalRows: undefined }, selectedYear, selectedMonth);
   };
@@ -4205,6 +4224,7 @@ export default function Home() {
   };
 
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
+    if (!requireCustomerWorkflowManager()) return;
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) {
       openDriveSettings();
@@ -4228,6 +4248,7 @@ export default function Home() {
   };
 
   const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig, kind: DesignProgressKind = "architecture") => {
+    if (!requireCustomerWorkflowManager()) return;
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) {
       openDriveSettings();
@@ -4319,6 +4340,12 @@ export default function Home() {
     setDriveConfigOpen(true);
   };
   const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || loggedInEmployee.role === "Quản lý chung"));
+  const canManageCustomerWorkflows = canViewAllNotesAndMessages;
+  const requireCustomerWorkflowManager = () => {
+    if (canManageCustomerWorkflows) return true;
+    setNotice("Chỉ admin và quản lý được thao tác Tin nhắn khách, Tư vấn và Thiết kế. Tài khoản này chỉ được xem.");
+    return false;
+  };
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
@@ -4772,6 +4799,7 @@ export default function Home() {
   const customerPortalShareToken = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("share")?.trim() ?? "";
   const customerPortalLink = (shareToken: string) => typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
   const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
+    if (!requireCustomerWorkflowManager()) return;
     if (!record.houseId?.trim()) {
       setNotice("Chưa có mã nhà cho hồ sơ này. Hãy bổ sung mã nhà trước khi phát hành link khách.");
       return;
@@ -5013,7 +5041,8 @@ export default function Home() {
       <span>Chưa kích hoạt</span>
     </section>;
 
-    return <section className="design-schedule">
+    return <section className="design-schedule"><fieldset className="workflow-edit-scope" disabled={!canManageCustomerWorkflows}>
+      {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý cập nhật tiến độ thiết kế</p>}
       <header className="design-schedule__heading">
         <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
         <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={hasWorkflowPending("design.publish", kind) || !rows.some((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt))}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
@@ -5034,9 +5063,9 @@ export default function Home() {
                 </span>
               </div></td>
               <td><input readOnly={!canModifyDesignRow(row, kind)} value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small>{row.archivePending && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}<label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !isAssignedToLoggedInEmployee(row.assigneeEmail) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
+              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small>{row.archivePending && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}<label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !canManageCustomerWorkflows || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
               <td><select disabled={!canModifyDesignRow(row, kind)} className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
-              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && isAssignedToLoggedInEmployee(row.assigneeEmail) && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
+              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && canManageCustomerWorkflows && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
               <td><GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
             </tr>
           ))}</tbody>
@@ -5055,7 +5084,7 @@ export default function Home() {
         </article>
       </section>
               <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Thiết kế</span></footer>
-    </section>;
+    </fieldset></section>;
   };
 
   const renderWarrantySchedule = () => <section className="design-schedule warranty-schedule">
@@ -5147,8 +5176,8 @@ export default function Home() {
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
             <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
-            <div className="customer-message__status-actions"><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy || hasWorkflowPending("message.assign", message.id, customerLocationForMessage(message))} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></div>
-            {message.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Excel vào Drive. Tin nhắn vẫn được giữ tại đây.</span><button type="button" onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={customerMessageStatusBusyId === message.id}>Thử lưu Drive</button></div>}
+            <fieldset className="customer-message__status-actions workflow-edit-scope" disabled={!canManageCustomerWorkflows}><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy || hasWorkflowPending("message.assign", message.id, customerLocationForMessage(message))} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></fieldset>{!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý xử lý tin nhắn và giao việc</p>}
+            {message.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Excel vào Drive. Tin nhắn vẫn được giữ tại đây.</span><button type="button" onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id}>Thử lưu Drive</button></div>}
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
       </div>
     </section>;
@@ -5294,7 +5323,7 @@ export default function Home() {
                   <div className="customer-result-row" key={`${location.year}-${location.month}-${location.record.id}`}><button className="customer-result" onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder"><WorkspaceIcon name="folder" /></span>
                     <span className="customer-result__identity" title={customerDisplayName(location.record)}><b>{customerDisplayName(location.record)}</b></span>
-                  </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button>{isBuiltInAdminLoggedIn && <button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button>}</div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
+                  </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={!canManageCustomerWorkflows || customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button>{isBuiltInAdminLoggedIn && <button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button>}</div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
                 )) : (
                   <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p>{isBuiltInAdminLoggedIn && <button onClick={openAddDialog}>Tạo khách hàng mới</button>}</div>
                 )}
@@ -5331,7 +5360,7 @@ export default function Home() {
       <section className="workspace">
         <header className="topbar">
           <div className="topbar__project-controls">
-            {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
+            {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← Tổng quan</button><span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span>/</span>{activeFolder}</span>
           </div>
           <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}</div>
@@ -5357,7 +5386,8 @@ export default function Home() {
               {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa tìm kiếm trong phiếu">×</button>}
             </label>
 
-            {selectedRecord && <section className="record-detail record-detail--inline">
+            {selectedRecord && <section className="record-detail record-detail--inline"><fieldset className="workflow-edit-scope" disabled={!canManageCustomerWorkflows}>
+              {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý cập nhật thông tin tư vấn</p>}
               <header className="record-detail__heading">
                 <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span><label className="record-detail__zalo-group"><span>Tên nhóm Zalo (tuỳ chọn)</span><input value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(event) => updateRecordDetail("ZALO_GROUP_NAME", event.target.value)} placeholder="Nhập đúng tên nhóm Zalo" aria-label="Tên nhóm Zalo" /></label></div>
                   <div className="consulting-profile-actions">
@@ -5422,7 +5452,7 @@ export default function Home() {
                 </section>}
               </div>
               <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.houseId || "chưa có mã nhà"} / Tư vấn</span></footer>
-            </section>}
+            </fieldset></section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
           <section className="design-workspace">
@@ -5476,7 +5506,7 @@ export default function Home() {
         </div>
       )}
 
-      {customerMessageTaskDraft && (
+      {customerMessageTaskDraft && canManageCustomerWorkflows && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => !customerMessageTaskBusy && setCustomerMessageTaskDraft(null)}>
           <form className="security-dialog message-task-dialog" onSubmit={publishCustomerMessageTask} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => !customerMessageTaskBusy && setCustomerMessageTaskDraft(null)} aria-label="Đóng">×</button>
@@ -5571,7 +5601,7 @@ export default function Home() {
         </div>
       )}
 
-      {pendingDesignTaskCompletion && (
+      {pendingDesignTaskCompletion && canManageCustomerWorkflows && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setPendingDesignTaskCompletion(null)}>
           <section className="security-dialog" role="dialog" aria-modal="true" aria-label="Xác nhận hoàn thành hạng mục thiết kế" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setPendingDesignTaskCompletion(null)} aria-label="Đóng">×</button>
@@ -5583,7 +5613,7 @@ export default function Home() {
         </div>
       )}
 
-      {protectedAction && (protectedAction.type !== "delete" || isBuiltInAdminLoggedIn) && (
+      {protectedAction && (protectedAction.type === "delete" ? isBuiltInAdminLoggedIn : canManageCustomerWorkflows) && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => !customerMutationBusy && setProtectedAction(null)}>
           {protectedAction.type === "delete" ? (
             <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>
@@ -5609,7 +5639,7 @@ export default function Home() {
         </div>
       )}
 
-      {selectedRecordId && selectedRecord && (
+      {selectedRecordId && selectedRecord && canManageCustomerWorkflows && (
         <div className="detail-backdrop" role="presentation" onMouseDown={() => setSelectedRecordId(null)}>
           <section className="record-detail" onMouseDown={(event) => event.stopPropagation()}>
             <header className="record-detail__heading">

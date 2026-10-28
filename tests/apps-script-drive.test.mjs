@@ -96,7 +96,7 @@ test("house code changes rename the existing Drive customer folder", () => {
     CacheService: { getScriptCache: () => ({ get: (key) => cache.get(key) || "", put: (key, value) => cache.set(key, value), remove: (key) => cache.delete(key) }) },
     DriveApp: { getFolderById: (id) => { if (id === "root-id-123" || id === "customer-id-123") return id === "root-id-123" ? root : customer; throw new Error("missing folder"); } },
   });
-  const result = context.renameCustomerFolder_({ year: 2026, month: 9, projectId: "GM03092026V", oldHouseId: "HP-587", houseId: "HP-888" });
+  const result = context.renameCustomerFolder_({ adminSessionToken: context.verifyEmployeeLogin_({ name: "admin", loginCode: "1" }).adminSessionToken, year: 2026, month: 9, projectId: "GM03092026V", oldHouseId: "HP-587", houseId: "HP-888" });
   assert.equal(result.ok, true);
   assert.equal(customer.getName(), "HP-888");
 });
@@ -301,8 +301,8 @@ test("a delete retry returns the original result without touching a replacement 
 
 test("Rename preserves the project key, updates shared cache and rejects collisions before changing Drive", () => {
   const f = customerMutationFixture();
-  f.context.saveWorkspaceCache_({ years: [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId(), name: "Chị An", details: { SDT: "0912345678" } }, { projectId: "GM-KEEP", houseId: "NT5-38", name: "Anh Bình" }] }] }] });
-  const request = { year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888", name: "Chị An mới", folderId: f.target.getId(), mutationId: "rename-target-001" };
+  f.context.saveWorkspaceCache_({ adminSessionToken: f.adminSessionToken, years: [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId(), name: "Chị An", details: { SDT: "0912345678" } }, { projectId: "GM-KEEP", houseId: "NT5-38", name: "Anh Bình" }] }] }] });
+  const request = { adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888", name: "Chị An mới", folderId: f.target.getId(), mutationId: "rename-target-001" };
   assert.throws(() => f.context.renameCustomerFolder_({ ...request, houseId: "NT5-38" }), /Mã nhà đã tồn tại/);
   assert.equal(f.target.getName(), "HP-587");
   const result = f.context.renameCustomerFolder_(request);
@@ -322,7 +322,7 @@ test("Rename preserves the project key, updates shared cache and rejects collisi
 
 test("exact folder identities prevent stale rename aliases from changing an unrelated newly created house", () => {
   const f = customerMutationFixture();
-  f.context.renameCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888" });
+  f.context.renameCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", oldHouseId: "HP-587", houseId: "HP-888" });
   f.context.clearCustomerDriveDeletion_({ year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-587" });
   const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-NEW", houseId: "HP-587", driveFolderId: "new-folder-id" }, { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId() }] }] }];
   const records = f.context.applyCustomerDriveMutations_(years)[0].months[0].records;
@@ -492,7 +492,7 @@ test("workspace cache is shared without touching Drive", () => {
   const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM03092026TEST", details: { HVT: "Khách thử" }, designProgress: [] }] }] }];
   assert.equal(context.saveWorkspaceCache_({ updatedAt: 100, years, adminSessionToken }).ok, true);
   years[0].months[0].records[0].details.HVT = "Khách đã sửa";
-  assert.equal(context.saveWorkspaceCache_({ updatedAt: 101, years }).ok, true);
+  assert.equal(context.saveWorkspaceCache_({ updatedAt: 101, years, adminSessionToken }).ok, true);
   const expected = [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => index === 8 ? years[0].months[0] : { label: `T${index + 1}`, records: [] }) }];
   assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), expected);
   assert.equal(context.saveWorkspaceCache_({ updatedAt: 90, years: [] }).ignored, true);
@@ -567,7 +567,7 @@ test("omitting customers from an employee cache save cannot delete them, while c
   f.context.saveWorkspaceCache_({ updatedAt: 11, years: period([{ ...keep, details: { HVT: "Edited" } }]) });
   let saved = f.context.loadWorkspaceCache_().years[0].months[8].records;
   assert.equal(saved.length, 2);
-  assert.equal(saved.find((record) => record.projectId === keep.projectId).details.HVT, "Edited");
+  assert.equal(saved.find((record) => record.projectId === keep.projectId).details.HVT, "Original");
   f.target.setName("HP-587-renamed-on-drive");
   f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([keep]) });
   assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records.length, 2, "a folder rename is not a deletion");
@@ -711,11 +711,11 @@ test("completed normal groups export once while Bùi Đức Thành stays a test-
   context.appendPancakeMessageWorkbook_ = () => { exports += 1; };
   const normal = { id: "normal-group", groupName: "HP-587-GM-Tư vấn", houseId: "HP-587", customerName: "Nguyễn Tùng", year: 2026, month: 9, messages: [] };
   const testOnly = { id: "test-group", groupName: "Bùi Đức Thành", houseId: "Bùi Đức Thành", customerName: "Bùi Đức Thành", year: 2026, month: 9, messages: [] };
-  assert.equal(context.updateCustomerMessageStatus_({ message: normal, status: "resolved" }).exported, true);
+  assert.equal(context.updateCustomerMessageStatus_({ adminSessionToken: context.verifyEmployeeLogin_({ name: "admin", loginCode: "1" }).adminSessionToken, message: normal, status: "resolved" }).exported, true);
   assert.equal(exports, 1);
-  assert.equal(context.updateCustomerMessageStatus_({ message: normal, status: "resolved" }).exported, false);
+  assert.equal(context.updateCustomerMessageStatus_({ adminSessionToken: context.verifyEmployeeLogin_({ name: "admin", loginCode: "1" }).adminSessionToken, message: normal, status: "resolved" }).exported, false);
   assert.equal(exports, 1);
-  assert.equal(context.updateCustomerMessageStatus_({ message: testOnly, status: "resolved" }).exported, false);
+  assert.equal(context.updateCustomerMessageStatus_({ adminSessionToken: context.verifyEmployeeLogin_({ name: "admin", loginCode: "1" }).adminSessionToken, message: testOnly, status: "resolved" }).exported, false);
   assert.equal(exports, 1);
 });
 

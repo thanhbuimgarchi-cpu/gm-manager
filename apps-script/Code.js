@@ -369,6 +369,7 @@ function deleteCustomerFolder_(payload) {
 }
 
 function renameCustomerFolder_(payload) {
+  requireCustomerWorkflowManager_(payload);
   const repeated = customerMutationRequest_(payload, "rename");
   if (repeated) return repeated;
   const year = Number(payload.year);
@@ -407,6 +408,7 @@ function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
     if (payload.action === "redeploy-latest") return json_(redeployLatest(payload));
+    if (["audio-insight", "process-audio-chunk", "store-audio-chunk", "delete-audio-note", "customer-portal-share", "sync-design-progress"].indexOf(payload.action) >= 0) requireCustomerWorkflowManager_(payload);
     if (payload.action === "audio-insight") return json_(transcribeAudio_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {
@@ -479,6 +481,7 @@ function doPost(event) {
         return json_({ ok: true, ...warrantyResult });
       }
 
+      requireCustomerWorkflowManager_(payload);
       const result = exportCustomerWorkbook_(payload.record, Number(payload.year), Number(payload.month));
       return json_({ ok: true, ...result });
     } finally {
@@ -1833,6 +1836,8 @@ function saveWorkspaceCache_(payload) {
 function protectedCustomerCacheYears_(incoming, previous, payload) {
   let admin = false;
   if (payload.adminSessionToken) { requireCustomerAdminSession_(payload); admin = true; }
+  const manager = admin || Boolean(payload.workflowSessionToken && workflowActor_(payload).manager);
+  const managerFields = ["id", "name", "houseId", "createdAt", "details", "audioNote", "functionalFloors", "functionalRows", "designProgress", "interiorDesignProgress", "acceptanceDesignProgress", "customerShareToken"];
   const periods = new Map();
   const years = [];
   const known = new Map();
@@ -1943,6 +1948,15 @@ function protectedCustomerCacheYears_(incoming, previous, payload) {
           });
           if (alias) throw new Error("Hồ sơ khách hàng đã có trong cache. Không thể tạo bản trùng của cùng thư mục Drive.");
           next = { ...record, driveFolderId: folder.id };
+        }
+        if (!manager) {
+          next = { ...next };
+          const fields = prior ? managerFields : ["details", "audioNote", "functionalFloors", "functionalRows", "designProgress", "interiorDesignProgress", "acceptanceDesignProgress", "customerShareToken"];
+          fields.forEach(function(field) {
+            if (prior && Object.prototype.hasOwnProperty.call(prior.record, field)) next[field] = prior.record[field];
+            else if (field === "details") next.details = {};
+            else delete next[field];
+          });
         }
         if (!validCustomerFolderKey_(String(next.projectId || "").trim())) throw new Error("Mã hồ sơ khách hàng không hợp lệ.");
         if (seen.has(recordKey)) throw new Error("Hồ sơ khách hàng bị trùng trong dữ liệu gửi lên.");
@@ -2637,6 +2651,7 @@ function appendPancakeMessageWorkbook_(group) {
 }
 
 function updateCustomerMessageStatus_(payload) {
+  requireCustomerWorkflowManager_(payload);
   const group = normalizePancakeMessageGroup_(payload.message);
   if (workflowMessageSource_(group.id)) throw workflowError_("UPDATE_REQUIRED", "Tin nhắn đã chuyển sang cơ chế xử lý mới. Hãy cập nhật ứng dụng.");
   const status = normalizePancakeMessageStatus_(payload.status);
@@ -2714,6 +2729,15 @@ function workflowActor_(payload) {
 
 function workflowMayUse_(actor, permission) {
   if (!actor.manager && actor.permissions.indexOf(permission) < 0) throw workflowError_("FORBIDDEN", "Bạn không có quyền cập nhật phần " + permission + ".");
+}
+
+function workflowRequireManager_(actor) {
+  if (!actor || !actor.manager) throw workflowError_("FORBIDDEN", "Chỉ admin và quản lý được cập nhật Tin nhắn khách, Tư vấn và Thiết kế. Nhân viên chỉ được xem.");
+  return actor;
+}
+
+function requireCustomerWorkflowManager_(payload) {
+  return workflowRequireManager_(workflowActor_(payload));
 }
 
 function workflowAssigned_(actor, item) {
@@ -2949,10 +2973,11 @@ function workflowArchiveItem_(details, item, kind) {
   return { folderUrl: month.getUrl() };
 }
 
-function workflowAttemptArchives_(state, onlyId, report) {
+function workflowAttemptArchives_(state, onlyId, report, actor) {
   let changed = false;
   let attempted = 0;
   const archive = function(item, kind) {
+    if (actor && !actor.manager && (kind !== "note" || !workflowAssigned_(actor, item))) return item;
     if (!item.actualDate || !item.completedAt || (onlyId && item.id !== onlyId) || item.archivedAt || attempted >= 10) return item;
     attempted += 1;
     let result;
@@ -2999,6 +3024,7 @@ function workflowCommand_(payload) {
   const requestId = workNoteText_(payload.requestId, 160);
   if (!requestId || requestId !== payload.requestId || !/^[A-Za-z0-9_.:-]{1,160}$/.test(requestId)) throw workflowError_("VALIDATION", "Thiếu mã yêu cầu cập nhật công việc hợp lệ.");
   if (["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "design.publish", "design.accept", "design.complete", "message.status", "message.assign", "archive.retry"].indexOf(operation) < 0) throw workflowError_("VALIDATION", "Thao tác công việc không được hỗ trợ. Hãy cập nhật ứng dụng.");
+  if (/^(?:design|message)\./.test(operation) || operation === "archive.retry" && (payload.kind || payload.rowId)) workflowRequireManager_(actor);
   if (operation === "message.status") return workflowMessageStatus_(payload, actor);
   let messageSource = null;
   let details;
@@ -3022,7 +3048,7 @@ function workflowCommand_(payload) {
     if (previousRequest.signature !== signature || previousRequest.actor !== actor.account) throw workflowError_("CONFLICT", "Mã yêu cầu đã được dùng cho nội dung hoặc nhân viên khác.");
     const archiveReport = {};
     const canRetryArchive = operation === "note.complete" || operation === "design.complete" || operation === "archive.retry";
-    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport);
+    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport, actor);
     if (archiveChanged) state.revision += 1;
     if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state, { kind: payload.kind, designChanged: Boolean(archiveReport.designChanged) }); }
     return workflowProjectResponse_(state, payload, previousRequest.targetId, true, actor);
@@ -3074,13 +3100,14 @@ function workflowCommand_(payload) {
   workflowWriteProject_(state);
   const projection = { kind: payload.kind, designChanged: operation.indexOf("design.") === 0 };
   if (operation === "note.complete" || operation === "design.complete" || operation === "archive.retry") {
-    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection)) { state.revision += 1; workflowWriteProject_(state); }
+    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection, actor)) { state.revision += 1; workflowWriteProject_(state); }
   }
   workflowProjectProjection_(state, projection);
   return workflowProjectResponse_(state, payload, targetId, false, actor);
 }
 
 function workflowDesignCommand_(state, payload, actor) {
+  workflowRequireManager_(actor);
   const kind = String(payload.kind || "");
   if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw workflowError_("VALIDATION", "Loại thiết kế không hợp lệ.");
   const currentRows = state.design[kind] || [];
@@ -3122,7 +3149,6 @@ function workflowDesignCommand_(state, payload, actor) {
   const index = currentRows.findIndex(function(row) { return row.id === payload.rowId; });
   const current = currentRows[index];
   if (!current || !current.publishedAt) throw workflowError_("NOT_FOUND", "Hạng mục chưa được phát hành hoặc không còn tồn tại.");
-  if (!workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách hạng mục mới được nhận hoặc hoàn thành.");
   if (current.actualDate) return;
   if (payload.operation === "design.accept") currentRows[index] = { ...current, acceptedAt: current.acceptedAt || now, acceptedBy: actor.account, revision: Number(current.revision || 0) + (current.acceptedAt ? 0 : 1), updatedAt: now };
   else {
@@ -3236,6 +3262,7 @@ function workflowArchiveMessage_(state) {
 }
 
 function workflowMessageStatus_(payload, actor) {
+  workflowRequireManager_(actor);
   const id = workNoteText_(payload.messageId || payload.message && payload.message.id, 220);
   const source = workflowMessageSource_(id);
   if (!source) throw workflowError_("NOT_FOUND", "Tin nhắn chưa có trong dữ liệu máy chủ. Hãy nạp lại tin nhắn rồi thử tiếp.");
@@ -3354,6 +3381,7 @@ function normalizeDesignTaskRows_(rows) {
 }
 
 function syncDesignTasks_(payload) {
+  requireCustomerWorkflowManager_(payload);
   const details = workNotesPayload_(payload);
   if (workflowReadProject_(details)) throw workflowError_("UPDATE_REQUIRED", "Thiết kế đã chuyển sang cơ chế giao việc mới. Hãy cập nhật ứng dụng.");
   if (isCustomerDriveRecordDeleted_(details)) throw new Error("Hồ sơ đã được xóa trên Drive. Không thể đồng bộ thiết kế vào hồ sơ đã xóa.");

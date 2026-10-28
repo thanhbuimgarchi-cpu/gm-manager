@@ -174,19 +174,26 @@ test("deletion tombstones persist across server instances and reject legacy resu
   assert.throws(() => later.command("creator", "note.publish", { note }), code("CONFLICT"));
 });
 
-test("design acknowledgement/completion is per assignee and stale workspace saves cannot undo it", () => {
+test("managers acknowledge and complete design while staff only view and stale saves cannot undo it", () => {
   const f = fixture();
   const rows = [
     { id: "design-a", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" },
     { id: "design-b", content: "Mặt đứng", plannedDate: "31/10/2026", assigneeEmail: "bob@example.com", note: "" },
     { id: "template", content: "Chưa giao", plannedDate: "", assigneeEmail: "", note: "" },
   ];
-  const publish = f.command("creator", "design.publish", { kind: "architecture", title: "Tiến độ kiến trúc", rows });
+  const publish = f.command("manager", "design.publish", { kind: "architecture", title: "Tiến độ kiến trúc", rows });
   assert.equal(publish.tasks.length, 2);
+  const before = plain([...f.values]);
+  for (const actor of ["creator", "alice", "bob", "viewer"]) {
+    for (const operation of ["design.publish", "design.accept", "design.complete"]) {
+      assert.throws(() => f.command(actor, operation, { kind: "architecture", rowId: "design-a", rows, role: "Quản lý chung", manager: true }), code("FORBIDDEN"));
+    }
+  }
+  assert.deepEqual(plain([...f.values]), before, "rejected employee actions cannot modify canonical data");
   assert.throws(() => f.command("creator", "design.accept", { kind: "architecture", rowId: "design-a" }), code("FORBIDDEN"));
-  f.command("alice", "design.accept", { kind: "architecture", rowId: "design-a" });
+  f.command("manager", "design.accept", { kind: "architecture", rowId: "design-a" });
   f.context.workflowArchiveItem_ = () => ({});
-  const complete = f.command("alice", "design.complete", { kind: "architecture", rowId: "design-a" });
+  const complete = f.command("manager", "design.complete", { kind: "architecture", rowId: "design-a" });
   const row = complete.rows.find(row => row.id === "design-a");
   assert.equal(row.actualDate, "28/10/2026");
   assert.ok(row.archivedAt);
@@ -194,8 +201,45 @@ test("design acknowledgement/completion is per assignee and stale workspace save
   const old = [{ year: 2026, months: [{ label: "T10", records: [{ ...scope, designProgress: rows }] }] }];
   const protectedRows = f.context.workflowProtectWorkspace_(old)[0].months[0].records[0].designProgress;
   assert.equal(protectedRows.find(row => row.id === "design-a").actualDate, "28/10/2026");
-  assert.throws(() => f.context.syncDesignTasks_({ ...scope, kind: "architecture", rows }), code("UPDATE_REQUIRED"));
+  assert.throws(() => f.context.syncDesignTasks_({ ...scope, workflowSessionToken: f.tokens.manager, kind: "architecture", rows }), code("UPDATE_REQUIRED"));
   assert.equal(f.context.loadAssignedDesignTasks_({ email: "manager@example.com", workflowSessionToken: f.tokens.manager }).tasks.length, 1);
+});
+
+test("only a current manager may change message status or assign work, even with a forged role", () => {
+  const f = fixture();
+  const group = f.message();
+  f.context.workflowIngestMessages_([group]);
+  const before = plain([...f.values]);
+  for (const actor of ["creator", "alice", "bob", "viewer"]) {
+    for (const status of ["new", "processing", "resolved"]) {
+      assert.throws(() => f.command(actor, "message.status", { messageId: group.id, status, role: "Quản lý chung", manager: true }), code("FORBIDDEN"));
+    }
+    assert.throws(() => f.command(actor, "message.assign", { messageId: group.id }), code("FORBIDDEN"));
+  }
+  assert.deepEqual(plain([...f.values]), before);
+  const changed = f.command("manager", "message.status", { messageId: group.id, status: "processing", expectedRevision: f.context.readPancakeMessageStates_()[0].revision });
+  assert.equal(changed.message.status, "processing");
+  f.personnel.find(member => member.id === "manager").role = "Nhân viên văn phòng";
+  assert.throws(() => f.command("manager", "message.status", { messageId: group.id, status: "resolved" }), code("FORBIDDEN"), "a saved session cannot preserve a revoked management role");
+});
+
+test("consulting and draft design fields are protected from employee cache writes while warranty updates remain available", () => {
+  const f = fixture();
+  const years = f.context.loadWorkspaceCache_().years;
+  const record = years[0].months[9].records[0];
+  const managerVersion = { ...record, name: "Thông tin do quản lý lưu", details: { HVT: "Tên đã duyệt", ZALO_GROUP_NAME: "QA-101-GM" }, functionalFloors: [{ id: "floor", floor: "Tầng 1", rooms: [] }], designProgress: [{ id: "draft", content: "Bản nháp thiết kế", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com" }] };
+  years[0].months[9].records = [managerVersion];
+  f.context.saveWorkspaceCache_({ years, updatedAt: 100, workflowSessionToken: f.tokens.manager });
+  const employeeYears = plain(years);
+  Object.assign(employeeYears[0].months[9].records[0], { name: "Sửa trái quyền", details: { HVT: "Sửa trái quyền" }, functionalFloors: [], designProgress: [], customerShareToken: "forged-share", warrantyProgress: [{ id: "warranty", note: "Cập nhật ngoài phạm vi chỉ xem" }] });
+  f.context.saveWorkspaceCache_({ years: employeeYears, updatedAt: 101, workflowSessionToken: f.tokens.alice });
+  const saved = f.context.loadWorkspaceCache_().years[0].months[9].records[0];
+  for (const field of ["name", "details", "functionalFloors", "designProgress"]) assert.deepEqual(plain(saved[field]), plain(managerVersion[field]));
+  assert.equal(saved.customerShareToken, undefined);
+  assert.equal(saved.warrantyProgress[0].id, "warranty");
+  assert.equal(f.driveCalls(), 0);
+  assert.throws(() => f.context.renameCustomerFolder_({ ...scope, houseId: "OTHER", workflowSessionToken: f.tokens.alice }), code("FORBIDDEN"));
+  assert.throws(() => f.context.syncDesignTasks_({ ...scope, kind: "architecture", rows: [], workflowSessionToken: f.tokens.alice }), code("FORBIDDEN"));
 });
 
 test("message assignments use canonical selected lines and manager authorization, including the virtual test customer", () => {
@@ -225,24 +269,24 @@ test("resolved messages remain visible until archive succeeds and reopen for fre
   const first = f.context.readPancakeMessageStates_()[0];
   let exports = 0;
   f.context.appendPancakeMessageWorkbook_ = () => { exports += 1; throw new Error("Excel unavailable"); };
-  const pending = f.command("viewer", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
+  const pending = f.command("manager", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
   assert.equal(pending.message.archivePending, true);
   assert.equal(f.context.workflowMessagesView_([group], f.context.readPancakeMessageStates_()).length, 1);
   f.context.appendPancakeMessageWorkbook_ = () => { exports += 1; return {}; };
-  const delivered = f.command("viewer", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
+  const delivered = f.command("manager", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
   assert.equal(delivered.archivePending, false);
   assert.equal(f.context.workflowMessagesView_([group], f.context.readPancakeMessageStates_()).length, 0);
-  f.command("viewer", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
+  f.command("manager", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision, requestId: "resolve-stable" });
   assert.equal(exports, 2);
   const newLine = { id: "line-two", senderName: "Khách", content: "Có thêm yêu cầu", sentAt: "2026-10-28T02:30:00Z" };
   const changedGroup = { ...group, messages: [...group.messages, newLine], lastMessageAt: newLine.sentAt, messageCount: 2 };
   f.context.workflowIngestMessages_([changedGroup]);
   const reopened = f.context.workflowMessagesView_([changedGroup], f.context.readPancakeMessageStates_())[0];
   assert.equal(reopened.status, "new");
-  assert.throws(() => f.command("viewer", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision }), code("CONFLICT"));
+  assert.throws(() => f.command("manager", "message.status", { messageId: group.id, status: "resolved", expectedRevision: first.revision }), code("CONFLICT"));
   let delta;
   f.context.appendPancakeMessageWorkbook_ = value => { delta = value; return {}; };
-  f.command("viewer", "message.status", { messageId: group.id, status: "resolved", expectedRevision: reopened.revision });
+  f.command("manager", "message.status", { messageId: group.id, status: "resolved", expectedRevision: reopened.revision });
   assert.deepEqual(plain(delta.messages.map(line => line.id)), ["line-two"]);
 });
 
@@ -384,18 +428,18 @@ test("missing/corrupt committed chunks and malformed legacy storage do not read 
 
 test("publishing a reverted dirty design draft advances its acknowledgement revision without resetting acceptance", () => {
   const f = fixture();
-  f.command("creator", "design.publish", { kind: "architecture", rows: [{ id: "reverted", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
-  const accepted = f.command("alice", "design.accept", { kind: "architecture", rowId: "reverted" }).rows[0];
+  f.command("manager", "design.publish", { kind: "architecture", rows: [{ id: "reverted", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
+  const accepted = f.command("manager", "design.accept", { kind: "architecture", rowId: "reverted" }).rows[0];
   const dirty = { ...accepted, assignmentDirty: true };
   assert.throws(() => f.command("bob", "design.publish", { kind: "architecture", rows: [dirty] }), code("FORBIDDEN"));
-  const published = f.command("creator", "design.publish", { kind: "architecture", rows: [dirty] }).rows[0];
+  const published = f.command("manager", "design.publish", { kind: "architecture", rows: [dirty] }).rows[0];
   assert.equal(published.revision, accepted.revision + 1);
   assert.equal(published.acceptedAt, accepted.acceptedAt);
   assert.equal(published.acceptedBy, accepted.acceptedBy);
   assert.equal(published.actualDate, accepted.actualDate);
   assert.equal(Object.hasOwn(published, "assignmentDirty"), false, "canonical rows do not retain the client-only dirty flag");
-  assert.throws(() => f.command("creator", "design.publish", { kind: "architecture", rows: [dirty] }), code("CONFLICT"));
-  const unchanged = f.command("creator", "design.publish", { kind: "architecture", rows: [published] }).rows[0];
+  assert.throws(() => f.command("manager", "design.publish", { kind: "architecture", rows: [dirty] }), code("CONFLICT"));
+  const unchanged = f.command("manager", "design.publish", { kind: "architecture", rows: [published] }).rows[0];
   assert.equal(unchanged.revision, published.revision, "untouched companion rows retain their revision");
 });
 
@@ -415,11 +459,11 @@ test("first-time notes and design assignments remain usable when legacy Drive im
   assert.deepEqual(plain(f.context.readPropertyJson_("gmcrm-active-work-notes-state")), [], "canonical data is not duplicated into the old active registry");
   const design = fixture();
   design.context.clearPropertyJson_(design.context.workNotesPropertyKey_(scope));
-  const issued = design.command("creator", "design.publish", { kind: "architecture", rows: [{ id: "first-cache-design", content: "Thiết kế mặt bằng", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026", note: "" }] });
+  const issued = design.command("manager", "design.publish", { kind: "architecture", rows: [{ id: "first-cache-design", content: "Thiết kế mặt bằng", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026", note: "" }] });
   assert.equal(issued.rows[0].id, "first-cache-design");
   assert.equal(issued.legacyImportPending, true);
-  design.command("alice", "design.accept", { kind: "architecture", rowId: "first-cache-design" });
-  const finished = design.command("alice", "design.complete", { kind: "architecture", rowId: "first-cache-design" });
+  design.command("manager", "design.accept", { kind: "architecture", rowId: "first-cache-design" });
+  const finished = design.command("manager", "design.complete", { kind: "architecture", rowId: "first-cache-design" });
   assert.equal(finished.rows[0].actualDate, "28/10/2026");
   assert.equal(finished.rows[0].archivePending, true);
   assert.deepEqual(plain(design.context.readPropertyJson_("gmcrm-active-design-tasks-v2")), [], "canonical design tasks do not consume duplicate registry storage");
@@ -499,7 +543,7 @@ test("customer deletion/recreation masks old canonical and legacy jobs without r
   for (const variant of ["same-project", "different-project", "cleanup-retry"]) {
     const f = fixture();
     f.command("creator", "note.publish", { note: f.note("old-customer-note") });
-    const oldDesign = f.command("creator", "design.publish", { kind: "architecture", rows: [{ id: "old-customer-design", content: "Thiết kế cũ", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026", note: "" }] }).rows[0];
+    const oldDesign = f.command("manager", "design.publish", { kind: "architecture", rows: [{ id: "old-customer-design", content: "Thiết kế cũ", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026", note: "" }] }).rows[0];
     f.context.writePropertyJson_("gmcrm-active-design-tasks-v2", [{ ...oldDesign, ...scope, kind: "architecture" }]);
     const folders = new Map();
     const iterator = items => { let index = 0; return { hasNext: () => index < items.length, next: () => items[index++] }; };
@@ -597,7 +641,7 @@ test("design projections update only their target record and survive optional ca
   f.propertyReads.length = 0;
   f.propertyWrites.length = 0;
   f.context.CacheService = { getScriptCache() { throw new Error("Cache temporarily unavailable"); } };
-  const published = f.command("creator", "design.publish", { kind: "architecture", rows: [{ id: "target-design", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
+  const published = f.command("manager", "design.publish", { kind: "architecture", rows: [{ id: "target-design", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
   assert.equal(published.rows[0].id, "target-design");
   assert.equal(f.propertyReads.some(key => key.startsWith(`${unrelatedKey}:`)), false, "design projection does not load unrelated canonical states");
   assert.ok(f.propertyWrites.some(key => key.startsWith("gmcrm-workspace-cache-v1:")));
@@ -664,7 +708,7 @@ test("a newly created empty customer seeds canonical cache before its first note
   assert.ok(blank);
   assert.equal(blank.legacyImportPending, false);
   assert.deepEqual(plain(blank.notes), []);
-  const design = f.command("creator", "design.publish", { ...newScope, kind: "architecture", rows: [{ id: "brand-new-design", content: "Mặt bằng mới", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
+  const design = f.command("manager", "design.publish", { ...newScope, kind: "architecture", rows: [{ id: "brand-new-design", content: "Mặt bằng mới", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
   assert.equal(design.rows[0].id, "brand-new-design");
   const note = f.command("creator", "note.publish", { ...newScope, note: f.note("brand-new-note") });
   assert.equal(note.note.id, "brand-new-note");

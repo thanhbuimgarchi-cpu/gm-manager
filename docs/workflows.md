@@ -5,7 +5,8 @@ Ghi chú, thiết kế và giao việc từ tin nhắn dùng `workflow-command`.
 Phát hành, sửa, nhận và xóa ghi chú gửi một lệnh, không đọc lại toàn bộ danh sách trước khi ghi và không ghi lại workspace của các khách khác. Dự án đã có cache không nạp lại lịch sử Drive trên đường xử lý này; dữ liệu cũ chưa nạp được có nút thử riêng. Giao diện hiện nội dung đang phát hành ngay khi đã giữ yêu cầu trên thiết bị.
 
 - Máy chủ xác thực phiên đăng nhập, kiểm tra lại nhân viên đang hoạt động và quyền hiện tại.
-- Người tạo được sửa/xóa ghi chú chưa hoàn thành; người phụ trách được nhận và hoàn thành việc. Chỉ admin/quản lý giao việc từ tin nhắn.
+- Người tạo được sửa/xóa ghi chú chưa hoàn thành; người phụ trách vẫn được nhận và hoàn thành việc trong Ghi chú.
+- Tin nhắn khách, Tư vấn và Thiết kế chỉ cho admin/Quản lý chung thao tác: giao việc, đổi trạng thái, sửa dữ liệu, phát hành, nhận/hoàn thành thiết kế và xuất Drive. Nhân viên được xem trong phạm vi đã cấp quyền. Máy chủ kiểm tra vai trò hiện tại theo phiên đã ký; cache từ nhân viên không được ghi đè dữ liệu Tư vấn/Thiết kế đã lưu.
 - Ngày hoàn thành và thời điểm nhận việc do máy chủ ghi theo giờ Việt Nam. Ngày dự kiến mới phải là hôm nay hoặc tương lai.
 - Mỗi yêu cầu có mã cố định khi gửi lại. Revision ngăn bản cũ ghi đè thay đổi mới; tombstone ngăn ghi chú đã xóa xuất hiện lại.
 

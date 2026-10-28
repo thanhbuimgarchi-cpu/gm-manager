@@ -109,7 +109,7 @@ async function dispatch(payload) {
     result={ok:true,rows:clone(canonical),revision:1,tasks:[]};
   } else if(operation==='design.accept'||operation==='design.complete') {
     const row=(record.designProgress||[]).find(row=>row.id===payload.rowId);
-    if(!row||row.assigneeEmail!==actor)return {ok:false,code:'FORBIDDEN',error:'Chỉ Người phụ trách mới được cập nhật.'};
+    if(!row||!['admin',manager.email].includes(actor))return {ok:false,code:'FORBIDDEN',error:'Chỉ quản lý được cập nhật thiết kế.'};
     if(operation==='design.accept')Object.assign(row,{acceptedAt:fixedNow,acceptedBy:actor,revision:row.revision+1});
     else {
       if(!row.acceptedAt)return {ok:false,code:'VALIDATION',error:'Hãy nhận việc trước.'};
@@ -228,7 +228,20 @@ await activeNote.getByRole('button',{name:'Thử lưu Drive',exact:true}).click(
 await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value?.some(note=>note.actualDate==='28/10/2026'&&!note.archivePending&&note.archivedAt));
 
 await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
-phase='design accept/complete';
+phase='employee read-only consultation, design and messages';
+await page.getByRole('button',{name:'Tư vấn',exact:true}).click();
+assert.ok(await page.locator('.record-detail--inline').getByLabel('Tên khách hàng',{exact:true}).isDisabled());
+await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
+const employeeDesign=page.locator('.design-schedule').first();
+assert.equal(await employeeDesign.getByRole('button',{name:'Phát hành',exact:true}).count(),0);
+assert.equal(await employeeDesign.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).count(),0);
+assert.ok(await employeeDesign.getByRole('checkbox',{name:'Đánh dấu hoàn thành Thiết kế kiểm thử',exact:true}).isDisabled());
+const beforeRead=commandLog.length;
+await overview();await page.locator('.customer-message-summary .sidebar-notes__toggle').click();await page.locator('.customer-message__body').waitFor();
+assert.equal(await page.locator('.customer-message__status-actions').getByRole('button').count(),0);
+assert.equal(commandLog.length,beforeRead,'reading as an employee cannot submit workflow commands');
+await login(manager.name,manager.loginCode);await openHouse('QA-A');await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
+phase='manager design accept/complete';
 const designRow=page.locator('.design-schedule').first().getByRole('row').filter({hasText:'Thiết kế kiểm thử'});
 await designRow.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
 await designRow.getByLabel('Trạng thái Xanh',{exact:true}).waitFor();

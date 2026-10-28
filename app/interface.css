@@ -657,6 +657,10 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .workflow-sync-panel__items button { padding: 6px 10px; background: #f4f6fa; border: 1px solid #dbe3ee; border-radius: 7px; cursor: pointer; color: inherit; }
 .sidebar-customer-group__items .sidebar-note small { font-size: 9px; line-height: 1.6; }
 .gateway-notes .sidebar-customer-group__trigger { min-height: 59px; padding: 12px; }
+.workflow-edit-scope { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
+.workflow-edit-scope:disabled button, .workflow-edit-scope:disabled input[type="file"], .workflow-edit-scope:disabled .audio-import-button, .workflow-edit-scope:disabled .design-progress-content__actions { display: none; }
+.workflow-edit-scope:disabled input, .workflow-edit-scope:disabled textarea, .workflow-edit-scope:disabled select { opacity: 1; color: #40526d; -webkit-text-fill-color: #40526d; cursor: default; }
+.workflow-readonly-label { margin: 0; padding: 12px 20px; background: #f5f7fb; color: #6b778b; font-size: 12px; }
 .gateway-notes .sidebar-customer-group__identity b { font-size: 12px; }
 .gateway-notes .sidebar-customer-group__items .sidebar-note { padding: 10px 8px; }
 @media (max-width: 760px) {
