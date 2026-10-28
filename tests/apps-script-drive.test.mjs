@@ -391,6 +391,69 @@ test("employee credentials are stored as a hash and verified by the server", () 
   assert.equal(context.verifyEmployeeLogin_({ email: "an@company.com", password: "sai-mat-khau" }).valid, false);
 });
 
+test("employee name and roster login code authenticate without account registration", () => {
+  const context = loadContext();
+  context.loadPersonnel_ = () => ({ personnel: { office: [{ id: "person-1", name: "Nguyễn Minh Anh", email: "anh@company.com", loginCode: "001234", status: "Có", permissions: ["Ghi chú"], role: "Nhân viên thiết kế" }] } });
+  const result = context.verifyEmployeeLogin_({ name: "  NGUYỄN  MINH ANH  ".normalize("NFD"), loginCode: "001234" });
+  assert.equal(result.valid, true);
+  assert.equal(result.account, "anh@company.com");
+  assert.equal(result.member.id, "person-1");
+  assert.equal(Object.hasOwn(result.member, "loginCode"), false);
+  assert.equal(context.verifyEmployeeLogin_({ name: "Nguyen Minh Anh", loginCode: "001234" }).valid, false);
+  assert.equal(context.verifyEmployeeLogin_({ name: "Nguyễn Minh", loginCode: "001234" }).valid, false);
+  assert.equal(context.verifyEmployeeLogin_({ name: "Nguyễn Minh Anh", loginCode: "1234" }).valid, false);
+});
+
+test("inactive and ambiguous name/code pairs cannot log in", () => {
+  const context = loadContext();
+  const active = { id: "active", name: "Trần Bình", loginCode: "code-1", status: "Có", email: "binh@company.com" };
+  const paused = { id: "paused", name: "Lê An", loginCode: "code-2", status: "Ngưng" };
+  let members = [active, paused];
+  context.loadPersonnel_ = () => ({ personnel: { office: members } });
+  assert.equal(context.verifyEmployeeLogin_({ name: "Lê An", loginCode: "code-2" }).valid, false);
+  assert.equal(context.verifyEmployeeLogin_({ name: "Trần Bình", loginCode: "" }).valid, false);
+  members = [active, { ...active, id: "duplicate", email: "other@company.com" }];
+  assert.equal(context.verifyEmployeeLogin_({ name: "Trần Bình", loginCode: "code-1" }).valid, false);
+});
+
+test("roster login preserves assignment identity for employees without email", () => {
+  const context = loadContext();
+  const member = { id: "staff-no-email", name: "Lê An", loginCode: "0", status: "Có", email: "" };
+  context.loadPersonnel_ = () => ({ personnel: { site: [member] } });
+  const result = context.verifyEmployeeLogin_({ name: "Lê An", loginCode: "0" });
+  assert.equal(result.valid, true);
+  assert.equal(result.account, "member:staff-no-email");
+  assert.equal(context.employeeRosterMember_(result.account).id, member.id);
+  assert.equal(context.assignmentMatchesEmployee_("member:staff-no-email", result.account, member), true);
+});
+
+test("personnel cache preserves login-code leading zeros without reading Drive", () => {
+  const values = new Map();
+  const context = loadContext({ PropertiesService: { getScriptProperties: () => ({ getProperty: key => values.get(key), setProperty: (key, value) => values.set(key, value), deleteProperty: key => values.delete(key) }) } });
+  context.savePersonnelCache_({ office: [{ id: "staff-1", name: "Nguyễn An", loginCode: " 00123 " }] });
+  assert.equal(context.loadPersonnel_().personnel.office[0].loginCode, "00123");
+});
+
+test("personnel Excel export and import round-trip the login-code column as text", () => {
+  let exportedRows;
+  const numberFormats = [];
+  const hidden = [];
+  const range = { setValues(value) { exportedRows = value; return this; }, setFontFamily() { return this; }, setWrap() { return this; }, setVerticalAlignment() { return this; }, setFontWeight() { return this; }, setBackground() { return this; }, setNumberFormat() { return this; } };
+  const sheet = { setName() {}, getRange(row, column, rows, columns) { if (row === 2) numberFormats.push(column); return range; }, setFrozenRows() {}, setColumnWidth() {}, hideColumns(column) { hidden.push(column); }, autoResizeRows() {}, getLastRow: () => exportedRows.length };
+  const context = loadContext({ SpreadsheetApp: { create: () => ({ getSheets: () => [sheet], getId: () => "temporary" }) }, DriveApp: { getFileById: () => ({ setTrashed() {} }) } });
+  context.personnelFolder_ = () => ({ createFile: () => ({ getId: () => "exported", getUrl: () => "file-url" }) });
+  context.trashFilesByName_ = () => {};
+  context.exportXlsx_ = () => ({ setName() { return this; } });
+  context.syncPersonnelWorkbook_({ office: [{ id: "p1", name: "Nguyễn An", email: "an@example.com", loginCode: "00123", permissions: [], phone: "0912345678" }] });
+  assert.equal(exportedRows[0][5], "Mã đăng nhập");
+  assert.equal(exportedRows[1][5], "00123");
+  assert.ok(numberFormats.includes(6));
+  assert.ok(numberFormats.includes(8));
+  assert.ok(hidden.includes(12));
+  context.readXlsxSheets_ = () => ({ "Nhân lực": exportedRows });
+  assert.equal(context.personnelFromWorkbook_({}).office[0].loginCode, "00123");
+});
+
 test("customer portal keeps a published token private and returns only project progress", () => {
   const context = loadContext();
   assert.equal(context.normalizeCustomerShareToken_("A".repeat(48)), "a".repeat(48));

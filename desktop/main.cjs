@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Notification, ipcMain, shell, session } = require("electron");
+const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
+const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder } = require("./path-utils.cjs");
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -10,6 +11,11 @@ const APP_ORIGIN = new URL(APP_URL).origin;
 const WINDOWS_DRIVE_ROOTS = ["I:\\Shared drives", "I:\\My Drive", "G:\\Shared drives", "G:\\My Drive"];
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
+let workspaceFolder;
+const pendingProtocolUrls = [];
+const activeNotifications = new Set();
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance) app.quit();
 
 function isTrustedUrl(value) {
   try {
@@ -17,6 +23,43 @@ function isTrustedUrl(value) {
   } catch {
     return false;
   }
+}
+
+function trustedIpcSender(event) {
+  return isTrustedUrl(event.senderFrame?.url || event.sender?.getURL?.() || "");
+}
+
+async function readWorkspaceFolder() {
+  if (workspaceFolder !== undefined) return workspaceFolder;
+  try {
+    const saved = JSON.parse(await fs.readFile(path.join(app.getPath("userData"), "workspace-location.json"), "utf8"));
+    workspaceFolder = typeof saved.path === "string" ? saved.path : "";
+  } catch { workspaceFolder = ""; }
+  return workspaceFolder;
+}
+
+async function saveWorkspaceFolder(folder) {
+  if (workspaceFolder === folder) return;
+  const configPath = path.join(app.getPath("userData"), "workspace-location.json");
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  await fs.writeFile(`${configPath}.tmp`, JSON.stringify({ path: folder }), "utf8");
+  await fs.rename(`${configPath}.tmp`, configPath);
+  workspaceFolder = folder;
+}
+
+async function validateWorkspaceFolder(payload = {}) {
+  const requested = typeof payload.path === "string" && payload.path.trim() ? payload.path : await readWorkspaceFolder();
+  const folder = await normalizeWorkspaceRoot(requested);
+  if (!folder) return { ok: false, path: "", error: "Hãy chọn thư mục GM Manager có đủ hai thư mục Khách hàng và Nhân lực." };
+  try { await saveWorkspaceFolder(folder); } catch { return { ok: false, path: "", error: "Không thể lưu vị trí thư mục trên máy này. Hãy thử chọn lại." }; }
+  return { ok: true, path: folder };
+}
+
+async function selectWorkspaceFolder() {
+  const options = { title: "Chọn thư mục GM Manager", buttonLabel: "Chọn thư mục", properties: ["openDirectory"], defaultPath: await readWorkspaceFolder() || undefined };
+  const selected = mainWindow && !mainWindow.isDestroyed() ? await dialog.showOpenDialog(mainWindow, options) : await dialog.showOpenDialog(options);
+  if (selected.canceled || !selected.filePaths[0]) return { ok: false, canceled: true, path: await readWorkspaceFolder() || "" };
+  return validateWorkspaceFolder({ path: selected.filePaths[0] });
 }
 
 function createWindow() {
@@ -75,13 +118,16 @@ async function googleDriveRoots() {
   return roots;
 }
 
-async function findProjectDocumentsFolder(...identifiers) {
+async function findProjectDocumentsFolder(payload) {
+  const selectedRoot = await readWorkspaceFolder();
+  if (selectedRoot) return findProjectDocumentsAtRoot(selectedRoot, payload);
+  const identifiers = [payload.houseId, payload.projectId];
   const wanted = new Set(identifiers.map((value) => String(value || "").trim()).filter(Boolean));
   if (!wanted.size) return "";
-  const queue = await googleDriveRoots();
+  const queue = (await googleDriveRoots()).map((folder) => ({ folder, depth: 0 }));
   const visited = new Set();
-  while (queue.length) {
-    const folder = queue.shift();
+  while (queue.length && visited.size < 2000) {
+    const { folder, depth } = queue.shift();
     if (!folder || visited.has(folder)) continue;
     visited.add(folder);
     let entries;
@@ -99,20 +145,10 @@ async function findProjectDocumentsFolder(...identifiers) {
           if ((await fs.stat(documentsFolder)).isDirectory()) return documentsFolder;
         } catch { /* Keep looking: a legacy project folder may not contain Tài liệu. */ }
       }
-      queue.push(child);
+      if (depth < 6) queue.push({ folder: child, depth: depth + 1 });
     }
   }
   return "";
-}
-
-function safeDriveEntryName(value) {
-  const name = String(value || "").trim();
-  if (!name || name === "." || name === ".." || name.length > 255) return "";
-  return /[\\/:*?"<>|\u0000-\u001f]/.test(name) ? "" : name;
-}
-
-function sameDriveEntryName(left, right) {
-  return String(left || "").normalize("NFC").toLocaleLowerCase() === String(right || "").normalize("NFC").toLocaleLowerCase();
 }
 
 async function findDriveFile(documentsFolder, fileName, snapshotName) {
@@ -145,7 +181,10 @@ async function findDriveFile(documentsFolder, fileName, snapshotName) {
         if (entry.isDirectory() && !entry.isSymbolicLink()) {
           queue.push(child);
         } else if (entry.isFile() && sameDriveEntryName(entry.name, wantedName)) {
-          return child;
+          try {
+            const [realRoot, realChild] = await Promise.all([fs.realpath(documentsFolder), fs.realpath(child)]);
+            if (isWithinRoot(realRoot, realChild)) return child;
+          } catch { /* A Drive file may move while its directory is being read. */ }
         }
       }
     }
@@ -157,8 +196,50 @@ async function findDriveFile(documentsFolder, fileName, snapshotName) {
   return "";
 }
 
-app.whenReady().then(() => {
+async function openDocumentFolder(payload = {}) {
+  const selectedRoot = await readWorkspaceFolder();
+  if (!selectedRoot) return "Hãy chọn thư mục GM Manager trong phần đăng nhập trước.";
+  const folder = await findDocumentSnapshotFolder(selectedRoot, payload);
+  if (!folder) return "Không tìm thấy thư mục Tài liệu của hồ sơ hoặc ngày đã chọn tại vị trí GM Manager đã lưu.";
+  if (payload.fileName) {
+    const file = await findDriveFile(folder, payload.fileName, "");
+    if (file) return shell.openPath(path.dirname(file));
+  }
+  return shell.openPath(folder);
+}
+
+async function handleProtocolUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { return; }
+  if (url.protocol !== "gmmanager:" || url.hostname !== "open-documents" || (url.pathname && url.pathname !== "/")) return;
+  const payload = { houseId: url.searchParams.get("houseId"), projectId: url.searchParams.get("projectId"), year: url.searchParams.get("year"), month: url.searchParams.get("month"), snapshotName: url.searchParams.get("snapshotName") || "" };
+  if (![payload.houseId, payload.projectId].some((name) => safeDriveEntryName(name)) || (payload.snapshotName && !safeDriveEntryName(payload.snapshotName))) return;
+  if (!/^\d{4}$/.test(payload.year || "") || !Number.isInteger(Number(payload.month)) || Number(payload.month) < 1 || Number(payload.month) > 12) return;
+  let validation = await validateWorkspaceFolder();
+  if (!validation.ok) validation = await selectWorkspaceFolder();
+  if (!validation.ok) return;
+  const error = await openDocumentFolder(payload);
+  if (error) await dialog.showMessageBox({ type: "info", title: "GM Manager", message: error });
+}
+
+if (singleInstance) app.on("second-instance", (_event, argv) => {
+  const target = argv.find((argument) => /^gmmanager:\/\//i.test(argument));
+  if (target) {
+    if (app.isReady()) void handleProtocolUrl(target);
+    else pendingProtocolUrls.push(target);
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }
+});
+if (singleInstance) app.on("open-url", (event, target) => {
+  event.preventDefault();
+  if (app.isReady()) void handleProtocolUrl(target);
+  else pendingProtocolUrls.push(target);
+});
+
+if (singleInstance) app.whenReady().then(() => {
   app.setAppUserModelId("com.mgarchi.gmcrm");
+  if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient("gmmanager", process.execPath, [path.resolve(process.argv[1])]);
+  else app.setAsDefaultProtocolClient("gmmanager");
   const trustedNotificationRequest = (webContents) => isTrustedUrl(webContents.getURL());
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     callback(permission === "notifications" && trustedNotificationRequest(webContents));
@@ -166,37 +247,66 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
     return permission === "notifications" && (requestingOrigin === APP_ORIGIN || (webContents && trustedNotificationRequest(webContents)));
   });
-  ipcMain.handle("gmcrm:notify", (_event, payload = {}) => {
+  ipcMain.handle("gmcrm:select-workspace-folder", (event) => trustedIpcSender(event) ? selectWorkspaceFolder() : { ok: false, path: "", error: "Nguồn yêu cầu không hợp lệ." });
+  ipcMain.handle("gmcrm:validate-workspace-folder", (event, payload = {}) => trustedIpcSender(event) ? validateWorkspaceFolder(payload) : { ok: false, path: "", error: "Nguồn yêu cầu không hợp lệ." });
+  ipcMain.handle("gmcrm:open-document-folder", (event, payload = {}) => trustedIpcSender(event) ? openDocumentFolder(payload) : "Nguồn yêu cầu không hợp lệ.");
+  ipcMain.handle("gmcrm:notification-support", (event) => trustedIpcSender(event) && Notification.isSupported());
+  ipcMain.handle("gmcrm:notify", async (event, payload = {}) => {
+    if (!trustedIpcSender(event)) return false;
+    if (!Notification.isSupported()) return false;
     const title = String(payload.title || "GM-CRM").slice(0, 120);
     const body = String(payload.body || "").slice(0, 700);
-    const notification = new Notification({ title, body, icon: APP_ICON });
+    let notification;
+    try { notification = new Notification({ title, body, icon: APP_ICON }); } catch { return false; }
+    activeNotifications.add(notification);
     notification.on("click", () => openNotificationTarget(String(payload.url || APP_URL)));
-    notification.show();
-    return true;
+    // A successful .show() call alone is not proof the OS accepted the toast.
+    // Wait for Electron's display event or a definite failure before reporting
+    // success to the web UI. OS focus modes can still suppress toast banners.
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (shown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (!shown) activeNotifications.delete(notification);
+        resolve(shown);
+      };
+      const timeout = setTimeout(() => finish(false), 4000);
+      notification.once("show", () => finish(true));
+      notification.on("failed", () => { activeNotifications.delete(notification); finish(false); });
+      notification.on("close", () => { activeNotifications.delete(notification); finish(false); });
+      try { notification.show(); } catch { finish(false); }
+    });
   });
-  ipcMain.handle("gmcrm:open-drive", async (_event, payload = {}) => {
+  ipcMain.handle("gmcrm:open-drive", async (event, payload = {}) => {
+    if (!trustedIpcSender(event)) return "Nguồn yêu cầu không hợp lệ.";
     const projectId = String(payload.projectId || "").trim();
     const houseId = String(payload.houseId || "").trim();
     const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
-    if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
-    const documentsFolder = await findProjectDocumentsFolder(...identifiers);
+    if (!identifiers.length || identifiers.some((value) => !safeDriveEntryName(value))) return "Mã nhà không hợp lệ.";
+    const documentsFolder = await findProjectDocumentsFolder(payload);
     return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
   });
-  ipcMain.handle("gmcrm:open-file", async (_event, payload = {}) => {
+  ipcMain.handle("gmcrm:open-file", async (event, payload = {}) => {
+    if (!trustedIpcSender(event)) return "Nguồn yêu cầu không hợp lệ.";
     const projectId = String(payload.projectId || "").trim();
     const houseId = String(payload.houseId || "").trim();
     const fileName = safeDriveEntryName(payload.fileName);
     const snapshotName = safeDriveEntryName(payload.snapshotName);
     const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
-    if (!identifiers.length || identifiers.some((value) => !/^[A-Za-z0-9_-]+$/.test(value))) return "Mã nhà không hợp lệ.";
+    if (!identifiers.length || identifiers.some((value) => !safeDriveEntryName(value))) return "Mã nhà không hợp lệ.";
     if (!fileName) return "Tên tệp không hợp lệ.";
-    const documentsFolder = await findProjectDocumentsFolder(...identifiers);
+    const documentsFolder = await findProjectDocumentsFolder(payload);
     if (!documentsFolder) return process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
     const filePath = await findDriveFile(documentsFolder, fileName, snapshotName);
     if (!filePath) return `Không tìm thấy tệp ${fileName} trong thư mục Google Drive trên máy tính.`;
     return shell.openPath(filePath);
   });
   createWindow();
+  const initialProtocolUrl = process.argv.find((argument) => /^gmmanager:\/\//i.test(argument));
+  if (initialProtocolUrl) pendingProtocolUrls.push(initialProtocolUrl);
+  pendingProtocolUrls.splice(0).forEach((target) => { void handleProtocolUrl(target); });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

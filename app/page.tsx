@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
+import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 
 function WorkspaceIcon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, string> = {
@@ -281,6 +282,7 @@ type PersonnelMember = {
   status: PersonnelStatus;
   name: string;
   email: string;
+  loginCode?: string;
   birthDate: string;
   phone: string;
   role: string;
@@ -303,7 +305,6 @@ const personnelLegacyAssignmentKey = (member: Pick<PersonnelMember, "id"> | null
 };
 
 type PersonnelStatus = "Có" | "Không" | "Ngưng";
-type EmployeeAuthMode = "login" | "register" | "reset-request" | "reset-confirm";
 
 type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
 type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen" | "Tím";
@@ -415,7 +416,58 @@ type DesktopNotificationBridge = {
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
   openDrive?: (payload: { projectId: string; houseId?: string; year: number; month: number }) => Promise<string>;
   openFile?: (payload: { projectId: string; houseId?: string; year: number; month: number; snapshotName?: string; fileName: string }) => Promise<string>;
+  selectWorkspaceFolder?: () => Promise<{ ok: boolean; path: string; error?: string; canceled?: boolean }>;
+  validateWorkspaceFolder?: (payload?: { path?: string }) => Promise<{ ok: boolean; path: string; error?: string }>;
+  openDocumentFolder?: (payload: { projectId: string; houseId?: string; year: number; month: number; snapshotName?: string }) => Promise<string>;
 };
+
+type LocalDirectoryHandle = FileSystemDirectoryHandle & {
+  queryPermission?: (options: { mode: "read" }) => Promise<PermissionState>;
+  requestPermission?: (options: { mode: "read" }) => Promise<PermissionState>;
+};
+
+async function storedWorkspaceDirectory(handle?: LocalDirectoryHandle): Promise<LocalDirectoryHandle | undefined> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("gm-manager-local-workspace", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("folders");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction("folders", handle ? "readwrite" : "readonly");
+      const item = handle ? transaction.objectStore("folders").put(handle, "root") : transaction.objectStore("folders").get("root");
+      let value: LocalDirectoryHandle | undefined;
+      item.onsuccess = () => { value = handle || item.result; };
+      transaction.oncomplete = () => { db.close(); resolve(value); };
+      transaction.onerror = () => { db.close(); reject(transaction.error); };
+    };
+  });
+}
+
+async function verifyBrowserWorkspace(handle: LocalDirectoryHandle): Promise<LocalDirectoryHandle> {
+  const queue = [{ handle, depth: 0 }];
+  while (queue.length) {
+    const current = queue.shift()!;
+    try {
+      if (current.handle.name.normalize("NFC").toLowerCase() === "gm manager") {
+        await current.handle.getDirectoryHandle("Khách hàng");
+        await current.handle.getDirectoryHandle("Nhân lực");
+        return current.handle;
+      }
+    } catch { /* An outer GM Manager folder may contain the actual root. */ }
+    if (current.depth >= 3) continue;
+    for (const child of ["Shared drives", "My Drive", "GM Manager"]) {
+      try { queue.push({ handle: await current.handle.getDirectoryHandle(child) as LocalDirectoryHandle, depth: current.depth + 1 }); } catch { /* Only check the expected Drive layout. */ }
+    }
+  }
+  throw new Error("Chọn thư mục GM Manager có cả Khách hàng và Nhân lực bên trong.");
+}
+
+const employeeNameKey = (name: string) => name.normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi");
+
+function employeeByLoginCode(personnel: PersonnelMember[], name: string, code: string) {
+  const matches = personnel.filter((member) => member.status === "Có" && employeeNameKey(member.name) === employeeNameKey(name) && Boolean(member.loginCode?.trim()) && member.loginCode?.trim() === code.trim());
+  return matches.length === 1 ? matches[0] : null;
+}
 
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -674,11 +726,18 @@ const isHiddenDocumentFile = (fileName: string) => /(?:\.(?:bak|dwl2?|sv\$|ac\$|
 const isSpreadsheetFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => /spreadsheet|ms-excel|text\/csv/i.test(file.mimeType) || /\.(?:xlsx?|xlsm|csv)$/i.test(file.name.trim());
 const isPreviewableFile = (file: Pick<WorkflowFile, "name" | "mimeType">) => file.mimeType.startsWith("image/") || file.mimeType === "application/pdf" || /\.pdf$/i.test(file.name);
 const filePreviewUrl = (file: Pick<WorkflowFile, "id" | "viewUrl" | "downloadUrl">) => file.viewUrl || `https://drive.google.com/file/d/${encodeURIComponent(file.id)}/view` || file.downloadUrl;
-const windowsShortcutDocumentUrl = (location: CustomerLocation, snapshot: DocumentSnapshot, file: Pick<DocumentFile, "name">) => {
-  const projectFolder = String(location.record.houseId || location.record.projectId || "").trim();
-  const parts = ["I:", "Shared drives", "GM Manager", "GM Manager", "Khách hàng", String(location.year), `T${location.month}`, projectFolder, "Tài liệu", snapshot.name, file.name];
-  return `file:///${parts.map((part, index) => index === 0 ? part : encodeURIComponent(part)).join("/")}`;
-};
+function mobileFileOpenUrl(file: Pick<DocumentFile, "name" | "downloadUrl" | "viewUrl" | "mimeType">, userAgent: string) {
+  const url = file.downloadUrl || file.viewUrl || "";
+  if (!/^https?:\/\//i.test(url)) return "";
+  const extension = file.name.toLowerCase().split(".").pop() || "";
+  const types: Record<string, string> = { pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" };
+  const mimeType = types[extension] || file.mimeType;
+  if (/android/i.test(userAgent) && types[extension]) {
+    const target = new URL(url);
+    return `intent://${target.host}${target.pathname}${target.search}#Intent;scheme=${target.protocol.slice(0, -1)};action=android.intent.action.VIEW;type=${mimeType};S.browser_fallback_url=${encodeURIComponent(url)};end`;
+  }
+  return url;
+}
 
 
 function customerMessageDate(value: string) {
@@ -1532,6 +1591,7 @@ function normalizePersonnelMap(value: Record<string, PersonnelMember[]>): Record
     ...member,
     status: personnelStatuses.includes(member.status) ? member.status : "Có",
     email: String(member.email ?? "").trim().toLowerCase(),
+    loginCode: String(member.loginCode ?? "").trim(),
     phone: normalizePersonnelPhone(member.phone),
     role: personnelRoles.includes(member.role as typeof personnelRoles[number]) ? member.role : "",
     permissions: Array.from(new Set((Array.isArray(member.permissions) ? member.permissions : []).filter((permission): permission is typeof personnelPermissionOptions[number] => personnelPermissionOptions.includes(permission as typeof personnelPermissionOptions[number])))),
@@ -1727,7 +1787,7 @@ export default function Home() {
   const [editingPersonnelId, setEditingPersonnelId] = useState<string | null>(null);
   const [personnelMenuId, setPersonnelMenuId] = useState<string | null>(null);
   const [loadingPersonnel, setLoadingPersonnel] = useState(false);
-  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -1745,8 +1805,9 @@ export default function Home() {
   const [loginOpen, setLoginOpen] = useState(false);
   const [employeeLoginEmail, setEmployeeLoginEmail] = useState("");
   const [employeeLoginPassword, setEmployeeLoginPassword] = useState("");
-  const [employeeResetCode, setEmployeeResetCode] = useState("");
-  const [employeeAuthMode, setEmployeeAuthMode] = useState<EmployeeAuthMode>("login");
+  const [localWorkspacePath, setLocalWorkspacePath] = useState("");
+  const [choosingWorkspace, setChoosingWorkspace] = useState(false);
+  const browserWorkspaceHandle = useRef<LocalDirectoryHandle | null>(null);
   const [employeeAuthBusy, setEmployeeAuthBusy] = useState(false);
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
   const [employeeLoginError, setEmployeeLoginError] = useState("");
@@ -1758,6 +1819,7 @@ export default function Home() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [enablingNotifications, setEnablingNotifications] = useState(false);
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -1839,6 +1901,8 @@ export default function Home() {
   const pendingWorkNotesSync = useRef(new Map<string, WorkNote[]>());
   const personnelLoadRevision = useRef(0);
   const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
+  const documentViewContext = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId });
+  documentViewContext.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId };
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
   const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
@@ -2104,6 +2168,15 @@ export default function Home() {
     const projectId = url.searchParams.get("gmcrmProject");
     const noteId = url.searchParams.get("gmcrmNote");
     const messageId = url.searchParams.get("gmcrmMessage");
+    const designTaskId = url.searchParams.get("gmcrmDesignTask");
+    if (projectId && designTaskId) {
+      const location = customerLocations.find(({ record }) => record.projectId === projectId);
+      if (!location) return;
+      selectCustomerForWorkflow(location, "Thiết kế");
+      for (const key of ["gmcrmProject", "gmcrmDesignTask", "gmcrmDesignKind", "gmcrmYear", "gmcrmMonth"]) url.searchParams.delete(key);
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      return;
+    }
     if (messageId) {
       const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID
         ? createVirtualPancakeLocation(Number(url.searchParams.get("gmcrmYear")) || undefined, Number(url.searchParams.get("gmcrmMonth")) || undefined)
@@ -2260,87 +2333,74 @@ export default function Home() {
   };
 
   const openDesktopDocumentFile = async (file: DocumentFile, snapshot: DocumentSnapshot) => {
-    const desktop = desktopBridge();
-    if (desktop?.isDesktop && desktop.openFile && selectedCustomerLocation) {
-      const error = await desktop.openFile({
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        snapshotName: snapshot.name,
-        fileName: file.name,
-      });
-      if (error) setNotice(error);
+    if (isMobileDevice()) {
+      const url = mobileFileOpenUrl(file, navigator.userAgent);
+      if (url) window.location.assign(url);
+      else setNotice("Chưa có liên kết mở tài liệu này.");
       return;
     }
-    const standaloneWindows = isWindowsDesktop() && window.matchMedia("(display-mode: standalone)").matches;
-    if (standaloneWindows && selectedCustomerLocation) {
-      const localUrl = windowsShortcutDocumentUrl(selectedCustomerLocation, snapshot, file);
-      const opened = window.open(localUrl, "_blank", "noopener,noreferrer");
-      if (opened) {
-        setNotice("Đang mở tệp trong ổ I…");
-        return;
-      }
+    if (!selectedCustomerLocation) return;
+    const payload = { projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId, year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, snapshotName: snapshot.name };
+    const desktop = desktopBridge();
+    if (desktop?.openDocumentFolder) {
+      try {
+        const error = await desktop.openDocumentFolder(payload);
+        if (error) setNotice(error);
+      } catch { setNotice("Không thể mở thư mục tài liệu. Hãy kiểm tra vị trí GM Manager đã chọn."); }
+      return;
     }
-    const webUrl = file.viewUrl || file.downloadUrl;
-    if (webUrl) window.open(webUrl, "_blank", "noopener,noreferrer");
-    else setNotice("Không có đường dẫn mở tệp.");
+    const query = new URLSearchParams(Object.entries(payload).map(([key, value]) => [key, String(value ?? "")]));
+    window.location.assign(`gmmanager://open-documents?${query}`);
+    setNotice("Đang yêu cầu GM Manager mở thư mục trên máy. Nếu chưa có ứng dụng hỗ trợ, hãy cài/cập nhật bản PC.");
   };
 
   const sendTestNotification = async () => {
-    const desktop = desktopBridge();
-    if (desktop) {
-      const shown = await desktop.showNotification({
-        title: "GM-CRM",
-        body: "Thông báo trên Windows đã được bật thành công.",
-        url: `${import.meta.env.BASE_URL}`,
-      });
-      if (shown) {
+    if (enablingNotifications) return;
+    setEnablingNotifications(true);
+    try {
+      const desktop = desktopBridge();
+      if (desktop?.isDesktop) {
+        const shown = await desktop.showNotification({ title: "GM Manager", body: "Thông báo đã được bật. Bạn sẽ nhận thông báo khi có công việc hoặc tin nhắn mới.", url: `${window.location.origin}${import.meta.env.BASE_URL}` });
+        if (!shown) throw new Error("Hệ thống chưa xác nhận hiển thị thông báo. Hãy kiểm tra quyền thông báo GM Manager trong máy.");
         setNotificationPermission("granted");
         markNotificationsEnabled(true);
-        setNotice("Đã bật và gửi thông báo thử trên Windows.");
-        return;
+      } else {
+        if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+          setNotificationPermission("unsupported");
+          throw new Error("Thiết bị này chưa hỗ trợ thông báo. Trên iPhone, hãy cài ứng dụng vào màn hình chính rồi bật thông báo.");
+        }
+        let permission = Notification.permission;
+        if (permission === "default") permission = await Notification.requestPermission();
+        setNotificationPermission(permission);
+        if (permission !== "granted") throw new Error("Chưa được cấp quyền thông báo. Hãy cho phép GM Manager trong cài đặt thông báo của trình duyệt.");
+        let timeout = 0;
+        const registration = serviceWorkerRegistration.current || await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise<never>((_, reject) => { timeout = window.setTimeout(() => reject(new Error("Bộ phận thông báo chưa sẵn sàng. Hãy mở lại ứng dụng rồi thử lại.")), 6000); }),
+        ]).finally(() => window.clearTimeout(timeout));
+        await registration.showNotification("GM Manager", {
+          body: "Thông báo đã được bật. Bạn sẽ nhận thông báo khi có công việc hoặc tin nhắn mới.",
+          icon: `${import.meta.env.BASE_URL}gm-logo.png`,
+          badge: `${import.meta.env.BASE_URL}gm-logo.png`,
+          tag: "gm-crm-notification-test",
+          data: { url: `${window.location.origin}${import.meta.env.BASE_URL}` },
+        });
+        markNotificationsEnabled(true);
       }
-    }
-    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
-      setNotificationPermission("unsupported");
+      try { if (isMobileDevice()) window.localStorage.setItem(mobileNotificationSetupKey, "complete"); } catch { /* Optional prompt state. */ }
+      setNotice("Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị.");
+    } catch (error) {
       markNotificationsEnabled(false);
-      setNotice("Trình duyệt này chưa hỗ trợ thông báo ứng dụng.");
-      return;
-    }
-    let permission = Notification.permission;
-    if (permission === "default") permission = await Notification.requestPermission();
-    setNotificationPermission(permission);
-    if (permission !== "granted") {
-      markNotificationsEnabled(false);
-      setNotice("Bạn cần cho phép thông báo trong cài đặt trình duyệt.");
-      return;
-    }
-    try {
-      const registration = await navigator.serviceWorker.ready;
-      await registration.showNotification("GM-CRM", {
-        body: "Thông báo trên điện thoại đã được bật thành công.",
-        icon: `${import.meta.env.BASE_URL}gm-logo.png`,
-        badge: `${import.meta.env.BASE_URL}gm-logo.png`,
-        tag: "gm-crm-notification-test",
-        data: { url: `${import.meta.env.BASE_URL}` },
-      });
-      markNotificationsEnabled(true);
-    } catch {
-      markNotificationsEnabled(false);
-      setNotice("Không thể bật thông báo trên thiết bị này.");
-      return;
-    }
-    try { if (isMobileDevice()) window.localStorage.setItem(mobileNotificationSetupKey, "complete"); } catch { /* Optional prompt state. */ }
-    setNotice("Đã gửi thông báo thử đến thiết bị này.");
+      setNotice(error instanceof Error ? error.message : "Không thể bật thông báo trên thiết bị này.");
+    } finally { setEnablingNotifications(false); }
   };
 
   const renderUpdateAction = () => updateAvailable ? <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button> : null;
-  const renderMobileAppActions = () => <>
-    {renderUpdateAction()}
-    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài đặt</button>}
-    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeResetCode(""); setEmployeeAuthMode("login"); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
-    <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()}>{notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
+  const renderMobileAppActions = (includeInstall = true) => <>
+    {includeInstall && renderUpdateAction()}
+    {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
+    <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
   </>;
 
   const flushWorkspaceCacheSync = async () => {
@@ -2421,22 +2481,21 @@ export default function Home() {
     }
     if (driveRequestsInFlight.current.has(cacheKey)) return false;
     driveRequestsInFlight.current.add(cacheKey);
-    setIsLoadingDrive(true);
+    if (!quietly) setIsLoadingDrive(true);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", mode, year, month, query: options.query, projectId: options.projectId, refresh: Boolean(options.force) });
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
       if (cacheAge) writeDriveCache(cacheKey, result.years);
       if (mode === "index") {
         const fingerprint = driveIndexFingerprint(result.years, year, month);
-        const previousFingerprint = driveIndexFingerprints.current.get(indexKey);
-        if (driveIndexFingerprints.current.has(indexKey) && previousFingerprint !== fingerprint && !driveRefreshRequested.current) setDriveRefreshAvailable(true);
+        setDriveRefreshAvailable(false);
         driveIndexFingerprints.current.set(indexKey, fingerprint);
         const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
         driveIndexProjectIds.current.set(indexKey, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
       }
       const driveYears = preserveDriveRecordMetadata(result.years, yearsRef.current);
       if (driveYears.length) {
-        persist(driveYears, false);
+        if (JSON.stringify(driveYears) !== JSON.stringify(yearsRef.current)) persist(driveYears, false);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
       }
       return true;
@@ -2445,7 +2504,7 @@ export default function Home() {
       return false;
     } finally {
       driveRequestsInFlight.current.delete(cacheKey);
-      setIsLoadingDrive(false);
+      if (!quietly) setIsLoadingDrive(false);
     }
   };
 
@@ -2467,23 +2526,31 @@ export default function Home() {
 
   useEffect(() => {
     if (isCustomerPortal) return;
-    const currentDate = getVietnamDate();
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) return;
-    const refreshWorkspace = (force = false) => {
-      if (document.visibilityState === "visible") void loadWorkspaceFromDrive(config, true, { mode: "index", year: getVietnamDate().year, month: getVietnamDate().month, force });
+    const refreshWorkspace = () => {
+      if (document.visibilityState === "visible" && navigator.onLine !== false) void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth, force: true });
     };
-    // Render the cached workspace immediately, then verify the current month
-    // against Drive as soon as the app opens. This prevents folders deleted
-    // from Drive from lingering in a device's local/shared cache until the
-    // fifteen-minute refresh window expires.
-    void loadWorkspaceFromDrive(config, true, { mode: "index", year: currentDate.year, month: currentDate.month, force: true });
-    const refreshTimer = window.setInterval(() => refreshWorkspace(true), DRIVE_INDEX_CACHE_MS);
-    return () => window.clearInterval(refreshTimer);
-  }, [driveScriptUrl, isCustomerPortal]);
+    // Keep the period being viewed fresh without blocking cached rendering.
+    // The per-request key in loadWorkspaceFromDrive prevents overlapping scans.
+    refreshWorkspace();
+    const refreshTimer = window.setInterval(refreshWorkspace, 30_000);
+    document.addEventListener("visibilitychange", refreshWorkspace);
+    window.addEventListener("focus", refreshWorkspace);
+    window.addEventListener("online", refreshWorkspace);
+    return () => {
+      window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", refreshWorkspace);
+      window.removeEventListener("focus", refreshWorkspace);
+      window.removeEventListener("online", refreshWorkspace);
+    };
+  }, [driveScriptUrl, isCustomerPortal, selectedYear, selectedMonth]);
 
   const loadWorkspaceCache = async () => {
     if (!workspaceStorageReady || isCustomerPortal || !driveScriptUrl.trim()) return;
+    const requestKey = "shared-workspace-cache";
+    if (driveRequestsInFlight.current.has(requestKey) || workspaceSyncInFlight.current || workspaceSyncPending.current) return;
+    driveRequestsInFlight.current.add(requestKey);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; years?: YearFolder[]; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-workspace-cache" });
       if (!response.ok || !result.ok || !Array.isArray(result.years)) return;
@@ -2491,12 +2558,12 @@ export default function Home() {
       const mergedHasRecords = mergedYears.some((year) => year.months?.some((month) => month.records?.length));
       if (mergedHasRecords) {
         sharedWorkspaceCacheEmpty.current = false;
-        persist(mergedYears, false);
+        if (JSON.stringify(mergedYears) !== JSON.stringify(yearsRef.current)) persist(mergedYears, false);
       } else if (driveIndexProjectIds.current.size) {
         // A loaded Drive index with no matching folder is authoritative. Do
         // not resurrect deleted projects from the shared cache.
         sharedWorkspaceCacheEmpty.current = false;
-        persist(mergedYears, false);
+        if (JSON.stringify(mergedYears) !== JSON.stringify(yearsRef.current)) persist(mergedYears, false);
       } else if (yearsRef.current.some((year) => year.months?.some((month) => month.records?.length))) {
         sharedWorkspaceCacheEmpty.current = true;
         queueWorkspaceCacheSync(yearsRef.current);
@@ -2505,12 +2572,27 @@ export default function Home() {
       }
     } catch {
       // The per-device cache remains usable when the shared cache is offline.
+    } finally {
+      driveRequestsInFlight.current.delete(requestKey);
     }
   };
 
   useEffect(() => {
     if (!workspaceStorageReady || isCustomerPortal || !driveScriptUrl.trim()) return;
-    void loadWorkspaceCache();
+    const refresh = () => {
+      if (document.visibilityState === "visible" && navigator.onLine !== false) void loadWorkspaceCache();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 10_000);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("online", refresh);
+    };
   }, [workspaceStorageReady, driveScriptUrl, isCustomerPortal]);
 
   const workflowFilesCacheKey = (folder: string, location = selectedCustomerLocation) => location ? `${location.year}-${location.month}-${location.record.projectId}-${folder}` : "";
@@ -2607,12 +2689,15 @@ export default function Home() {
     : "customer-messages:all";
   const loadCustomerMessages = async (location?: CustomerLocation | null, refresh = false) => {
     const cacheKey = customerMessagesCacheKey(location);
+    const requestKey = `customer-messages:${cacheKey}`;
+    if (driveRequestsInFlight.current.has(requestKey)) return;
     const cached = readDriveCache<CustomerMessageGroup[]>(cacheKey, 10 * 60 * 1000);
     if (cached && !refresh) {
       setCustomerMessages(cached.map(normalizeCustomerMessageGroup));
       setCustomerMessagesError("");
     }
     if (!driveScriptUrl.trim()) return;
+    driveRequestsInFlight.current.add(requestKey);
     setLoadingCustomerMessages(!cached || refresh);
     setCustomerMessagesError("");
     // The Bùi Đức Thành test conversation has no customer folder. Do not
@@ -2644,6 +2729,7 @@ export default function Home() {
     } catch (error) {
       if (!cached) setCustomerMessagesError(error instanceof Error ? error.message : "Không thể nạp Tin nhắn khách.");
     } finally {
+      driveRequestsInFlight.current.delete(requestKey);
       setLoadingCustomerMessages(false);
     }
   };
@@ -2784,7 +2870,7 @@ export default function Home() {
       content: "",
       dueDate: "",
       actualDate: "",
-      creatorEmail: loggedInEmployee.email,
+      creatorEmail: loggedInEmployeeEmail,
       creatorName: loggedInEmployee.name,
       assigneeEmail: "",
       status: "Đen",
@@ -2979,10 +3065,13 @@ export default function Home() {
     const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
     return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
   };
-  const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false) => {
+  const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false, quietly = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const requestedLocation = selectedCustomerLocation;
+    const viewedSnapshotAtStart = documentViewContext.current.snapshotId;
     const requestedSnapshotId = snapshotId || "";
     const cacheKey = documentCacheKey(requestedSnapshotId);
+    const requestKey = `document-list:${cacheKey}`;
     const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
@@ -2992,11 +3081,12 @@ export default function Home() {
       if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: files }));
       setSelectedDocumentSnapshotId(activeId);
       setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => activateLatest ? activeId : current || activeId);
+      setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
       return;
     }
-    setLoadingDocuments(true);
-    setDocumentsError("");
+    if (driveRequestsInFlight.current.has(requestKey)) return;
+    driveRequestsInFlight.current.add(requestKey);
+    if (!quietly) { setLoadingDocuments(true); setDocumentsError(""); }
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "list-documents",
@@ -3008,22 +3098,26 @@ export default function Home() {
         refresh,
       });
       if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
+      const currentView = documentViewContext.current;
+      if (currentView.projectId !== requestedLocation.record.projectId || currentView.year !== requestedLocation.year || currentView.month !== requestedLocation.month || (quietly && currentView.snapshotId !== viewedSnapshotAtStart)) return;
       const activeId = requestedSnapshotId || result.activeSnapshotId || "";
       const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
       writeDriveCache(cacheKey, next);
       if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
       setDocumentSnapshots(next.snapshots);
+      setDocumentsError("");
       setDocumentFiles(next.files);
       if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: next.files }));
       setSelectedDocumentSnapshotId(activeId);
       setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => activateLatest ? activeId : current || activeId);
+      setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
-      if (!cached) setDocumentsError(message);
-      if (refresh) setNotice(message);
+      if (!cached && !quietly) setDocumentsError(message);
+      if (refresh && !quietly) setNotice(message);
     } finally {
-      setLoadingDocuments(false);
+      driveRequestsInFlight.current.delete(requestKey);
+      if (!quietly) setLoadingDocuments(false);
     }
   };
 
@@ -3220,6 +3314,23 @@ export default function Home() {
       void loadThreeDLibrary();
     }
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
+
+  useEffect(() => {
+    if (activeFolder !== "Tài liệu" || !selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const refreshLatest = () => {
+      if (document.visibilityState !== "visible" || navigator.onLine === false || documentSnapshotActionId || loadingDocuments) return;
+      // Older days remain strictly on demand; only the visible newest day is
+      // refreshed. Background metadata updates never collapse a loaded day.
+      if (selectedDocumentSnapshotId && documentSnapshots[0]?.id !== selectedDocumentSnapshotId) return;
+      void loadDocuments(undefined, true, false, true);
+    };
+    refreshLatest();
+    const timer = window.setInterval(refreshLatest, 20_000);
+    document.addEventListener("visibilitychange", refreshLatest);
+    window.addEventListener("focus", refreshLatest);
+    window.addEventListener("online", refreshLatest);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refreshLatest); window.removeEventListener("focus", refreshLatest); window.removeEventListener("online", refreshLatest); };
+  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, selectedDocumentSnapshotId, documentSnapshotActionId]);
 
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim();
@@ -3969,7 +4080,7 @@ export default function Home() {
   const personnelNames = useMemo(() => Array.from(new Set(Object.values(personnelByCategory).flat().map((member) => member.name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, "vi")), [personnelByCategory]);
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
   const assignablePersonnel = useMemo(() => allPersonnel.filter((member) => member.status === "Có" && (member.email || member.id)).sort((left, right) => left.name.localeCompare(right.name, "vi")), [allPersonnel]);
-  const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && member.email === loggedInEmployeeEmail) ?? null;
+  const loggedInEmployee = loggedInEmployeeEmail === builtInAdminAccount ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && personnelAssignmentKey(member).toLowerCase() === loggedInEmployeeEmail.toLowerCase()) ?? null;
   const loggedInEmployeeAssignmentKey = loggedInEmployee ? personnelAssignmentKey(loggedInEmployee) : loggedInEmployeeEmail;
   const loggedInEmployeeLegacyAssignmentKey = personnelLegacyAssignmentKey(loggedInEmployee);
   const isAssignedToLoggedInEmployee = (assignmentKey: string) => {
@@ -3993,6 +4104,9 @@ export default function Home() {
     if (!canViewNotesSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedWorkNotes([]); return; }
     let cancelled = false;
     const loadAssignments = async () => {
+      const requestKey = `assigned-work-notes:${loggedInEmployeeEmail}`;
+      if (cancelled || navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop) || driveRequestsInFlight.current.has(requestKey)) return;
+      driveRequestsInFlight.current.add(requestKey);
       try {
         const { response, result } = await postToAppsScript<{ ok?: boolean; notes?: AssignedWorkNote[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-work-notes", email: loggedInEmployeeEmail });
         if (!response.ok || !result.ok || !Array.isArray(result.notes) || cancelled) return;
@@ -4031,11 +4145,16 @@ export default function Home() {
           }
         }
       } catch { /* The next poll retries while the app remains usable offline. */ }
+      finally { driveRequestsInFlight.current.delete(requestKey); }
     };
     void loadAssignments();
     const timer = window.setInterval(() => { void loadAssignments(); }, 10 * 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [activeFolder, canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerLocation]);
+    const refresh = () => { void loadAssignments(); };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+  }, [activeFolder, canViewNotesSummary, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerProjectId, selectedYear, selectedMonth]);
   useEffect(() => {
     if (!canViewCustomerMessages || !driveScriptUrl.trim()) {
       setCustomerMessages([]);
@@ -4043,14 +4162,17 @@ export default function Home() {
       return;
     }
     const refresh = () => {
-      if (document.visibilityState !== "visible") return;
+      if (navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop)) return;
       // Keep the background feed global so an employee does not miss a new
       // customer message while viewing another customer's workflow.
       void loadCustomerMessages();
     };
     refresh();
-    const timer = window.setInterval(refresh, 60 * 1000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(refresh, 30 * 1000);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [canViewCustomerMessages, driveScriptUrl, selectedCustomerProjectId, customerLocations.length]);
   useEffect(() => {
     if (!canViewCustomerMessages || !driveScriptUrl.trim() || !customerMessages.length) return;
@@ -4081,6 +4203,9 @@ export default function Home() {
     if (!canViewDesignSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedDesignTasks([]); return; }
     let cancelled = false;
     const loadDesignAssignments = async () => {
+      const requestKey = `assigned-design-tasks:${loggedInEmployeeEmail}`;
+      if (cancelled || navigator.onLine === false || (document.visibilityState !== "visible" && !desktopBridge()?.isDesktop) || driveRequestsInFlight.current.has(requestKey)) return;
+      driveRequestsInFlight.current.add(requestKey);
       try {
         const { response, result } = await postToAppsScript<{ ok?: boolean; tasks?: AssignedDesignTask[] }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-assigned-design-tasks", email: loggedInEmployeeEmail });
         if (!response.ok || !result.ok || !Array.isArray(result.tasks) || cancelled) return;
@@ -4106,10 +4231,15 @@ export default function Home() {
           }
         }
       } catch { /* Retry on the next poll without blocking the design page. */ }
+      finally { driveRequestsInFlight.current.delete(requestKey); }
     };
     void loadDesignAssignments();
     const timer = window.setInterval(() => { void loadDesignAssignments(); }, 10 * 1000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+    const refresh = () => { void loadDesignAssignments(); };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [canViewDesignSummary, driveScriptUrl, loggedInEmployeeEmail]);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
     if (typeof window === "undefined") return [];
@@ -4178,14 +4308,14 @@ export default function Home() {
     const member: PersonnelMember = { id: editingPersonnelId ?? `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate), phone: normalizePersonnelPhone(personnelDraft.phone) };
     const nextMembers = editingPersonnelId ? selectedPersonnel.map((item) => item.id === editingPersonnelId ? member : item) : [...selectedPersonnel, member];
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: nextMembers });
-    setPersonnelDraft({ status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+    setPersonnelDraft({ status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
     setEditingPersonnelId(null);
     setPersonnelAddOpen(false);
     setNotice(editingPersonnelId ? `Đã cập nhật ${member.name}.` : `Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
   };
   const openPersonnelEditor = (member?: PersonnelMember) => {
     setEditingPersonnelId(member?.id ?? null);
-    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, email: member.email ?? "", birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, permissions: member.permissions ?? [], address: member.address } : { status: "Có", name: "", email: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, email: member.email ?? "", loginCode: member.loginCode ?? "", birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, permissions: member.permissions ?? [], address: member.address } : { status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
     setPersonnelMenuId(null);
     setPersonnelAddOpen(true);
   };
@@ -4198,13 +4328,70 @@ export default function Home() {
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: selectedPersonnel.filter((member) => member.id !== memberId) });
     setPersonnelMenuId(null);
   };
+  const selectLocalWorkspace = async () => {
+    setChoosingWorkspace(true);
+    setEmployeeLoginError("");
+    try {
+      const desktop = desktopBridge();
+      if (desktop?.selectWorkspaceFolder) {
+        const result = await desktop.selectWorkspaceFolder();
+        if (result.canceled) return;
+        if (!result.ok) throw new Error(result.error || "Thư mục GM Manager không hợp lệ.");
+        setLocalWorkspacePath(result.path);
+        return;
+      }
+      const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "read"; id: string }) => Promise<LocalDirectoryHandle> }).showDirectoryPicker;
+      if (!picker) throw new Error("Chọn thư mục cần Chrome, Edge hoặc bản cài GM Manager trên PC.");
+      const handle = await verifyBrowserWorkspace(await picker({ mode: "read", id: "gm-manager-root" }));
+      browserWorkspaceHandle.current = handle;
+      try { await storedWorkspaceDirectory(handle); } catch { /* This login can still use the selected handle. */ }
+      setLocalWorkspacePath(handle.name);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) setEmployeeLoginError(error instanceof Error ? error.message : "Không thể kiểm tra thư mục.");
+    } finally { setChoosingWorkspace(false); }
+  };
+
+  const verifyLocalWorkspace = async () => {
+    if (isMobileDevice()) return;
+    const desktop = desktopBridge();
+    if (desktop?.validateWorkspaceFolder) {
+      const result = await desktop.validateWorkspaceFolder(localWorkspacePath ? { path: localWorkspacePath } : {});
+      if (!result.ok) throw new Error(result.error || "Hãy chọn thư mục GM Manager trước khi đăng nhập.");
+      setLocalWorkspacePath(result.path);
+      return;
+    }
+    const handle = browserWorkspaceHandle.current || await storedWorkspaceDirectory();
+    if (!handle) throw new Error("Hãy chọn thư mục GM Manager trước khi đăng nhập.");
+    let permission = await handle.queryPermission?.({ mode: "read" });
+    if (permission !== "granted" && handle.requestPermission) permission = await handle.requestPermission({ mode: "read" });
+    if (permission !== "granted") throw new Error("Cần cho phép đọc thư mục GM Manager đã chọn.");
+    browserWorkspaceHandle.current = await verifyBrowserWorkspace(handle);
+    setLocalWorkspacePath(handle.name);
+  };
+
+  useEffect(() => {
+    if (!loginOpen || isMobileDevice()) return;
+    let canceled = false;
+    void (async () => {
+      try {
+        const desktop = desktopBridge();
+        if (desktop?.validateWorkspaceFolder) {
+          const result = await desktop.validateWorkspaceFolder();
+          if (!canceled && result.ok) setLocalWorkspacePath(result.path);
+        } else {
+          const handle = await storedWorkspaceDirectory();
+          if (handle && !canceled) { browserWorkspaceHandle.current = handle; setLocalWorkspacePath(handle.name); }
+        }
+      } catch { /* A fresh selection remains available. */ }
+    })();
+    return () => { canceled = true; };
+  }, [loginOpen]);
+
   const finishEmployeeLogin = (member: PersonnelMember, account: string) => {
-    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* The session remains open in this browser tab. */ }
+    try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* Keep this session open in memory. */ }
     setLoggedInEmployeeEmail(account);
     setEmployeeLoginPassword("");
-    setEmployeeResetCode("");
     setEmployeeLoginError("");
-    setEmployeeAuthMode("login");
     setLoginOpen(false);
     const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
     if (allowedFolders.length) setActiveFolder(allowedFolders[0]);
@@ -4212,87 +4399,27 @@ export default function Home() {
   };
   const loginEmployee = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const account = employeeLoginEmail.trim().toLowerCase();
-    const isBuiltInAdmin = account === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword;
-    const member = isBuiltInAdmin ? builtInAdminPersonnel : allPersonnel.find((personnel) => personnel.status === "Có" && personnel.email === account);
-    if (!member) {
-      setEmployeeLoginError(account === builtInAdminAccount ? "Mật khẩu quản trị không đúng." : "Email này chưa có tài khoản hoạt động trong danh sách Nhân lực.");
-      return;
-    }
-    if (isBuiltInAdmin) { finishEmployeeLogin(member, account); return; }
-    if (!employeeLoginPassword) { setEmployeeLoginError("Hãy nhập mật khẩu."); return; }
-    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script trước khi đăng nhập nhân viên."); return; }
     setEmployeeAuthBusy(true);
     setEmployeeLoginError("");
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; valid?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "verify-employee-login", email: account, password: employeeLoginPassword });
-      if (!response.ok || !result.ok || !result.valid) throw new Error("Email hoặc mật khẩu không đúng. Nếu chưa có tài khoản, hãy chọn Tạo tài khoản.");
-      finishEmployeeLogin(member, account);
+      await verifyLocalWorkspace();
+      if (employeeNameKey(employeeLoginEmail) === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword) {
+        finishEmployeeLogin(builtInAdminPersonnel, builtInAdminAccount);
+        return;
+      }
+      // Refresh the shared roster, so a code changed by an administrator takes
+      // effect on this device without relying on an old cached roster.
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]> }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" });
+      if (!response.ok || !result.ok || !result.personnel) throw new Error(result.error || "Chưa thể xác thực danh sách Nhân lực. Hãy kiểm tra kết nối mạng.");
+      const roster = normalizePersonnelMap(result.personnel);
+      const member = employeeByLoginCode(Object.values(roster).flat(), employeeLoginEmail, employeeLoginPassword);
+      if (!member) throw new Error("Tên nhân viên hoặc mã đăng nhập không đúng, tài khoản đã ngưng hoặc thông tin bị trùng. Hãy kiểm tra với quản lý.");
+      setPersonnelByCategory(roster);
+      try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(roster)); } catch { /* Session remains available. */ }
+      finishEmployeeLogin(member, personnelAssignmentKey(member));
     } catch (error) {
-      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể xác thực tài khoản.");
-    } finally {
-      setEmployeeAuthBusy(false);
-    }
-  };
-  const registerEmployeeAccount = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const email = employeeLoginEmail.trim().toLowerCase();
-    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script trước khi tạo tài khoản."); return; }
-    if (email === builtInAdminAccount) { setEmployeeLoginError("Tài khoản admin không thể đăng ký lại."); return; }
-    if (employeeLoginPassword.length < 6) { setEmployeeLoginError("Mật khẩu cần tối thiểu 6 ký tự."); return; }
-    setEmployeeAuthBusy(true);
-    setEmployeeLoginError("");
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "register-employee-account", email, password: employeeLoginPassword });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo tài khoản.");
-      setEmployeeLoginPassword("");
-      setEmployeeAuthMode("login");
-      setNotice("Đã tạo tài khoản. Bạn có thể đăng nhập bằng email và mật khẩu vừa đặt.");
-    } catch (error) {
-      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể tạo tài khoản.");
-    } finally {
-      setEmployeeAuthBusy(false);
-    }
-  };
-  const requestEmployeePasswordReset = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const email = employeeLoginEmail.trim().toLowerCase();
-    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script để gửi mã qua email."); return; }
-    setEmployeeAuthBusy(true);
-    setEmployeeLoginError("");
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; message?: string; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "request-password-reset", email });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể gửi mã xác nhận.");
-      setEmployeeResetCode("");
-      setEmployeeLoginPassword("");
-      setEmployeeAuthMode("reset-confirm");
-      setNotice(result.message || "Mã xác nhận đã được gửi về email nếu tài khoản tồn tại.");
-    } catch (error) {
-      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể gửi mã xác nhận.");
-    } finally {
-      setEmployeeAuthBusy(false);
-    }
-  };
-  const resetEmployeePassword = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const email = employeeLoginEmail.trim().toLowerCase();
-    if (employeeResetCode.replace(/\D/g, "").length !== 6) { setEmployeeLoginError("Hãy nhập mã gồm 6 chữ số trong email."); return; }
-    if (employeeLoginPassword.length < 6) { setEmployeeLoginError("Mật khẩu mới cần tối thiểu 6 ký tự."); return; }
-    if (!driveScriptUrl.trim()) { setEmployeeLoginError("Cần kết nối Google Apps Script để đặt lại mật khẩu."); return; }
-    setEmployeeAuthBusy(true);
-    setEmployeeLoginError("");
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "reset-employee-password", email, code: employeeResetCode, password: employeeLoginPassword });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đặt lại mật khẩu.");
-      setEmployeeLoginPassword("");
-      setEmployeeResetCode("");
-      setEmployeeAuthMode("login");
-      setNotice("Đã đặt lại mật khẩu. Bạn có thể đăng nhập ngay.");
-    } catch (error) {
-      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể đặt lại mật khẩu.");
-    } finally {
-      setEmployeeAuthBusy(false);
-    }
+      setEmployeeLoginError(error instanceof Error ? error.message : "Không thể đăng nhập.");
+    } finally { setEmployeeAuthBusy(false); }
   };
   const logoutEmployee = () => {
     try { window.localStorage.removeItem(personnelSessionEmailKey); } catch { /* Optional device session cleanup. */ }
@@ -4309,9 +4436,13 @@ export default function Home() {
     const needsPersonnel = personnelView || loginOpen || Boolean(loggedInEmployeeEmail) || activeFolder === "Ghi chú" || activeFolder === "Thiết kế" || activeFolder === "Bảo hành";
     if (!needsPersonnel || !driveScriptUrl.trim()) return;
     let cancelled = false;
-    const loadRevision = ++personnelLoadRevision.current;
-    setLoadingPersonnel(true);
-    void postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]>; source?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
+    const refreshPersonnel = async (quietly = true) => {
+      const requestKey = "shared-personnel-cache";
+      if (cancelled || navigator.onLine === false || document.visibilityState !== "visible" || personnelAddOpen || editingPersonnelId || pendingPersonnelCache.current || driveRequestsInFlight.current.has(requestKey)) return;
+      driveRequestsInFlight.current.add(requestKey);
+      const loadRevision = ++personnelLoadRevision.current;
+      if (!quietly) setLoadingPersonnel(true);
+      await postToAppsScript<{ ok?: boolean; error?: string; personnel?: Record<string, PersonnelMember[]>; source?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "load-personnel" }).then(({ response, result }) => {
       if (!response.ok || !result.ok || cancelled || loadRevision !== personnelLoadRevision.current) return;
       let next = normalizePersonnelMap(result.personnel ?? {});
       if (pendingPersonnelCache.current) next = pendingPersonnelCache.current;
@@ -4329,11 +4460,18 @@ export default function Home() {
           }
         } catch { /* A malformed local cache is ignored. */ }
       }
-      setPersonnelByCategory(next);
+      setPersonnelByCategory((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(next)); } catch { /* Local cache is optional. */ }
-    }).catch(() => undefined).finally(() => { if (!cancelled) setLoadingPersonnel(false); });
-    return () => { cancelled = true; };
-  }, [personnelView, activeFolder, driveScriptUrl, loginOpen, loggedInEmployeeEmail]);
+      }).catch(() => undefined).finally(() => { driveRequestsInFlight.current.delete(requestKey); if (!cancelled && !quietly) setLoadingPersonnel(false); });
+    };
+    void refreshPersonnel(false);
+    const refresh = () => { void refreshPersonnel(); };
+    const timer = window.setInterval(refresh, 10_000);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+  }, [personnelView, activeFolder, driveScriptUrl, loginOpen, loggedInEmployeeEmail, personnelAddOpen, editingPersonnelId]);
   useEffect(() => {
     if (activeFolder !== "Ghi chú" || !selectedCustomerLocation) return;
     loadWorkNotes();
@@ -4531,7 +4669,7 @@ export default function Home() {
               {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
                 : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
                 : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} title={desktopBridge()?.isDesktop && desktopBridge()?.openFile ? "Mở tệp trong thư mục Google Drive trên máy tính" : isWindowsDesktop() && window.matchMedia("(display-mode: standalone)").matches ? "Mở tệp trong ổ I của shortcut GM Manager" : "Mở tệp trên Google Drive"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} title={isMobileDevice() ? "Mở bằng ứng dụng đọc tài liệu trên điện thoại" : "Mở thư mục chứa tài liệu trên máy tính"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
         }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
@@ -4682,15 +4820,19 @@ export default function Home() {
     <div className="sidebar-summary-heading"><button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages}>
       <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span>
     </button><button type="button" className="sidebar-summary-collapse" aria-label={sidebarMessagesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} aria-expanded={sidebarMessagesOpen} onClick={() => setSidebarMessagesOpen((isOpen) => !isOpen)}>{sidebarMessagesOpen ? "⌃" : "⌄"}</button></div>
-    {sidebarMessagesOpen && <div className="sidebar-notes__list">
+    <div className="sidebar-notes__list" hidden={!sidebarMessagesOpen}>
       {loadingCustomerMessages && !customerMessages.length ? <p className="sidebar-notes__empty">Đang nạp Tin nhắn khách…</p>
         : customerMessagesError && !customerMessages.length ? <p className="sidebar-notes__empty">{customerMessagesError}</p>
-          : customerMessages.length ? customerMessages.slice().sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => (
-            <button type="button" className={"sidebar-note customer-message-summary__item " + messageStatusClass(message.status)} key={message.id} onClick={() => openCustomerMessage(message)}>
-              <i className={message.status === "processing" ? "sidebar-notes__dot--blue" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.customerName || message.houseId || message.groupName}</b><small>{message.groupName} · {message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
-            </button>
-          )) : <p className="sidebar-notes__empty">Chưa có tin nhắn khách phù hợp.</p>}
-    </div>}
+          : customerMessages.length ? groupSidebarItems(customerMessages.slice().sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)), (message) => message.projectId ? `project:${message.projectId}` : message.houseId ? `house:${customerMessageHouseKey(message.houseId)}` : `conversation:${message.conversationId || message.groupName || message.id}`).map(({ key, items }) => {
+            const first = items[0];
+            const status = items.some((message) => message.status === "new") ? "new" : items.some((message) => message.status === "processing") ? "processing" : "resolved";
+            return <SidebarCustomerGroup key={key} title={first.customerName || first.houseId || first.groupName} subtitle={`${first.houseId ? `${first.houseId} · ` : ""}${items.length} nhóm tin`} count={items.reduce((total, message) => total + message.messageCount, 0)} countLabel="tin nhắn" dotClass={status === "processing" ? "sidebar-notes__dot--blue" : status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} stateClass={`customer-message-summary__item ${messageStatusClass(status)}`}>
+              {items.map((message) => <button type="button" className={"sidebar-note customer-message-summary__item " + messageStatusClass(message.status)} key={message.id} onClick={() => openCustomerMessage(message)}>
+                <i className={message.status === "processing" ? "sidebar-notes__dot--blue" : message.status === "resolved" ? "sidebar-notes__dot--green" : "sidebar-notes__dot--red"} aria-hidden="true" /><span><b>{message.groupName}</b><small>{message.messageCount} tin · {customerMessageDate(message.lastMessageAt)}</small></span>
+              </button>)}
+            </SidebarCustomerGroup>;
+          }) : <p className="sidebar-notes__empty">Chưa có tin nhắn khách phù hợp.</p>}
+    </div>
   </section>;
   const renderCustomerMessages = () => {
     const visibleMessages = selectedCustomerLocation
@@ -4716,22 +4858,24 @@ export default function Home() {
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
       <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
     </button>
-    {sidebarNotesOpen && <div className="sidebar-notes__list">
-      {outstandingSidebarNotes.length ? outstandingSidebarNotes.map(({ note, location }) => {
+    <div className="sidebar-notes__list" hidden={!sidebarNotesOpen}>
+      {outstandingSidebarNotes.length ? groupSidebarItems(outstandingSidebarNotes, ({ location }) => `${location.year}-${location.month}-${location.record.projectId}`).map(({ key, items }) => <SidebarCustomerGroup key={key} title={customerDisplayName(items[0].location.record)} subtitle={`${items[0].location.record.houseId ? `${items[0].location.record.houseId} · ` : ""}T${items[0].location.month}/${items[0].location.year}`} count={items.length} countLabel="công việc" stateClass={items.some(({ note }) => isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt) ? "sidebar-note--assignment-pending" : ""}>
+      {items.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
         return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
           <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {customerDisplayName(location.record)} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
-      }) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
-    </div>}
+      })}</SidebarCustomerGroup>) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
+    </div>
   </section> : null;
 
   const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarDesignOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế chưa hoàn thiện">
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarDesignOpen((isOpen) => !isOpen)} aria-expanded={sidebarDesignOpen}>
       <span><b>Thiết kế chưa hoàn thiện</b><small>{assignedDesignTasks.length} hạng mục · tất cả khách hàng</small></span><em>{sidebarDesignOpen ? "⌃" : "⌄"}</em>
     </button>
-    {sidebarDesignOpen && <div className="sidebar-notes__list">
-      {assignedDesignTasks.length ? assignedDesignTasks.slice().sort((left, right) => (parseDesignDate(left.plannedDate)?.dayNumber ?? Infinity) - (parseDesignDate(right.plannedDate)?.dayNumber ?? Infinity)).map((task) => {
+    <div className="sidebar-notes__list" hidden={!sidebarDesignOpen}>
+      {assignedDesignTasks.length ? groupSidebarItems(assignedDesignTasks.slice().sort((left, right) => (parseDesignDate(left.plannedDate)?.dayNumber ?? Infinity) - (parseDesignDate(right.plannedDate)?.dayNumber ?? Infinity)), (task) => `${task.year}-${task.month}-${task.projectId}`).map(({ key, items }) => <SidebarCustomerGroup key={key} title={items[0].customerName || items[0].houseId || "Khách hàng"} subtitle={`${items[0].houseId ? `${items[0].houseId} · ` : ""}T${items[0].month}/${items[0].year}`} count={items.length} countLabel="hạng mục thiết kế" stateClass={items.some((task) => isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt) ? "sidebar-note--assignment-pending" : ""}>
+      {items.map((task) => {
         const status = designTaskStatus(task);
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[status];
         return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${task.year}-${task.month}-${task.projectId}-${task.kind}-${task.id}`} onClick={() => {
@@ -4746,8 +4890,8 @@ export default function Home() {
         }}>
           <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.houseId || "Khách hàng"} · Dự kiến {task.plannedDate || "—"}</small></span>
         </button>;
-      }) : <p className="sidebar-notes__empty">Không có hạng mục thiết kế đang chờ.</p>}
-    </div>}
+      })}</SidebarCustomerGroup>) : <p className="sidebar-notes__empty">Không có hạng mục thiết kế đang chờ.</p>}
+    </div>
   </section> : null;
 
   return (
@@ -4761,8 +4905,7 @@ export default function Home() {
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
-              <button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button>
-              <button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button>
+              {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={() => setDriveConfigOpen(true)}>⚙ Thiết lập</button>}
             </div>
           </header>
 
@@ -4790,7 +4933,8 @@ export default function Home() {
                   {personnelAddOpen && <form className="personnel-add-form" onSubmit={savePersonnel}>
                     <label>Hoạt động<select value={personnelDraft.status} onChange={(event) => setPersonnelDraft({ ...personnelDraft, status: event.target.value as PersonnelStatus })}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
                     <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
-                    <label>Email<input type="email" value={personnelDraft.email} onChange={(event) => setPersonnelDraft({ ...personnelDraft, email: event.target.value.trim().toLowerCase() })} placeholder="ten@congty.com" required={!editingPersonnelId} /></label>
+                    <label>Email<input type="email" value={personnelDraft.email} onChange={(event) => setPersonnelDraft({ ...personnelDraft, email: event.target.value.trim().toLowerCase() })} placeholder="ten@congty.com" /></label>
+                    <label>Mã đăng nhập<input value={personnelDraft.loginCode ?? ""} onChange={(event) => setPersonnelDraft({ ...personnelDraft, loginCode: event.target.value })} placeholder="Nhập mã do quản lý cấp" autoComplete="off" required /></label>
                     <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="dd/mm/yyyy" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
                     <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
                     <label>Chức vụ<select value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} required={!editingPersonnelId}><option value="">Chọn chức vụ</option>{personnelRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
@@ -4798,7 +4942,7 @@ export default function Home() {
                     <label>Địa chỉ<input value={personnelDraft.address} onChange={(event) => setPersonnelDraft({ ...personnelDraft, address: event.target.value })} /></label>
                     <div><button type="button" className="personnel-back" onClick={() => { setPersonnelAddOpen(false); setEditingPersonnelId(null); }}>Hủy</button><button className="add-button" type="submit">{editingPersonnelId ? "Lưu thay đổi" : "Lưu nhân lực"}</button></div>
                   </form>}
-                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Hoạt động</th><th>Họ và tên</th><th>Email</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Quyền</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><div className={`personnel-status personnel-status--${member.status === "Có" ? "active" : member.status === "Không" ? "inactive" : "paused"}`}><span className="personnel-status__figure" aria-hidden="true" /><select value={member.status ?? "Có"} onChange={(event) => updatePersonnelStatus(member.id, event.target.value as PersonnelStatus)} aria-label={`Hoạt động của ${member.name}`}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div></td><td><b>{member.name}</b></td><td>{member.email || "—"}</td><td>{member.birthDate || "—"}</td><td>{normalizePersonnelPhone(member.phone) || "—"}</td><td>{member.role || "—"}</td><td>{member.permissions.length ? member.permissions.join(", ") : "—"}</td><td>{member.address || "—"}</td><td className="personnel-row-actions"><button type="button" className="personnel-more" onClick={() => setPersonnelMenuId(personnelMenuId === member.id ? null : member.id)} aria-label={`Tùy chọn ${member.name}`}>…</button>{personnelMenuId === member.id && <div className="personnel-row-menu"><button type="button" onClick={() => openPersonnelEditor(member)}>Thay đổi</button><button type="button" className="personnel-row-menu__delete" onClick={() => removePersonnel(member.id)}>Xóa</button></div>}</td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
+                  {visiblePersonnel.length ? <div className="personnel-table-wrap"><table className="personnel-table"><thead><tr><th>Hoạt động</th><th>Họ và tên</th><th>Email</th><th>Mã đăng nhập</th><th>Ngày sinh</th><th>Số điện thoại</th><th>Chức vụ</th><th>Quyền</th><th>Địa chỉ</th><th /></tr></thead><tbody>{visiblePersonnel.map((member) => <tr key={member.id}><td><div className={`personnel-status personnel-status--${member.status === "Có" ? "active" : member.status === "Không" ? "inactive" : "paused"}`}><span className="personnel-status__figure" aria-hidden="true" /><select value={member.status ?? "Có"} onChange={(event) => updatePersonnelStatus(member.id, event.target.value as PersonnelStatus)} aria-label={`Hoạt động của ${member.name}`}>{personnelStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></div></td><td><b>{member.name}</b></td><td>{member.email || "—"}</td><td className="personnel-login-code">{member.loginCode || "Chưa cấp"}</td><td>{member.birthDate || "—"}</td><td>{normalizePersonnelPhone(member.phone) || "—"}</td><td>{member.role || "—"}</td><td>{member.permissions.length ? member.permissions.join(", ") : "—"}</td><td>{member.address || "—"}</td><td className="personnel-row-actions"><button type="button" className="personnel-more" onClick={() => setPersonnelMenuId(personnelMenuId === member.id ? null : member.id)} aria-label={`Tùy chọn ${member.name}`}>…</button>{personnelMenuId === member.id && <div className="personnel-row-menu"><button type="button" onClick={() => openPersonnelEditor(member)}>Thay đổi</button><button type="button" className="personnel-row-menu__delete" onClick={() => removePersonnel(member.id)}>Xóa</button></div>}</td></tr>)}</tbody></table></div> : !personnelAddOpen && <div className="customer-search-empty"><span>{selectedPersonnelCategory?.icon}</span><p>{loadingPersonnel ? "Đang nạp danh sách nhân lực…" : <>Chưa có dữ liệu trong nhóm <b>{selectedPersonnelCategory?.label}</b>.</>}</p></div>}
                 </div>
               </section>
             </div>
@@ -4877,7 +5021,7 @@ export default function Home() {
             {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← Tổng quan</button><span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span>/</span>{activeFolder}</span>
           </div>
-          <div className="topbar__actions">{renderUpdateAction()}<button className={`drive-status ${isDriveConnected ? "drive-status--connected" : ""}`} onClick={() => setDriveConfigOpen(true)}><i /> {isDriveConnected ? "Drive đã kết nối" : "Kết nối Drive"}</button><button className={`reload-drive ${driveRefreshAvailable ? "reload-drive--available" : ""}`.trim()} onClick={() => void refreshDriveNow()} disabled={isLoadingDrive} title={driveRefreshAvailable ? "Drive có dữ liệu mới. Nhấn để nạp lại." : "Nạp lại dữ liệu từ Drive"}>{isLoadingDrive ? "Đang nạp…" : "Nạp lại Drive"}</button></div>
+          <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={() => setDriveConfigOpen(true)}>⚙ Thiết lập</button>}</div>
         </header>
 
         {!hasActiveFolderAccess ? (
@@ -5065,17 +5209,16 @@ export default function Home() {
       )}
 
       {loginOpen && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setLoginOpen(false)}>
-          <form className="add-dialog login-dialog" onSubmit={employeeAuthMode === "login" ? loginEmployee : employeeAuthMode === "register" ? registerEmployeeAccount : employeeAuthMode === "reset-request" ? requestEmployeePasswordReset : resetEmployeePassword} onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="dialog-close" onClick={() => setLoginOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Tài khoản nhân viên</p><h2>{employeeAuthMode === "login" ? "Đăng nhập" : employeeAuthMode === "register" ? "Tạo tài khoản" : employeeAuthMode === "reset-request" ? "Quên mật khẩu" : "Đặt lại mật khẩu"}</h2>
-            {employeeAuthMode !== "login" && <p>{employeeAuthMode === "register" ? "Chỉ email nhân viên đang hoạt động trong danh sách Nhân lực mới tạo được tài khoản." : employeeAuthMode === "reset-request" ? "GM-CRM sẽ gửi mã gồm 6 số đến email tài khoản để bạn đặt lại mật khẩu." : "Nhập mã gồm 6 số đã nhận qua email và mật khẩu mới."}</p>}
-            <label>Tài khoản / Email<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="admin hoặc ten@congty.com" onChange={(event) => setEmployeeLoginEmail(event.target.value.trim().toLowerCase())} autoFocus required /></label>
-            {employeeAuthMode === "reset-confirm" && <label>Mã xác nhận<input value={employeeResetCode} maxLength={6} inputMode="numeric" autoComplete="one-time-code" placeholder="6 chữ số" onChange={(event) => setEmployeeResetCode(event.target.value.replace(/\D/g, ""))} required /></label>}
-            {employeeAuthMode !== "reset-request" && <label>{employeeAuthMode === "reset-confirm" ? "Mật khẩu mới" : "Mật khẩu"}<input type="password" value={employeeLoginPassword} autoComplete={employeeAuthMode === "register" ? "new-password" : employeeAuthMode === "reset-confirm" ? "new-password" : "current-password"} minLength={employeeAuthMode === "login" ? undefined : 6} placeholder={employeeAuthMode === "login" ? "Nhập mật khẩu" : "Tối thiểu 6 ký tự"} onChange={(event) => setEmployeeLoginPassword(event.target.value)} required /></label>}
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => !employeeAuthBusy && setLoginOpen(false)}>
+          <form className="add-dialog login-dialog" onSubmit={loginEmployee} onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => !employeeAuthBusy && setLoginOpen(false)} aria-label="Đóng">×</button>
+            <p className="eyebrow">Đội ngũ GM</p><h2>Đăng nhập</h2>
+            <p className="dialog-intro">Dùng tên và mã do quản lý cấp trong danh sách Nhân lực.</p>
+            <label>Tên nhân viên<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="Nhập đúng họ và tên" onChange={(event) => setEmployeeLoginEmail(event.target.value)} autoFocus required /></label>
+            <label>Mã đăng nhập<input type="password" value={employeeLoginPassword} autoComplete="current-password" placeholder="Mã trong danh sách Nhân lực" onChange={(event) => setEmployeeLoginPassword(event.target.value)} required /></label>
+            {!isMobileDevice() && <label className="workspace-location-field">Vị trí GM Manager<div><input value={localWorkspacePath} readOnly placeholder="Chọn thư mục hoặc ổ chứa GM Manager" aria-label="Vị trí GM Manager" /><button type="button" onClick={() => void selectLocalWorkspace()} disabled={choosingWorkspace || employeeAuthBusy}>{choosingWorkspace ? "Đang kiểm tra…" : "Chọn thư mục"}</button></div><small>Thư mục phải có Khách hàng và Nhân lực. Dùng bản cài PC để mở trực tiếp trong Explorer/Finder.</small></label>}
             {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
-            <div className="login-dialog__actions"><button className="add-button" type="submit" disabled={employeeAuthBusy}>{employeeAuthBusy ? "Đang xử lý…" : employeeAuthMode === "login" ? "Đăng nhập" : employeeAuthMode === "register" ? "Tạo tài khoản" : employeeAuthMode === "reset-request" ? "Gửi mã" : "Đặt lại mật khẩu"}</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
-            <div className="login-dialog__links">{employeeAuthMode === "login" ? <><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeAuthMode("register"); }}>Tạo tài khoản</button><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setEmployeeAuthMode("reset-request"); }}>Quên mật khẩu?</button></> : employeeAuthMode === "reset-confirm" ? <><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeAuthMode("reset-request"); }}>Gửi lại mã</button><button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeAuthMode("login"); }}>Quay lại đăng nhập</button></> : <button type="button" onClick={() => { setEmployeeLoginError(""); setEmployeeResetCode(""); setEmployeeAuthMode("login"); }}>Quay lại đăng nhập</button>}</div>
+            <div className="login-dialog__actions"><button className="add-button" type="submit" disabled={employeeAuthBusy || choosingWorkspace}>{employeeAuthBusy ? "Đang xác thực…" : "Đăng nhập"}</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
           </form>
         </div>
       )}

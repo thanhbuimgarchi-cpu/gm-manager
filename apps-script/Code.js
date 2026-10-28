@@ -2762,7 +2762,16 @@ const LEGACY_PERSONNEL_ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 
 function savePersonnelCache_(personnel) {
   const value = personnel && typeof personnel === "object" && !Array.isArray(personnel) ? personnel : {};
-  writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, value);
+  const normalized = {};
+  Object.keys(value).forEach(function(category) {
+    normalized[category] = (Array.isArray(value[category]) ? value[category] : []).map(function(member) {
+      if (!member || typeof member !== "object" || Array.isArray(member)) return member;
+      const result = Object.assign({}, member);
+      if (Object.prototype.hasOwnProperty.call(member, "loginCode")) result.loginCode = employeeLoginCode_(member.loginCode);
+      return result;
+    });
+  });
+  writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, normalized);
   return { ok: true, storage: "script-properties", savedAt: Date.now() };
 }
 
@@ -2781,6 +2790,7 @@ function personnelFromWorkbook_(file) {
   const addressColumn = column("Địa chỉ", 6);
   const idColumn = column("_ID", 7);
   const emailColumn = headers.indexOf("Email");
+  const loginCodeColumn = headers.indexOf("Mã đăng nhập");
   const permissionsColumn = headers.indexOf("Quyền");
   rows.slice(1).forEach(function(row, index) {
     const category = String(row[categoryColumn] || "").trim();
@@ -2792,6 +2802,7 @@ function personnelFromWorkbook_(file) {
       status: statusColumn >= 0 && ["Có", "Không", "Ngưng"].indexOf(String(row[statusColumn] || "")) >= 0 ? String(row[statusColumn]) : "Có",
       name: name,
       email: emailColumn >= 0 ? String(row[emailColumn] || "").trim().toLowerCase() : "",
+      loginCode: loginCodeColumn >= 0 ? employeeLoginCode_(row[loginCodeColumn]) : "",
       birthDate: normalizeExcelDate_(row[birthDateColumn]),
       phone: normalizePersonnelPhone_(row[phoneColumn]),
       role: String(row[roleColumn] || ""),
@@ -2845,7 +2856,7 @@ function syncPersonnelWorkbook_(personnel) {
     coordination: "Điều phối", management: "Ban quản lý", office: "Nhân viên văn phòng", site: "Nhân viên công trình",
     construction: "Nhân công xây dựng", workshop: "Nhân công xưởng", partner: "Đối tác",
   };
-  const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Email", "Ngày sinh", "Số điện thoại", "Chức vụ", "Quyền", "Địa chỉ", "_ID"]];
+  const rows = [["Nhóm ID", "Nhóm", "Hoạt động", "Họ và tên", "Email", "Mã đăng nhập", "Ngày sinh", "Số điện thoại", "Chức vụ", "Quyền", "Địa chỉ", "_ID"]];
   Object.keys(personnel || {}).forEach(function(category) {
     const members = Array.isArray(personnel[category]) ? personnel[category] : [];
     members.forEach(function(member) {
@@ -2853,20 +2864,25 @@ function syncPersonnelWorkbook_(personnel) {
       const status = ["Có", "Không", "Ngưng"].indexOf(String(member.status || "")) >= 0 ? String(member.status) : "Có";
       const email = String(member.email || "").trim().toLowerCase();
       const permissions = Array.isArray(member.permissions) ? member.permissions.map(function(value) { return String(value || "").trim(); }).filter(Boolean).join("|") : "";
-      rows.push([category, categoryLabels[category] || category, status, String(member.name || ""), email, String(member.birthDate || ""), normalizePersonnelPhone_(member.phone), String(member.role || ""), permissions, String(member.address || ""), String(member.id || "")]);
+      rows.push([category, categoryLabels[category] || category, status, String(member.name || ""), email, employeeLoginCode_(member.loginCode), String(member.birthDate || ""), normalizePersonnelPhone_(member.phone), String(member.role || ""), permissions, String(member.address || ""), String(member.id || "")]);
     });
   });
   const spreadsheet = SpreadsheetApp.create("GM-CRM nhân lực temporary");
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Nhân lực");
-    sheet.getRange(1, 1, rows.length, 11).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
-    sheet.getRange(1, 1, 1, 11).setFontWeight("bold").setBackground("#eee9e2");
-    if (rows.length > 1) sheet.getRange(2, 7, rows.length - 1, 1).setNumberFormat("@");
+    if (rows.length > 1) {
+      // Apply text formatting before the values, so login codes such as
+      // 00123 and phone numbers keep their leading zero in the exported XLSX.
+      sheet.getRange(2, 6, rows.length - 1, 1).setNumberFormat("@");
+      sheet.getRange(2, 8, rows.length - 1, 1).setNumberFormat("@");
+    }
+    sheet.getRange(1, 1, rows.length, 12).setValues(rows).setFontFamily("Roboto").setWrap(true).setVerticalAlignment("top");
+    sheet.getRange(1, 1, 1, 12).setFontWeight("bold").setBackground("#eee9e2");
     sheet.setFrozenRows(1);
-    [115, 180, 100, 180, 220, 110, 135, 160, 260, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
+    [115, 180, 100, 180, 220, 140, 110, 135, 160, 260, 300, 130].forEach(function(width, index) { sheet.setColumnWidth(index + 1, width); });
     sheet.hideColumns(1, 2);
-    sheet.hideColumns(11, 1);
+    sheet.hideColumns(12, 1);
     sheet.autoResizeRows(1, Math.max(1, sheet.getLastRow()));
     const fileName = "Danh sách nhân lực.xlsx";
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
@@ -2889,7 +2905,7 @@ function employeeRosterMember_(email) {
   const categories = Object.keys(personnel);
   for (let categoryIndex = 0; categoryIndex < categories.length; categoryIndex += 1) {
     const member = (personnel[categories[categoryIndex]] || []).find(function(item) {
-      return String(item.email || "").trim().toLowerCase() === email && String(item.status || "Có") === "Có";
+      return personnelAssignmentKey_(item) === String(email || "").trim().toLowerCase() && String(item.status || "Có") === "Có";
     });
     if (member) return member;
   }
@@ -2947,10 +2963,55 @@ function saveEmployeeAccount_(email, password) {
 }
 
 function verifyEmployeeLogin_(payload) {
+  // New clients authenticate directly against the roster. Keep the legacy
+  // email/password path for older installed applications during rollout.
+  if (Object.prototype.hasOwnProperty.call(payload, "name") || Object.prototype.hasOwnProperty.call(payload, "loginCode")) return verifyEmployeeCodeLogin_(payload);
   const email = employeeAccountEmail_(payload.email);
   const account = readEmployeeAccount_(email);
   if (!employeeRosterMember_(email) || !account || !account.salt || !account.hash) return { ok: true, valid: false };
   return { ok: true, valid: employeePasswordHash_(String(payload.password || ""), account.salt) === account.hash };
+}
+
+function employeeLoginName_(value) {
+  return String(value || "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi");
+}
+
+function employeeLoginCode_(value) {
+  return String(value === null || value === undefined ? "" : value).trim();
+}
+
+function verifyEmployeeCodeLogin_(payload) {
+  const name = employeeLoginName_(payload.name);
+  const loginCode = employeeLoginCode_(payload.loginCode);
+  if (!name || !loginCode || name.length > 240 || loginCode.length > 160) return { ok: true, valid: false };
+  const personnel = loadPersonnel_().personnel || {};
+  const matches = [];
+  Object.keys(personnel).forEach(function(category) {
+    (Array.isArray(personnel[category]) ? personnel[category] : []).forEach(function(member) {
+      if (!member || String(member.status || "Có") !== "Có") return;
+      if (employeeLoginName_(member.name) !== name || employeeLoginCode_(member.loginCode) !== loginCode) return;
+      if (personnelAssignmentKey_(member)) matches.push(member);
+    });
+  });
+  // Never choose the first row when the same name/code identifies two people.
+  if (matches.length !== 1) return { ok: true, valid: false };
+  const member = matches[0];
+  return {
+    ok: true,
+    valid: true,
+    account: personnelAssignmentKey_(member),
+    member: {
+      id: String(member.id || ""),
+      status: "Có",
+      name: String(member.name || "").trim(),
+      email: String(member.email || "").trim().toLowerCase(),
+      birthDate: String(member.birthDate || ""),
+      phone: normalizePersonnelPhone_(member.phone),
+      role: String(member.role || ""),
+      permissions: Array.isArray(member.permissions) ? member.permissions.map(function(value) { return String(value || ""); }) : [],
+      address: String(member.address || ""),
+    },
+  };
 }
 
 function registerEmployeeAccount_(payload) {

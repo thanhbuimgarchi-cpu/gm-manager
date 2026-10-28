@@ -7,7 +7,7 @@ import { transform } from "esbuild";
 // Execute the real frontend helpers without mounting React or contacting the
 // production backend. This protects data behavior during interface changes.
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace };`, {
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
@@ -69,4 +69,33 @@ test("date validation rejects impossible dates while accepting leap years", () =
 test("a full browser cache does not abort the active workspace operation", () => {
   context.window = { localStorage: { setItem() { throw new Error("quota exceeded"); } } };
   assert.doesNotThrow(() => helpers.saveWorkspace([]));
+});
+
+test("roster login matches the full accented name and an exact code, rejecting ambiguous/inactive rows", () => {
+  const member = { id: "p1", name: "Nguyễn Minh Anh", loginCode: "00123", status: "Có" };
+  assert.equal(helpers.employeeByLoginCode([member], "  NGUYỄN   MINH ANH ", "00123"), member);
+  assert.equal(helpers.employeeByLoginCode([member], "Nguyen Minh Anh", "00123"), null);
+  assert.equal(helpers.employeeByLoginCode([member], member.name, "123"), null);
+  assert.equal(helpers.employeeByLoginCode([member, {...member,id:"p2"}], member.name, member.loginCode), null);
+  assert.equal(helpers.employeeByLoginCode([{...member,status:"Ngưng"}], member.name, member.loginCode), null);
+});
+
+test("browser folder validation requires both workspace folders and accepts the outer Drive root", async () => {
+  const directory = (name, children = {}) => ({name, async getDirectoryHandle(child){if(!children[child])throw new Error("not found");return children[child];}});
+  const valid = directory("GM Manager", {"Khách hàng":directory("Khách hàng"),"Nhân lực":directory("Nhân lực")});
+  const outer = directory("I", {"Shared drives":directory("Shared drives", {"GM Manager":directory("GM Manager", {"GM Manager":valid})})});
+  assert.equal(await helpers.verifyBrowserWorkspace(outer),valid);
+  await assert.rejects(helpers.verifyBrowserWorkspace(directory("GM Manager", {"Khách hàng":directory("Khách hàng")})),/Khách hàng và Nhân lực/);
+});
+
+test("mobile document opening uses the correct PDF/Office MIME with a browser fallback", () => {
+  for(const [ext,type] of [["pdf","application/pdf"],["docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document"],["xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]]) {
+    const file={name:`document.${ext}`,downloadUrl:"https://drive.google.com/uc?id=test&export=download",mimeType:type};
+    const android=helpers.mobileFileOpenUrl(file,"Android");
+    assert.ok(android.startsWith("intent://"));
+    assert.ok(android.includes(`type=${type};`));
+    assert.ok(android.includes(`S.browser_fallback_url=${encodeURIComponent(file.downloadUrl)}`));
+    assert.equal(helpers.mobileFileOpenUrl(file,"iPhone"),file.downloadUrl);
+  }
+  assert.equal(helpers.mobileFileOpenUrl({name:"bad.pdf",downloadUrl:"javascript:alert(1)",mimeType:"application/pdf"},"Android"),"");
 });

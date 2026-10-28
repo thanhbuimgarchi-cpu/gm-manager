@@ -96,6 +96,20 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 
 ## Interface checks
 
+Employees sign in with their full roster name and the login code entered by a
+manager in Personnel. Existing email/member keys are retained for assignments.
+PC login also validates a locally selected GM Manager folder containing both
+`Khách hàng` and `Nhân lực`; phone login does not request a local folder.
+The native desktop app remembers its selected folder. Browser folder selection
+uses the File System Access API; Explorer/Finder opening from a browser uses
+the installed desktop app's `gmmanager://open-documents` handler.
+
+The app refreshes shared records/personnel and assignments every 10 seconds,
+messages and the selected month's Drive index every 30 seconds, and the newest
+open document day every 20 seconds. Returning to the app or reconnecting also
+refreshes immediately. These are visibility-aware polls, not server push;
+closed phone apps require a separate push delivery service.
+
 `npm test` runs the Drive behavior and frontend data regression checks.
 `npm run build:github-pages` builds the website for GitHub Pages.
 

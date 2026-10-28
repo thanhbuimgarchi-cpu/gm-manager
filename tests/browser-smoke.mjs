@@ -13,7 +13,7 @@ await page.clock.setFixedTime(new Date('2026-10-28T02:00:00Z'));
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 const permissions = ['Ghi chú', 'Tư vấn', 'Thiết kế', 'Dự toán', 'Thi công', 'Nghiệm thu', 'Bảo hành', 'Tài liệu', '3D'];
-const personnel = { office: [{id:'p1',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',birthDate:'20/09/1995',phone:'0912345678',role:'Nhân viên thiết kế',permissions,address:'Hà Nội'}] };
+const personnel = { office: [{id:'p1',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',loginCode:'00123',birthDate:'20/09/1995',phone:'0912345678',role:'Nhân viên thiết kế',permissions,address:'Hà Nội'}] };
 const records = [
   {id:'c1',name:'Chị Quỳnh',houseId:'DV-75',projectId:'GM28102026CQ',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Nguyễn Thị Quỳnh',SDT:'0912345678','NCT-KT':'Có','NCT-NT':'Có'},designProgress:[{id:'d1',isCustom:false,content:'Triển khai hồ sơ kiến trúc',plannedDate:'10/11/2026',actualDate:'',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',note:'Kiểm tra phương án mặt bằng',publishedAt:'2026-10-28T00:00:00Z'}]},
   {id:'c2',name:'Anh Minh',houseId:'NT5-38',projectId:'GM28102026AM',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Trần Văn Minh',SDT:'0987654321'}},
@@ -45,6 +45,11 @@ event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r}
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
 await page.locator('.customer-result').first().waitFor();
+const groupedNotes=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__trigger').first();
+assert.equal(await groupedNotes.getAttribute('aria-expanded'),'false');
+await groupedNotes.click();
+assert.equal(await groupedNotes.getAttribute('aria-expanded'),'true');
+assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__items').first().isVisible());
 await page.screenshot({path:'outputs/interface-qa/desktop-overview.png',fullPage:true});
 const overflow = () => page.evaluate(()=>({body:document.documentElement.scrollWidth,width:innerWidth}));
 assert.ok((await overflow()).body<=1440,'desktop overflow');
@@ -122,12 +127,53 @@ for(const houseCode of ['QA-101','QA-102','QA-102']) {
 const created=await page.evaluate(()=>JSON.parse(localStorage.getItem('gm-manager-consulting')).flatMap(y=>y.months.flatMap(m=>m.records)).filter(r=>r.houseId?.startsWith('QA-')));
 assert.equal(created.length,2,'repeat submit reuses the same house');
 assert.equal(new Set(created.map(r=>r.projectId)).size,2,'same-day same-initial customers retain independent projects');
+await page.evaluate(() => {
+  window.qaRootChosen=false; window.qaNotificationCalls=0;
+  window.gmDesktop={isDesktop:true,isWindows:true,platform:'win32',
+    selectWorkspaceFolder:async()=>{window.qaRootChosen=true;return {ok:true,path:'I:\\Shared drives\\GM Manager\\GM Manager'};},
+    validateWorkspaceFolder:async()=>({ok:window.qaRootChosen,path:window.qaRootChosen?'I:\\Shared drives\\GM Manager\\GM Manager':'',error:'Chọn thư mục GM Manager hợp lệ.'}),
+    showNotification:async()=>{window.qaNotificationCalls++;return true;},
+    openDocumentFolder:async payload=>{window.qaOpenedFolder=payload;return '';},
+  };
+});
+await page.getByRole('button',{name:/Đổi tài khoản/}).click();
+const login=page.getByRole('dialog',{name:'Đăng nhập',exact:true});
+assert.equal(await login.getByRole('button',{name:'Tạo tài khoản',exact:true}).count(),0,'no self registration');
+await login.getByLabel('Tên nhân viên',{exact:true}).fill('Nguyễn Minh Anh');
+await login.getByLabel('Mã đăng nhập',{exact:true}).fill('00123');
+await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
+await login.getByRole('alert').waitFor();
+assert.ok((await login.getByRole('alert').innerText()).includes('thư mục'),'PC rejects missing workspace folder');
+await login.getByRole('button',{name:'Chọn thư mục',exact:true}).click();
+await login.getByLabel('Mã đăng nhập',{exact:true}).fill('wrong-code');
+await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
+await page.waitForFunction(()=>document.querySelector('.login-dialog [role=alert]')?.textContent.includes('mã đăng nhập'));
+await login.getByLabel('Mã đăng nhập',{exact:true}).fill('00123');
+await page.screenshot({path:'outputs/interface-qa/desktop-login.png',fullPage:true});
+await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
+await page.waitForFunction(()=>!document.querySelector('.login-dialog'));
+assert.equal(await page.evaluate(()=>localStorage.getItem('gm-manager-personnel-session-email')),'anh@example.com');
+const notificationCalls=await page.evaluate(()=>window.qaNotificationCalls);
+await page.getByRole('button',{name:/Bật thông báo|Thông báo đã bật/}).click();
+await page.getByRole('button',{name:/Thông báo đã bật/}).waitFor();
+assert.equal(await page.evaluate(()=>window.qaNotificationCalls),notificationCalls+1);
+assert.equal(await page.evaluate(()=>localStorage.getItem('gm-manager-notifications-enabled-v1')),'enabled');
 await page.evaluate(()=>localStorage.setItem('gm-manager-personnel-session-email','anh@example.com'));
 await page.reload();
 await page.locator('.overview-metrics').waitFor();
 await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
 await page.locator('.customer-message__body').waitFor();
 assert.ok(await page.getByRole('button',{name:'Giao việc',exact:true}).isDisabled(),'employee reads messages without assigning');
+const cdp=await context.newCDPSession(page);
+await cdp.send('Emulation.setUserAgentOverride',{userAgent:'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1'});
+await page.reload();
+await page.getByRole('button',{name:/Đổi tài khoản/}).click();
+const mobileLogin=page.getByRole('dialog',{name:'Đăng nhập',exact:true});
+assert.equal(await mobileLogin.getByLabel('Vị trí GM Manager',{exact:true}).count(),0,'phone login has no drive selector');
+await mobileLogin.getByLabel('Tên nhân viên',{exact:true}).fill('Nguyễn Minh Anh');
+await mobileLogin.getByLabel('Mã đăng nhập',{exact:true}).fill('00123');
+await mobileLogin.getByRole('button',{name:'Đăng nhập',exact:true}).click();
+await page.waitForFunction(()=>!document.querySelector('.login-dialog'));
 assert.deepEqual(errors,[],'no browser runtime errors');
 console.log(JSON.stringify({passed:true,errors,mobile,projectMobile,screenshots:'outputs/interface-qa'}));
 await browser.close();
