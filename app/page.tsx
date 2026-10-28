@@ -500,6 +500,18 @@ const defaultDriveFolderUrl = "https://drive.google.com/drive/folders/1jY12yTvgh
 const legacyDriveFolderId = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 const personnelStorageKey = "gm-manager-personnel-v1";
 const personnelSessionEmailKey = "gm-manager-personnel-session-email";
+const adminSessionStorageKey = "gm-manager-admin-session-v1";
+function isCurrentAdminSession(session: { token: string; scriptUrl: string } | null, scriptUrl: string) {
+  if (!session?.token || session.scriptUrl !== scriptUrl.trim()) return false;
+  try {
+    const parts = session.token.split(".");
+    if (parts.length !== 2) return false;
+    // This expiry check protects optimistic local writes. The server verifies
+    // the signature and remains the authority for every create/delete request.
+    const claims = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
+    return claims.version === 1 && claims.account === "admin" && claims.purpose === "customer-admin" && Number.isFinite(claims.expiresAt) && claims.expiresAt > Date.now();
+  } catch { return false; }
+}
 const mobileNotificationSetupKey = "gm-manager-mobile-notification-setup-v1";
 const notificationEnabledStorageKey = "gm-manager-notifications-enabled-v1";
 const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
@@ -1827,6 +1839,7 @@ export default function Home() {
   const browserWorkspaceHandle = useRef<LocalDirectoryHandle | null>(null);
   const [employeeAuthBusy, setEmployeeAuthBusy] = useState(false);
   const [loggedInEmployeeEmail, setLoggedInEmployeeEmail] = useState("");
+  const [adminSession, setAdminSession] = useState<{ token: string; scriptUrl: string } | null>(null);
   const [employeeLoginError, setEmployeeLoginError] = useState("");
   const [customerPortalRecord, setCustomerPortalRecord] = useState<CustomerPortalRecord | null>(null);
   const [customerPortalError, setCustomerPortalError] = useState("");
@@ -2036,6 +2049,8 @@ export default function Home() {
       const savedPersonnel = window.localStorage.getItem(personnelStorageKey);
       if (savedPersonnel) setPersonnelByCategory(normalizePersonnelMap(JSON.parse(savedPersonnel) as Record<string, PersonnelMember[]>));
       setLoggedInEmployeeEmail(String(window.localStorage.getItem(personnelSessionEmailKey) ?? "").trim().toLowerCase());
+      const savedAdminSession = JSON.parse(window.localStorage.getItem(adminSessionStorageKey) ?? "null");
+      if (typeof savedAdminSession?.token === "string" && typeof savedAdminSession?.scriptUrl === "string") setAdminSession(savedAdminSession);
     } catch { /* A shared roster can still be loaded when local storage is unavailable. */ }
   }, []);
 
@@ -2432,6 +2447,7 @@ export default function Home() {
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; virtual?: boolean; driveWarning?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "save-workspace-cache",
+        ...(loggedInEmployeeEmail === builtInAdminAccount && adminSession?.scriptUrl === driveScriptUrl.trim() ? { adminSessionToken: adminSession.token } : {}),
         updatedAt: Date.now(),
         years: nextYears,
       });
@@ -2678,7 +2694,7 @@ export default function Home() {
   };
   const saveCompletedWorkNoteToDrive = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!location || !driveScriptUrl.trim()) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       setNotice("Cần kết nối Google Apps Script trước khi lưu công việc hoàn thành vào Drive.");
       return;
     }
@@ -3370,7 +3386,28 @@ export default function Home() {
     }, isProjectOrHouseCode ? 100 : 420);
   };
 
+  const requireAdminCustomerSession = () => {
+    if (!isBuiltInAdminLoggedIn) {
+      setNotice("Chỉ admin mới có quyền tạo hoặc xóa khách hàng.");
+      return null;
+    }
+    if (!isCurrentAdminSession(adminSession, driveScriptUrl)) {
+      setAdminSession(null);
+      setAddOpen(false);
+      setProtectedAction(null);
+      try { window.localStorage.removeItem(adminSessionStorageKey); } catch { /* Reauthentication also resets the in-memory session. */ }
+      setEmployeeLoginError("");
+      setEmployeeLoginEmail(builtInAdminAccount);
+      setEmployeeLoginPassword("");
+      setLoginOpen(true);
+      setNotice("Hãy đăng nhập lại tài khoản admin để xác thực quyền tạo và xóa khách hàng.");
+      return null;
+    }
+    return adminSession!.token;
+  };
+
   const openAddDialog = () => {
+    if (!requireAdminCustomerSession()) return;
     const currentDate = getVietnamDate();
     setModalMonth(currentDate.month);
     setModalYear(currentDate.year);
@@ -3381,6 +3418,8 @@ export default function Home() {
 
   const addCustomer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const adminSessionToken = requireAdminCustomerSession();
+    if (!adminSessionToken) return;
     const name = customerName.trim();
     const normalizedHouseId = houseId.trim();
     if (!name || creatingCustomer) return;
@@ -3460,6 +3499,7 @@ export default function Home() {
       if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
         action: "create-customer-folder",
+        adminSessionToken,
         year: modalYear,
         month: modalMonth,
         projectId,
@@ -3656,6 +3696,7 @@ export default function Home() {
 
   const startProtectedAction = (type: "rename" | "delete", record: WorkRecord, year = selectedYear, month = selectedMonth) => {
     if (customerMutationInFlight.current) return;
+    if (type === "delete" && !requireAdminCustomerSession()) return;
     setOpenMenuId(null);
     setCustomerMutationError("");
     setProtectedAction({ type, record, year, month });
@@ -3676,6 +3717,8 @@ export default function Home() {
 
   const runCustomerDriveMutation = async (type: "rename" | "delete") => {
     if (!protectedAction || protectedAction.type !== type || customerMutationInFlight.current) return;
+    const adminSessionToken = type === "delete" ? requireAdminCustomerSession() : null;
+    if (type === "delete" && !adminSessionToken) return;
     const { record, year, month } = protectedAction;
     const nextHouseId = renameHouseId.trim();
     if (type === "rename" && (!nextHouseId || /[\\/:*?"<>|\u0000-\u001f]/.test(nextHouseId) || [".", ".."].includes(nextHouseId))) {
@@ -3694,6 +3737,7 @@ export default function Home() {
         year, month, projectId: record.projectId, folderId: record.driveFolderId,
         oldHouseId: record.houseId,
         houseId: type === "delete" ? record.houseId : nextHouseId,
+        ...(type === "delete" ? { adminSessionToken } : {}),
         ...(type === "rename" ? { name: nextName } : {}),
       });
       if (!response.ok || !result.ok || (type === "delete" && (!result.deleted || !result.trashed))) throw new Error(result.error || "Drive chưa xác nhận thao tác. Dữ liệu trên web được giữ nguyên.");
@@ -3892,7 +3936,7 @@ export default function Home() {
     if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${customerDisplayName(record)}?`)) return;
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       return;
     }
     setAudioProcessingId(record.id);
@@ -3959,6 +4003,7 @@ export default function Home() {
 
   const saveDriveConfig = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!isBuiltInAdminLoggedIn) { setNotice("Chỉ admin mới có quyền thiết lập ứng dụng."); return; }
     const config = { scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
       setNotice("Hãy nhập Web app URL hợp lệ từ Google Apps Script.");
@@ -3990,6 +4035,7 @@ export default function Home() {
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth, force: true });
   };
   const savePancakeConfig = async () => {
+    if (!isBuiltInAdminLoggedIn) { setNotice("Chỉ admin mới có quyền thiết lập ứng dụng."); return; }
     if (!driveScriptUrl.trim()) {
       setNotice("Hãy lưu Web app URL trước khi cấu hình Pancake.");
       return;
@@ -4021,7 +4067,7 @@ export default function Home() {
   const syncRecordToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       return;
     }
     setSyncingRecordId(record.id);
@@ -4044,7 +4090,7 @@ export default function Home() {
   const syncDesignProgressToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig, kind: DesignProgressKind = "architecture") => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       return;
     }
     setSyncingDesignId(record.id);
@@ -4068,7 +4114,7 @@ export default function Home() {
   const syncWarrantyToDrive = async (record: WorkRecord, year = selectedYear, month = selectedMonth, configOverride?: DriveSyncConfig) => {
     const config = configOverride ?? { scriptUrl: driveScriptUrl.trim() };
     if (!config.scriptUrl) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       return;
     }
     setSyncingWarrantyId(record.id);
@@ -4128,6 +4174,10 @@ export default function Home() {
     return Boolean(loggedInEmployeeEmail && key && (key === loggedInEmployeeEmail || key === loggedInEmployeeAssignmentKey || key === loggedInEmployeeLegacyAssignmentKey));
   };
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
+  const openDriveSettings = () => {
+    if (!isBuiltInAdminLoggedIn) { setNotice("Hãy liên hệ admin để thiết lập kết nối ứng dụng."); return; }
+    setDriveConfigOpen(true);
+  };
   const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || loggedInEmployee.role === "Quản lý chung"));
   const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
   const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
@@ -4323,7 +4373,7 @@ export default function Home() {
     }
   };
   const exportPersonnelToDrive = async () => {
-    if (!driveScriptUrl.trim()) { setDriveConfigOpen(true); return; }
+    if (!driveScriptUrl.trim()) { openDriveSettings(); return; }
     setExportingPersonnel(true);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; fileUrl?: string; fileName?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "export-personnel", personnel: personnelByCategory });
@@ -4427,8 +4477,14 @@ export default function Home() {
     return () => { canceled = true; };
   }, [loginOpen]);
 
-  const finishEmployeeLogin = (member: PersonnelMember, account: string) => {
+  const finishEmployeeLogin = (member: PersonnelMember, account: string, adminSessionToken?: string) => {
     try { window.localStorage.setItem(personnelSessionEmailKey, account); } catch { /* Keep this session open in memory. */ }
+    const nextAdminSession = account === builtInAdminAccount && adminSessionToken ? { token: adminSessionToken, scriptUrl: driveScriptUrl.trim() } : null;
+    setAdminSession(nextAdminSession);
+    try {
+      if (nextAdminSession) window.localStorage.setItem(adminSessionStorageKey, JSON.stringify(nextAdminSession));
+      else window.localStorage.removeItem(adminSessionStorageKey);
+    } catch { /* Server authorization remains in memory for this session. */ }
     setLoggedInEmployeeEmail(account);
     setEmployeeLoginPassword("");
     setEmployeeLoginError("");
@@ -4444,7 +4500,9 @@ export default function Home() {
     try {
       await verifyLocalWorkspace();
       if (employeeNameKey(employeeLoginEmail) === builtInAdminAccount && employeeLoginPassword === builtInAdminPassword) {
-        finishEmployeeLogin(builtInAdminPersonnel, builtInAdminAccount);
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; valid?: boolean; account?: string; adminSessionToken?: string }>({ scriptUrl: driveScriptUrl.trim() }, { action: "verify-employee-login", name: builtInAdminAccount, loginCode: employeeLoginPassword });
+        if (!response.ok || !result.ok || !result.valid || result.account !== builtInAdminAccount || !result.adminSessionToken) throw new Error(result.error || "Chưa thể xác thực tài khoản admin. Hãy kiểm tra kết nối hoặc cập nhật ứng dụng.");
+        finishEmployeeLogin(builtInAdminPersonnel, builtInAdminAccount, result.adminSessionToken);
         return;
       }
       // Refresh the shared roster, so a code changed by an administrator takes
@@ -4453,7 +4511,7 @@ export default function Home() {
       if (!response.ok || !result.ok || !result.personnel) throw new Error(result.error || "Chưa thể xác thực danh sách Nhân lực. Hãy kiểm tra kết nối mạng.");
       const roster = normalizePersonnelMap(result.personnel);
       const member = employeeByLoginCode(Object.values(roster).flat(), employeeLoginEmail, employeeLoginPassword);
-      if (!member) throw new Error("Tên nhân viên hoặc mã đăng nhập không đúng, tài khoản đã ngưng hoặc thông tin bị trùng. Hãy kiểm tra với quản lý.");
+      if (!member || personnelAssignmentKey(member) === builtInAdminAccount) throw new Error("Tên nhân viên hoặc mã đăng nhập không đúng, tài khoản đã ngưng hoặc thông tin bị trùng. Hãy kiểm tra với quản lý.");
       setPersonnelByCategory(roster);
       try { window.localStorage.setItem(personnelStorageKey, JSON.stringify(roster)); } catch { /* Session remains available. */ }
       finishEmployeeLogin(member, personnelAssignmentKey(member));
@@ -4462,7 +4520,11 @@ export default function Home() {
     } finally { setEmployeeAuthBusy(false); }
   };
   const logoutEmployee = () => {
-    try { window.localStorage.removeItem(personnelSessionEmailKey); } catch { /* Optional device session cleanup. */ }
+    try { window.localStorage.removeItem(personnelSessionEmailKey); window.localStorage.removeItem(adminSessionStorageKey); } catch { /* Optional device session cleanup. */ }
+    setAdminSession(null);
+    setAddOpen(false);
+    setDriveConfigOpen(false);
+    setProtectedAction(null);
     setLoggedInEmployeeEmail("");
     setEmployeeLoginEmail("");
     setEmployeeLoginPassword("");
@@ -4525,7 +4587,7 @@ export default function Home() {
     }
     const config = { scriptUrl: driveScriptUrl.trim() };
     if (!isAppsScriptUrl(config.scriptUrl)) {
-      setDriveConfigOpen(true);
+      openDriveSettings();
       return;
     }
 
@@ -4945,7 +5007,7 @@ export default function Home() {
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
               {personnelView && renderUpdateAction()}
-              {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={() => setDriveConfigOpen(true)}>⚙ Thiết lập</button>}
+              {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
             </div>
           </header>
 
@@ -5001,7 +5063,7 @@ export default function Home() {
                 {canViewNotesSummary && <div className="overview-metric"><span><WorkspaceIcon name="note" size={18} />Công việc đang chờ</span><strong>{outstandingSidebarNotes.length}</strong><small>{outstandingSidebarNotes.filter(({ note }) => note.priority !== "Bình thường").length} công việc ưu tiên cao</small></div>}
                 {canViewCustomerMessages && <button type="button" className="overview-metric" onClick={openAllCustomerMessages}><span><WorkspaceIcon name="message" size={18} />Tin nhắn khách</span><strong>{customerMessages.filter((message) => message.status !== "resolved").length}</strong><small>Mở hộp tin nhắn <span aria-hidden="true">↗</span></small></button>}
               </div>
-              <div className="customer-directory-heading"><div><h2>Khách hàng</h2><p>Tất cả hồ sơ và tài liệu dự án của bạn.</p></div><button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button></div>
+              <div className="customer-directory-heading"><div><h2>Khách hàng</h2><p>Tất cả hồ sơ và tài liệu dự án của bạn.</p></div>{isBuiltInAdminLoggedIn && <button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button>}</div>
               <label className="customer-search">
                 <WorkspaceIcon name="search" />
                 <input value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng" />
@@ -5019,9 +5081,9 @@ export default function Home() {
                   <div className="customer-result-row" key={`${location.year}-${location.month}-${location.record.id}`}><button className="customer-result" onClick={() => selectCustomer(location)}>
                     <span className="customer-result__folder"><WorkspaceIcon name="folder" /></span>
                     <span className="customer-result__identity" title={customerDisplayName(location.record)}><b>{customerDisplayName(location.record)}</b></span>
-                  </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button><button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button></div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
+                  </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button>{isBuiltInAdminLoggedIn && <button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button>}</div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
                 )) : (
-                  <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p><button onClick={openAddDialog}>Tạo khách hàng mới</button></div>
+                  <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p>{isBuiltInAdminLoggedIn && <button onClick={openAddDialog}>Tạo khách hàng mới</button>}</div>
                 )}
               </div>
 
@@ -5059,7 +5121,7 @@ export default function Home() {
             {selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
             <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← Tổng quan</button><span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span>/</span>{activeFolder}</span>
           </div>
-          <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={() => setDriveConfigOpen(true)}>⚙ Thiết lập</button>}</div>
+          <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}</div>
         </header>
 
         {!hasActiveFolderAccess ? (
@@ -5091,7 +5153,7 @@ export default function Home() {
                     <button className="more-button" onClick={() => setOpenMenuId(openMenuId === selectedRecord.id ? null : selectedRecord.id)} aria-label={`Tùy chọn ${selectedRecord.houseId || selectedRecord.name || "hồ sơ"}`}>…</button>
                     {openMenuId === selectedRecord.id && <div className="project-menu">
                       <button onClick={() => startProtectedAction("rename", selectedRecord)}>Sửa thông tin</button>
-                      <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Xóa hồ sơ</button>
+                      {isBuiltInAdminLoggedIn && <button className="project-menu__delete" onClick={() => startProtectedAction("delete", selectedRecord)}>Xóa hồ sơ</button>}
                     </div>}
                   </div>
                 </div>
@@ -5187,7 +5249,7 @@ export default function Home() {
         {notice && <div className="toast" role="status">{notice}<button onClick={() => setNotice("")}>×</button></div>}
       </section></>}
 
-      {addOpen && (
+      {addOpen && isBuiltInAdminLoggedIn && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setAddOpen(false)}>
           <form className="add-dialog" onSubmit={addCustomer} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setAddOpen(false)} aria-label="Đóng">×</button>
@@ -5224,7 +5286,7 @@ export default function Home() {
         </div>
       )}
 
-      {driveConfigOpen && (
+      {driveConfigOpen && isBuiltInAdminLoggedIn && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setDriveConfigOpen(false)}>
           <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
@@ -5308,7 +5370,7 @@ export default function Home() {
         </div>
       )}
 
-      {protectedAction && (
+      {protectedAction && (protectedAction.type !== "delete" || isBuiltInAdminLoggedIn) && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => !customerMutationBusy && setProtectedAction(null)}>
           {protectedAction.type === "delete" ? (
             <div className="security-dialog" role="dialog" aria-label="Xác nhận xóa" onMouseDown={(event) => event.stopPropagation()}>

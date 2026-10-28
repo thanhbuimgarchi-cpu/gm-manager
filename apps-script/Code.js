@@ -156,6 +156,7 @@ function customerFolderForRecord_(record, year, month, createMissing) {
 }
 
 function createCustomerFolder_(payload) {
+  requireCustomerAdminSession_(payload);
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
@@ -319,6 +320,7 @@ function customerMutationRequest_(payload, action, completedResult) {
 }
 
 function deleteCustomerFolder_(payload) {
+  requireCustomerAdminSession_(payload);
   const repeated = customerMutationRequest_(payload, "delete");
   if (repeated) return repeated;
   if (!String(payload.projectId || "").trim()) throw new Error("Thiếu mã hồ sơ cần xóa.");
@@ -1710,9 +1712,147 @@ function saveWorkspaceCache_(payload) {
   if (current && Number(current.updatedAt || 0) > incomingUpdatedAt) {
     return { ok: true, updatedAt: Number(current.updatedAt || 0), years: Array.isArray(current.years) ? current.years : [], ignored: true };
   }
-  const years = applyCustomerDriveMutations_(Array.isArray(payload.years) ? payload.years : []);
+  const incoming = applyCustomerDriveMutations_(Array.isArray(payload.years) ? payload.years : []);
+  const previous = applyCustomerDriveMutations_(current && Array.isArray(current.years) ? current.years : []);
+  const years = protectedCustomerCacheYears_(incoming, previous, payload);
   writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { version: 1, updatedAt: incomingUpdatedAt, years: years });
   return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
+}
+
+function protectedCustomerCacheYears_(incoming, previous, payload) {
+  let admin = false;
+  if (payload.adminSessionToken) { requireCustomerAdminSession_(payload); admin = true; }
+  const periods = new Map();
+  const years = [];
+  const known = new Map();
+  const seen = new Set();
+  const seenFolders = new Set();
+  const periodNumber = function(month, index) {
+    const match = /^T(\d{1,2})$/.exec(String(month.label || ""));
+    return match ? Number(match[1]) : index + 1;
+  };
+  const keyFor = function(year, month, record) { return year + ":" + month + ":" + String(record.projectId || "").trim(); };
+  const targetPeriod = function(year, month, sourceYear, sourceMonth) {
+    const key = year + ":" + month;
+    if (periods.has(key)) return periods.get(key);
+    let nextYear = years.find(function(item) { return Number(item.year) === year; });
+    if (!nextYear) {
+      const months = Array.from({ length: 12 }, function(_, index) { return { label: "T" + (index + 1), records: [] }; });
+      (Array.isArray(sourceYear.months) ? sourceYear.months : []).forEach(function(source, index) {
+        const number = periodNumber(source, index);
+        if (number >= 1 && number <= 12) months[number - 1] = { ...source, label: "T" + number, records: [] };
+      });
+      nextYear = { ...sourceYear, year: year, months: months };
+      years.push(nextYear);
+    }
+    const nextMonth = { ...sourceMonth, label: "T" + month, records: [] };
+    nextYear.months[month - 1] = nextMonth;
+    periods.set(key, nextMonth);
+    return nextMonth;
+  };
+  previous.forEach(function(year) {
+    (Array.isArray(year.months) ? year.months : []).forEach(function(month, index) {
+      const monthNumber = periodNumber(month, index);
+      (Array.isArray(month.records) ? month.records : []).forEach(function(record) {
+        known.set(keyFor(Number(year.year), monthNumber, record), { year: Number(year.year), month: monthNumber, record: record, sourceYear: year, sourceMonth: month });
+      });
+    });
+  });
+  // Only additions and omissions need Drive metadata. Ordinary employee edits
+  // to known customers remain entirely in the shared property cache.
+  const drivePeriods = new Map();
+  let driveRoot;
+  const driveChildren = function(year, month) {
+    const key = year + ":" + month;
+    if (drivePeriods.has(key)) return drivePeriods.get(key);
+    if (!driveRoot) driveRoot = rootFolder_();
+    const unique = function(parent, name) {
+      if (!parent) return null;
+      const matches = findFolders_(parent, name).filter(function(folder) { return !folder.isTrashed || !folder.isTrashed(); });
+      if (matches.length > 1) throw new Error("Có nhiều thư mục trùng tên trên Drive. Chưa thể xác nhận hồ sơ khách hàng.");
+      return matches[0] || null;
+    };
+    const customers = unique(driveRoot, CUSTOMERS_FOLDER_NAME);
+    const yearFolder = unique(customers, String(year));
+    const monthFolder = unique(yearFolder, "T" + month);
+    const folders = [];
+    const children = monthFolder && monthFolder.getFolders();
+    while (children && children.hasNext()) {
+      const child = children.next();
+      if (!child.isTrashed || !child.isTrashed()) folders.push({ id: child.getId(), name: normalizeDriveName_(child.getName()) });
+    }
+    drivePeriods.set(key, folders);
+    return folders;
+  };
+  const existingDriveFolder = function(year, month, record, omitted) {
+    const folderId = String(record.driveFolderId || "").trim();
+    const names = [record.houseId, record.projectId].map(function(value) { return normalizeDriveName_(value); }).filter(Boolean);
+    const matches = driveChildren(year, month).filter(function(folder) {
+      if (folderId && folder.id !== folderId) return false;
+      return Boolean(omitted && folderId) || names.indexOf(folder.name) >= 0;
+    });
+    if (matches.length > 1) throw new Error("Có nhiều thư mục khớp mã nhà trên Drive. Chưa thể xác nhận hồ sơ khách hàng.");
+    return matches[0] || null;
+  };
+  incoming.forEach(function(year) {
+    const yearNumber = Number(year.year);
+    (Array.isArray(year.months) ? year.months : []).forEach(function(month, index) {
+      const monthNumber = periodNumber(month, index);
+      if (!/^\d{4}$/.test(String(yearNumber)) || monthNumber < 1 || monthNumber > 12) throw new Error("Tháng hoặc năm của hồ sơ không hợp lệ.");
+      const target = targetPeriod(yearNumber, monthNumber, year, month);
+      (Array.isArray(month.records) ? month.records : []).forEach(function(record) {
+        let next = record;
+        const recordKey = keyFor(yearNumber, monthNumber, record);
+        const prior = known.get(recordKey);
+        if (prior && !admin) {
+          const previousRecord = prior.record;
+          next = { ...record, houseId: record.houseId || previousRecord.houseId, driveFolderId: record.driveFolderId || previousRecord.driveFolderId };
+          const identityChanged = normalizeDriveName_(next.houseId) !== normalizeDriveName_(previousRecord.houseId) || String(next.driveFolderId || "") !== String(previousRecord.driveFolderId || "");
+          let confirmedFolder;
+          if (identityChanged) {
+            confirmedFolder = existingDriveFolder(yearNumber, monthNumber, next, false);
+            const previousNames = [previousRecord.houseId, previousRecord.projectId].map(normalizeDriveName_).filter(Boolean);
+            if (!confirmedFolder || (previousRecord.driveFolderId ? confirmedFolder.id !== previousRecord.driveFolderId : previousNames.indexOf(confirmedFolder.name) < 0)) throw new Error("Không thể thay đổi định danh thư mục hồ sơ qua cache. Hãy dùng Rename để đổi mã nhà.");
+            next.driveFolderId = confirmedFolder.id;
+          }
+          if (previousRecord.pendingDriveSync && !next.pendingDriveSync) {
+            try { confirmedFolder = confirmedFolder || existingDriveFolder(yearNumber, monthNumber, next, false); }
+            catch (error) { confirmedFolder = null; }
+            if (!confirmedFolder) next.pendingDriveSync = true;
+          }
+        }
+        if (!prior && !admin) {
+          let folder;
+          try { folder = existingDriveFolder(yearNumber, monthNumber, record, false); }
+          catch (error) { throw new Error("Chỉ admin mới có quyền tạo khách hàng. Chưa thể xác nhận hồ sơ mới trên Drive: " + String(error.message || error)); }
+          if (!folder) throw new Error("Chỉ admin mới có quyền tạo khách hàng. Hồ sơ mới chưa tồn tại trên Drive.");
+          const alias = Array.from(known.values()).find(function(item) {
+            if (item.year !== yearNumber || item.month !== monthNumber) return false;
+            return item.record.driveFolderId ? item.record.driveFolderId === folder.id : [item.record.houseId, item.record.projectId].map(normalizeDriveName_).indexOf(folder.name) >= 0;
+          });
+          if (alias) throw new Error("Hồ sơ khách hàng đã có trong cache. Không thể tạo bản trùng của cùng thư mục Drive.");
+          next = { ...record, driveFolderId: folder.id };
+        }
+        if (!validCustomerFolderKey_(String(next.projectId || "").trim())) throw new Error("Mã hồ sơ khách hàng không hợp lệ.");
+        if (seen.has(recordKey)) throw new Error("Hồ sơ khách hàng bị trùng trong dữ liệu gửi lên.");
+        const folderKey = next.driveFolderId ? yearNumber + ":" + monthNumber + ":" + next.driveFolderId : "";
+        if (folderKey && seenFolders.has(folderKey)) throw new Error("Hồ sơ khách hàng bị trùng thư mục Drive trong dữ liệu gửi lên.");
+        if (folderKey) seenFolders.add(folderKey);
+        seen.add(recordKey);
+        target.records.push(next);
+      });
+    });
+  });
+  known.forEach(function(item, key) {
+    if (seen.has(key)) return;
+    let retain = Boolean(item.record.pendingDriveSync);
+    if (!retain) {
+      try { retain = Boolean(existingDriveFolder(item.year, item.month, item.record, true)); }
+      catch (error) { retain = true; } // A failed Drive read is never evidence of deletion.
+    }
+    if (retain) targetPeriod(item.year, item.month, item.sourceYear, item.sourceMonth).records.push(item.record);
+  });
+  return years;
 }
 
 function workNotesFolder_(year, month, projectId, createMissing, houseId) {
@@ -3129,6 +3269,10 @@ function saveEmployeeAccount_(email, password) {
 }
 
 function verifyEmployeeLogin_(payload) {
+  if (employeeLoginName_(payload.name) === "admin") {
+    if (employeeLoginCode_(payload.loginCode) !== "1") return { ok: true, valid: false };
+    return { ok: true, valid: true, account: "admin", adminSessionToken: issueCustomerAdminSession_() };
+  }
   // New clients authenticate directly against the roster. Keep the legacy
   // email/password path for older installed applications during rollout.
   if (Object.prototype.hasOwnProperty.call(payload, "name") || Object.prototype.hasOwnProperty.call(payload, "loginCode")) return verifyEmployeeCodeLogin_(payload);
@@ -3136,6 +3280,62 @@ function verifyEmployeeLogin_(payload) {
   const account = readEmployeeAccount_(email);
   if (!employeeRosterMember_(email) || !account || !account.salt || !account.hash) return { ok: true, valid: false };
   return { ok: true, valid: employeePasswordHash_(String(payload.password || ""), account.salt) === account.hash };
+}
+
+const CUSTOMER_ADMIN_SESSION_SECRET_KEY = "gmcrm-customer-admin-session-secret-v1";
+const CUSTOMER_ADMIN_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
+function customerAdminSessionSecret_() {
+  const properties = PropertiesService.getScriptProperties();
+  let secret = properties.getProperty(CUSTOMER_ADMIN_SESSION_SECRET_KEY);
+  if (secret) return secret;
+  // Login requests do not hold the write lock. Initialize the signing key
+  // once so simultaneous first logins cannot invalidate one another.
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    secret = properties.getProperty(CUSTOMER_ADMIN_SESSION_SECRET_KEY);
+    if (!secret) {
+      secret = Utilities.getUuid() + Utilities.getUuid();
+      properties.setProperty(CUSTOMER_ADMIN_SESSION_SECRET_KEY, secret);
+    }
+    return secret;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function customerAdminSessionSignature_(body, secret) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(body, secret, Utilities.Charset.UTF_8)).replace(/=+$/g, "");
+}
+
+function issueCustomerAdminSession_() {
+  const claims = { version: 1, account: "admin", purpose: "customer-admin", expiresAt: Date.now() + CUSTOMER_ADMIN_SESSION_LIFETIME_MS, nonce: Utilities.getUuid() };
+  const body = Utilities.base64EncodeWebSafe(JSON.stringify(claims), Utilities.Charset.UTF_8).replace(/=+$/g, "");
+  return body + "." + customerAdminSessionSignature_(body, customerAdminSessionSecret_());
+}
+
+function requireCustomerAdminSession_(payload) {
+  const denied = "Chỉ admin mới có quyền tạo hoặc xóa khách hàng. Hãy đăng nhập lại bằng tài khoản admin.";
+  const token = String(payload && payload.adminSessionToken || "");
+  if (!token || token.length > 2048) throw new Error(denied);
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 2 || !/^[A-Za-z0-9_-]+$/.test(parts[0]) || !/^[A-Za-z0-9_-]+$/.test(parts[1])) throw new Error(denied);
+    // Validation never initializes a key or writes anything. An unauthenticated
+    // request must have no side effects, including on an idempotent retry.
+    const secret = PropertiesService.getScriptProperties().getProperty(CUSTOMER_ADMIN_SESSION_SECRET_KEY);
+    if (!secret) throw new Error(denied);
+    const expected = customerAdminSessionSignature_(parts[0], secret);
+    let difference = expected.length ^ parts[1].length;
+    for (let index = 0; index < expected.length; index += 1) difference |= expected.charCodeAt(index) ^ (parts[1].charCodeAt(index) || 0);
+    if (difference) throw new Error(denied);
+    const claims = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString("UTF-8"));
+    if (claims.version !== 1 || claims.account !== "admin" || claims.purpose !== "customer-admin" || !Number.isFinite(claims.expiresAt) || claims.expiresAt <= Date.now()) throw new Error(denied);
+    return claims;
+  } catch (error) {
+    throw new Error(denied);
+  }
 }
 
 function employeeLoginName_(value) {
@@ -3256,20 +3456,20 @@ function getCustomerFolder_(year, month, projectId, createMissing, createInitial
     return cachedFolder;
   }
   const root = rootFolder_();
-  const customers = createMissing ? getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME) : findFolder_(root, CUSTOMERS_FOLDER_NAME);
-  if (!customers) return null;
-  let yearFolder = createMissing ? getOrCreateFolder_(customers, String(year)) : findFolder_(customers, String(year));
-  if (!yearFolder) return null;
-  let monthFolder = createMissing ? getOrCreateFolder_(yearFolder, "T" + month) : findFolder_(yearFolder, "T" + month);
-  if (!monthFolder) return null;
-  const existingCustomerFolder = findFolder_(monthFolder, projectId);
-  const customerFolder = existingCustomerFolder || (createMissing ? getOrCreateFolder_(monthFolder, projectId) : null);
+  // Exports, uploads and archives may initialize a customer's subfolders, but
+  // must never create another customer implicitly. Only the authenticated
+  // createCustomerFolder_ action establishes the customer hierarchy.
+  const customers = findFolder_(root, CUSTOMERS_FOLDER_NAME);
+  const yearFolder = customers && findFolder_(customers, String(year));
+  const monthFolder = yearFolder && findFolder_(yearFolder, "T" + month);
+  const customerFolder = monthFolder && findFolder_(monthFolder, projectId);
+  if (!customerFolder && createMissing) throw new Error("Không tìm thấy hồ sơ khách hàng trên Drive. Chỉ admin mới có quyền tạo khách hàng.");
   if (customerFolder) cacheFolder_(folderCacheKey, customerFolder);
   if (customerFolder && createMissing) {
-    const shouldCreateSnapshot = createInitialDocumentSnapshot === undefined ? !existingCustomerFolder : Boolean(createInitialDocumentSnapshot);
+    const shouldCreateSnapshot = Boolean(createInitialDocumentSnapshot);
     ensureProjectFolders_(customerFolder, shouldCreateSnapshot);
   }
-  return customerFolder;
+  return customerFolder || null;
 }
 
 function getCachedFolder_(key) {

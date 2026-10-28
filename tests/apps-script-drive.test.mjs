@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHmac, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
@@ -113,10 +114,110 @@ function customerMutationFixture() {
     PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => values.get(key) || "", setProperty: (key, value) => values.set(key, String(value)), deleteProperty: (key) => values.delete(key) }) },
     CacheService: { getScriptCache: () => ({ get: (key) => cache.get(key) || "", put: (key, value) => cache.set(key, value), remove: (key) => cache.delete(key) }) },
     DriveApp: { getFolderById: (id) => { const value = folders.get(id); if (!value) throw new Error("folder missing"); return value; } },
-    Utilities: { base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url") },
+    Utilities: {
+      base64EncodeWebSafe: (value) => Buffer.from(value).toString("base64url"),
+      base64DecodeWebSafe: (value) => [...Buffer.from(value, "base64url")],
+      newBlob: (value) => ({ getDataAsString: () => Buffer.from(value).toString("utf8") }),
+      getUuid: randomUUID,
+      Charset: { UTF_8: "utf8" },
+      computeHmacSha256Signature: (value, secret) => [...createHmac("sha256", secret).update(value).digest()],
+    },
+    LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
   });
-  return { context, target, keep, otherMonthTarget, month, year, customers, root, makeFolder, values, createdCount: () => createdCount };
+  const adminSessionToken = context.verifyEmployeeLogin_({ name: "admin", loginCode: "1" }).adminSessionToken;
+  return { context, target, keep, otherMonthTarget, month, year, customers, root, makeFolder, values, adminSessionToken, createdCount: () => createdCount };
 }
+
+test("only the built-in admin login receives authorization to create or delete customers", () => {
+  const f = customerMutationFixture();
+  f.context.loadPersonnel_ = () => ({ personnel: { office: [
+    { id: "employee", name: "Nhân viên", email: "employee@example.com", loginCode: "123", role: "Nhân viên kỹ thuật" },
+    { id: "manager", name: "Quản lý", email: "manager@example.com", loginCode: "456", role: "Quản lý chung" },
+    { id: "reserved", name: "Admin", email: "other-admin@example.com", loginCode: "other-code", role: "Quản lý chung" },
+  ] } });
+  assert.equal(f.context.verifyEmployeeLogin_({ name: "admin", loginCode: "wrong" }).valid, false);
+  assert.equal(f.context.verifyEmployeeLogin_({ name: "Admin", loginCode: "other-code" }).valid, false, "a roster row cannot impersonate the reserved admin account");
+  for (const credentials of [{ name: "Nhân viên", loginCode: "123" }, { name: "Quản lý", loginCode: "456" }]) {
+    const result = f.context.verifyEmployeeLogin_(credentials);
+    assert.equal(result.valid, true);
+    assert.equal(Object.hasOwn(result, "adminSessionToken"), false);
+  }
+  const result = f.context.verifyEmployeeLogin_({ name: " ADMIN ", loginCode: "1" });
+  assert.equal(result.valid, true);
+  assert.equal(result.account, "admin");
+  assert.equal(f.context.requireCustomerAdminSession_({ adminSessionToken: result.adminSessionToken }).account, "admin");
+});
+
+test("customer create/delete reject missing, forged, expired and non-admin sessions without changing Drive or cache", () => {
+  const f = customerMutationFixture();
+  const [body, signature] = f.adminSessionToken.split(".");
+  const claims = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+  const signed = (patch) => {
+    const nextBody = Buffer.from(JSON.stringify({ ...claims, ...patch })).toString("base64url");
+    const secret = f.values.get("gmcrm-customer-admin-session-secret-v1");
+    return `${nextBody}.${createHmac("sha256", secret).update(nextBody).digest("base64url")}`;
+  };
+  const denied = [undefined, "invalid", `${body}.${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`, signed({ expiresAt: Date.now() - 1 }), signed({ account: "employee@example.com" }), signed({ account: "manager@example.com", role: "Quản lý chung" })];
+  const before = [...f.values];
+  for (const adminSessionToken of denied) {
+    const payload = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), actorEmail: "admin", account: "admin", adminSessionToken };
+    assert.throws(() => f.context.createCustomerFolder_(payload), /Chỉ admin mới có quyền/);
+    assert.throws(() => f.context.deleteCustomerFolder_(payload), /Chỉ admin mới có quyền/);
+  }
+  assert.deepEqual([...f.values], before);
+  assert.equal(f.createdCount(), 0);
+  assert.equal(f.target.trashCalls, 0);
+  assert.equal(f.keep.trashed, false);
+});
+
+test("an authenticated admin can create a customer and authorization is required again for delete retries", () => {
+  const f = customerMutationFixture();
+  const newCustomer = f.makeFolder("HP-NEW", "new-admin-customer-folder-id");
+  let foldersInitialized = 0;
+  f.context.getOrCreateFolder_ = (parent, name) => {
+    if (parent === f.root && name === "Khách hàng") return f.customers;
+    if (parent === f.customers && name === "2026") return f.year;
+    if (parent === f.year && name === "T9") return f.month;
+    if (parent === f.month && name === "HP-NEW") { f.month.children.push(newCustomer); return newCustomer; }
+    throw new Error("unexpected folder creation");
+  };
+  f.context.ensureProjectFolders_ = (folder) => { assert.equal(folder, newCustomer); foldersInitialized += 1; };
+  const request = { year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-NEW", folderId: newCustomer.getId(), adminSessionToken: f.adminSessionToken };
+  const created = f.context.createCustomerFolder_(request);
+  assert.equal(created.ok, true);
+  assert.equal(created.folderId, newCustomer.getId());
+  assert.equal(foldersInitialized, 1);
+  const deletion = { ...request, mutationId: "admin-delete-retry" };
+  assert.equal(f.context.deleteCustomerFolder_(deletion).trashed, true);
+  assert.throws(() => f.context.deleteCustomerFolder_({ ...deletion, adminSessionToken: undefined }), /Chỉ admin mới có quyền/);
+  assert.equal(f.context.deleteCustomerFolder_(deletion).repeated, true);
+  assert.equal(newCustomer.trashCalls, 1);
+  assert.equal(f.target.trashCalls, 0);
+});
+
+test("exports, uploads and document/archive helpers cannot implicitly create another customer", () => {
+  const f = customerMutationFixture();
+  const absent = { year: 2026, month: 9, projectId: "GM-MISSING", houseId: "HP-MISSING", workflow: "Thiết kế", file: { fileName: "test.pdf", data: "AA==" } };
+  const originalProperties = [...f.values];
+  for (const operation of [
+    () => f.context.getCustomerFolder_(2027, 1, "HP-MISSING", true),
+    () => f.context.customerFolderForRecord_(absent, 2026, 9, true),
+    () => f.context.exportCustomerWorkbook_(absent, 2026, 9),
+    () => f.context.exportDesignProgressWorkbook_(absent, 2026, 9, "architecture"),
+    () => f.context.exportWarrantyWorkbook_(absent, 2026, 9),
+    () => f.context.uploadWorkflowFile_(absent),
+    () => f.context.createWorkflowDateFolder_(absent),
+    () => f.context.documentsFolderForPayload_(absent, true),
+    () => f.context.workNotesFolder_(2026, 9, "GM-MISSING", true, "HP-MISSING"),
+  ]) assert.throws(operation, /Chỉ admin mới có quyền tạo khách hàng/);
+  assert.equal(f.context.getCustomerFolder_(2027, 1, "HP-MISSING", false), null);
+  assert.equal(f.createdCount(), 0);
+  assert.deepEqual([...f.values], originalProperties);
+  let initialized = 0;
+  f.context.ensureProjectFolders_ = (folder) => { assert.equal(folder, f.target); initialized += 1; };
+  assert.equal(f.context.getCustomerFolder_(2026, 9, "HP-587", true), f.target);
+  assert.equal(initialized, 1, "employees may still initialize subfolders for an existing customer");
+});
 
 test("customer Delete trashes only the resolved Drive folder and prunes only that period's cache", () => {
   const f = customerMutationFixture();
@@ -127,7 +228,7 @@ test("customer Delete trashes only the resolved Drive folder and prunes only tha
   f.context.saveWorkspaceCache_({ updatedAt: 1, years });
   f.context.writePropertyJson_("gmcrm-active-work-notes-state", [{ id: "note-target", year: 2026, month: 9, projectId: "GM-TARGET" }, { id: "note-keep", year: 2026, month: 9, projectId: "GM-KEEP" }]);
   const oldCacheKey = f.context.driveScopedCacheKey_("gmcrm-index-2026-9");
-  const result = f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-target-001" });
+  const result = f.context.deleteCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-target-001" });
   assert.equal(result.ok, true);
   assert.equal(result.trashed, true);
   assert.equal(result.folderId, f.target.getId());
@@ -137,32 +238,32 @@ test("customer Delete trashes only the resolved Drive folder and prunes only tha
   assert.equal(f.createdCount(), 0);
   assert.notEqual(f.context.driveScopedCacheKey_("gmcrm-index-2026-9"), oldCacheKey);
   const current = f.context.loadWorkspaceCache_().years[0].months;
-  assert.deepEqual(Array.from(current[0].records, (record) => record.projectId), ["GM-KEEP"]);
-  assert.equal(current[1].records.length, 1);
+  assert.deepEqual(Array.from(current[8].records, (record) => record.projectId), ["GM-KEEP"]);
+  assert.equal(current[7].records.length, 1);
   assert.deepEqual(Array.from(f.context.readPropertyJson_("gmcrm-active-work-notes-state"), (note) => note.id), ["note-keep"]);
   f.context.saveWorkspaceCache_({ updatedAt: Date.now() + 1000, years });
-  assert.equal(f.context.loadWorkspaceCache_().years[0].months[0].records.length, 1, "a newer stale-device save cannot resurrect a deleted folder");
+  assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records.length, 1, "a newer stale-device save cannot resurrect a deleted folder");
   assert.equal(f.context.loadWorkNotes_({ year: 2026, month: 9, projectId: "GM-TARGET" }).notes.length, 0);
 });
 
 test("customer mutations do not create missing paths or delete ambiguous folder names", () => {
   const f = customerMutationFixture();
-  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2027, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /thư mục tháng/);
-  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-MISSING", houseId: "missing" }), /Không tìm thấy đúng/);
+  assert.throws(() => f.context.deleteCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2027, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /thư mục tháng/);
+  assert.throws(() => f.context.deleteCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-MISSING", houseId: "missing" }), /Không tìm thấy đúng/);
   const duplicate = f.makeFolder("hp-587", "duplicate-folder-id");
   f.month.children.push(duplicate);
-  assert.throws(() => f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /nhiều thư mục/);
+  assert.throws(() => f.context.deleteCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587" }), /nhiều thư mục/);
   assert.equal(f.target.trashed, false);
   assert.equal(duplicate.trashed, false);
   assert.equal(f.createdCount(), 0);
-  f.context.deleteCustomerFolder_({ year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId() });
+  f.context.deleteCustomerFolder_({ adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId() });
   assert.equal(f.target.trashed, true);
   assert.equal(duplicate.trashed, false, "the exact selected folder ID disambiguates duplicates");
 });
 
 test("a delete retry returns the original result without touching a replacement folder", () => {
   const f = customerMutationFixture();
-  const request = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-retry-001" };
+  const request = { adminSessionToken: f.adminSessionToken, year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: f.target.getId(), mutationId: "delete-retry-001" };
   const first = f.context.deleteCustomerFolder_(request);
   const replacement = f.makeFolder("HP-587", "replacement-folder-id");
   f.month.children.push(replacement);
@@ -185,7 +286,7 @@ test("Rename preserves the project key, updates shared cache and rejects collisi
   const result = f.context.renameCustomerFolder_(request);
   assert.equal(result.projectId, "GM-TARGET");
   assert.equal(f.target.getName(), "HP-888");
-  const records = f.context.loadWorkspaceCache_().years[0].months[0].records;
+  const records = f.context.loadWorkspaceCache_().years[0].months[8].records;
   assert.equal(records[0].projectId, "GM-TARGET");
   assert.equal(records[0].name, "Chị An mới");
   assert.equal(records[0].houseId, "HP-888");
@@ -364,18 +465,129 @@ test("publishing work notes falls back to shared script properties when Drive is
 });
 
 test("workspace cache is shared without touching Drive", () => {
-  const values = new Map();
-  const properties = {
-    getProperty: (key) => values.get(key) || null,
-    setProperty: (key, value) => values.set(key, String(value)),
-    deleteProperty: (key) => values.delete(key),
-  };
-  const context = loadContext({ PropertiesService: { getScriptProperties: () => properties } });
+  const { context, adminSessionToken } = customerMutationFixture();
+  context.DriveApp = { getFolderById: () => { throw new Error("ordinary cache edits must not read Drive"); } };
   const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM03092026TEST", details: { HVT: "Khách thử" }, designProgress: [] }] }] }];
-  assert.equal(context.saveWorkspaceCache_({ updatedAt: 100, years }).ok, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), years);
+  assert.equal(context.saveWorkspaceCache_({ updatedAt: 100, years, adminSessionToken }).ok, true);
+  years[0].months[0].records[0].details.HVT = "Khách đã sửa";
+  assert.equal(context.saveWorkspaceCache_({ updatedAt: 101, years }).ok, true);
+  const expected = [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => index === 8 ? years[0].months[0] : { label: `T${index + 1}`, records: [] }) }];
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), expected);
   assert.equal(context.saveWorkspaceCache_({ updatedAt: 90, years: [] }).ignored, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), years);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.loadWorkspaceCache_({}).years)), expected);
+});
+
+test("employees cannot create invented customers through shared-cache writes, even while editing a known customer", () => {
+  const f = customerMutationFixture();
+  const existing = { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId(), details: { HVT: "Original" } };
+  const period = (records) => [{ year: 2026, months: [{ label: "T9", records }] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years: period([existing]), adminSessionToken: f.adminSessionToken });
+  const before = [...f.values];
+  for (const forgedIdentity of [{}, { actorEmail: "admin", account: "admin", role: "Quản lý chung" }]) {
+    assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 11, ...forgedIdentity, years: period([{ ...existing, details: { HVT: "Should not save" } }, { projectId: "GM-INVENTED", houseId: "HP-NONEXISTENT" }]) }), /Chỉ admin mới có quyền tạo khách hàng/);
+    assert.deepEqual([...f.values], before, "a denied addition does not partially save accompanying edits");
+  }
+  assert.equal(f.createdCount(), 0);
+  assert.equal(f.target.trashCalls, 0);
+});
+
+test("employees may hydrate customers already on Drive using one scoped folder scan per month", () => {
+  const f = customerMutationFixture();
+  const originalFolders = f.month.getFolders;
+  let monthScans = 0;
+  f.month.getFolders = function() { monthScans += 1; return originalFolders.call(this); };
+  const years = [{ year: 2026, months: [{ label: "T9", records: [{ projectId: "GM-TARGET", houseId: "HP-587" }, { projectId: "GM-KEEP", houseId: "NT5-38" }] }] }];
+  assert.equal(f.context.saveWorkspaceCache_({ updatedAt: 10, years }).ok, true);
+  const saved = f.context.loadWorkspaceCache_().years[0].months[8].records;
+  assert.deepEqual(Array.from(saved, (record) => record.driveFolderId), [f.target.getId(), f.keep.getId()]);
+  assert.equal(monthScans, 1);
+  assert.equal(f.createdCount(), 0);
+  const before = [...f.values];
+  const alias = { projectId: "GM-ALIAS", houseId: "HP-587", driveFolderId: f.target.getId() };
+  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 11, years: [{ year: 2026, months: [{ label: "T9", records: [...saved, alias] }] }] }), /Không thể tạo bản trùng/);
+  assert.deepEqual([...f.values], before);
+});
+
+test("legacy customers without a folder ID cannot be duplicated and may hydrate only their existing Drive identity", () => {
+  const f = customerMutationFixture();
+  const legacy = { projectId: "GM-LEGACY", houseId: "HP-587" };
+  const period = (records) => [{ year: 2026, months: [{ label: "T9", records }] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years: period([legacy]), adminSessionToken: f.adminSessionToken });
+  const before = [...f.values];
+  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 11, years: period([legacy, { projectId: "GM-ALIAS", houseId: "HP-587" }]) }), /Không thể tạo bản trùng/);
+  assert.deepEqual([...f.values], before);
+  assert.equal(f.context.saveWorkspaceCache_({ updatedAt: 11, years: period([{ ...legacy, driveFolderId: f.target.getId() }]) }).ok, true);
+  assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records[0].driveFolderId, f.target.getId());
+});
+
+test("employees cannot erase a customer by falsifying its Drive identity before omitting it", () => {
+  const f = customerMutationFixture();
+  const existing = { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId() };
+  const period = (records) => [{ year: 2026, months: [{ label: "T9", records }] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years: period([existing]), adminSessionToken: f.adminSessionToken });
+  const before = [...f.values];
+  for (const patch of [{ driveFolderId: "nonexistent-id" }, { houseId: "HP-MISSING" }, { houseId: "NT5-38", driveFolderId: f.keep.getId() }]) {
+    assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 11, years: period([{ ...existing, ...patch }]) }), /Không thể thay đổi định danh/);
+    assert.deepEqual([...f.values], before);
+  }
+  f.context.saveWorkspaceCache_({ updatedAt: 11, years: [] });
+  assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records.length, 1);
+  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([{ projectId: "GM-WRONG-PERIOD", houseId: "HP-587", driveFolderId: f.otherMonthTarget.getId() }]) }), /Chỉ admin mới có quyền tạo khách hàng/);
+  assert.equal(f.createdCount(), 0);
+});
+
+test("omitting customers from an employee cache save cannot delete them, while confirmed external Drive deletion can be reconciled", () => {
+  const f = customerMutationFixture();
+  const target = { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId() };
+  const keep = { projectId: "GM-KEEP", houseId: "NT5-38", driveFolderId: f.keep.getId(), details: { HVT: "Original" } };
+  const period = (records) => [{ year: 2026, months: [{ label: "T9", records }] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years: period([target, keep]), adminSessionToken: f.adminSessionToken });
+  f.context.saveWorkspaceCache_({ updatedAt: 11, years: period([{ ...keep, details: { HVT: "Edited" } }]) });
+  let saved = f.context.loadWorkspaceCache_().years[0].months[8].records;
+  assert.equal(saved.length, 2);
+  assert.equal(saved.find((record) => record.projectId === keep.projectId).details.HVT, "Edited");
+  f.target.setName("HP-587-renamed-on-drive");
+  f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([keep]) });
+  assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records.length, 2, "a folder rename is not a deletion");
+  f.target.setTrashed(true);
+  f.context.saveWorkspaceCache_({ updatedAt: 13, years: period([keep]) });
+  saved = f.context.loadWorkspaceCache_().years[0].months[8].records;
+  assert.deepEqual(Array.from(saved, (record) => record.projectId), [keep.projectId]);
+});
+
+test("admin optimistic cache creates survive parallel omissions and failed Drive reads never prove deletion", () => {
+  const f = customerMutationFixture();
+  const pending = { projectId: "GM-PENDING", houseId: "HP-PENDING", pendingDriveSync: true };
+  const existing = { projectId: "GM-TARGET", houseId: "HP-587", driveFolderId: f.target.getId() };
+  const period = (records) => [{ year: 2026, months: [{ label: "T9", records }] }];
+  f.context.DriveApp = { getFolderById: () => { throw new Error("Drive temporarily unavailable"); } };
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years: period([pending, existing]), adminSessionToken: f.adminSessionToken });
+  f.context.saveWorkspaceCache_({ updatedAt: 11, years: [] });
+  const retainedYear = f.context.loadWorkspaceCache_().years[0];
+  assert.equal(retainedYear.months.length, 12);
+  assert.deepEqual(Array.from(retainedYear.months, (month) => month.label), Array.from({ length: 12 }, (_, index) => `T${index + 1}`));
+  assert.deepEqual(Array.from(retainedYear.months[8].records, (record) => record.projectId), [pending.projectId, existing.projectId]);
+  const before = [...f.values];
+  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([pending, existing]), adminSessionToken: "forged" }), /Chỉ admin mới có quyền/);
+  assert.deepEqual([...f.values], before);
+});
+
+test("cache reconciliation keeps canonical month indexes for sparse, shuffled and wholly omitted years", () => {
+  const f = customerMutationFixture();
+  const years = [{ year: 2026, customYear: "preserve", months: [
+    { label: "T9", customMonth: "September", records: [{ projectId: "GM-PENDING-SEP", pendingDriveSync: true }] },
+    { label: "T2", customMonth: "February", records: [{ projectId: "GM-PENDING-FEB", pendingDriveSync: true }] },
+  ] }];
+  f.context.saveWorkspaceCache_({ updatedAt: 10, years, adminSessionToken: f.adminSessionToken });
+  f.context.saveWorkspaceCache_({ updatedAt: 11, years: [] });
+  const retained = f.context.loadWorkspaceCache_().years[0];
+  assert.equal(retained.customYear, "preserve");
+  assert.equal(retained.months.length, 12);
+  assert.deepEqual(Array.from(retained.months, (month) => month.label), Array.from({ length: 12 }, (_, index) => `T${index + 1}`));
+  assert.equal(retained.months[1].customMonth, "February");
+  assert.equal(retained.months[1].records[0].projectId, "GM-PENDING-FEB");
+  assert.equal(retained.months[8].customMonth, "September");
+  assert.equal(retained.months[8].records[0].projectId, "GM-PENDING-SEP");
 });
 
 test("personnel cache is shared without touching Drive", () => {
