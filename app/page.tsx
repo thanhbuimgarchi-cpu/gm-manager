@@ -572,6 +572,14 @@ function isMobileDevice() {
   return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
+function isAppleMobileDevice() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneWebApp() {
+  return Boolean((navigator as Navigator & { standalone?: boolean }).standalone) || window.matchMedia("(display-mode: standalone)").matches;
+}
+
 type AppsScriptBridgeMessage<T> = {
   channel?: string;
   id?: string;
@@ -2057,9 +2065,11 @@ export default function Home() {
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
     const updateInstallState = () => {
-      const installed = Boolean(desktopBridge()) || standaloneQuery.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+      const installed = Boolean(desktopBridge()) || isStandaloneWebApp();
       setIsAppInstalled(installed);
-      if (installed && isMobileDevice() && window.localStorage.getItem(mobileNotificationSetupKey) === "pending" && (!("Notification" in window) || Notification.permission === "default")) setNotificationSetupOpen(true);
+      try {
+        if (installed && isMobileDevice() && window.localStorage.getItem(mobileNotificationSetupKey) === "pending" && (!("Notification" in window) || Notification.permission === "default")) setNotificationSetupOpen(true);
+      } catch { /* Installation and permissions still work without local storage. */ }
     };
     const captureInstallPrompt = (event: Event) => {
       event.preventDefault();
@@ -2071,15 +2081,15 @@ export default function Home() {
       promptForMobileNotifications();
     };
     updateInstallState();
-    let savedNotificationState = "";
-    try { savedNotificationState = window.localStorage.getItem(notificationEnabledStorageKey) ?? ""; } catch { /* Optional preference persistence. */ }
-    const browserNotificationsGranted = "Notification" in window && Notification.permission === "granted";
-    const desktopNotificationsEnabled = Boolean(desktopBridge()?.isDesktop && savedNotificationState === "enabled");
-    if (browserNotificationsGranted || desktopNotificationsEnabled) {
-      setNotificationsEnabled(true);
-      try { window.localStorage.setItem(notificationEnabledStorageKey, "enabled"); } catch { /* Optional preference persistence. */ }
-    }
-    if ("Notification" in window) setNotificationPermission(Notification.permission);
+    const refreshNotificationPermission = () => {
+      let savedNotificationState = "";
+      try { savedNotificationState = window.localStorage.getItem(notificationEnabledStorageKey) ?? ""; } catch { /* Optional preference persistence. */ }
+      const permission = "Notification" in window ? Notification.permission : "unsupported";
+      const enabled = desktopBridge()?.isDesktop ? savedNotificationState === "enabled" : permission === "granted";
+      setNotificationPermission(permission);
+      markNotificationsEnabled(enabled);
+    };
+    refreshNotificationPermission();
     let reloadingForWorker = false;
     const markWorkerUpdate = () => {
       setUpdateAvailable(true);
@@ -2112,6 +2122,8 @@ export default function Home() {
     };
     const checkWhenVisible = () => {
       if (document.visibilityState === "visible") {
+        updateInstallState();
+        refreshNotificationPermission();
         void checkPublishedVersion();
         void serviceWorkerRegistration.current?.update();
       }
@@ -2119,6 +2131,7 @@ export default function Home() {
     void checkPublishedVersion();
     const versionTimer = window.setInterval(checkPublishedVersion, 10 * 60 * 1000);
     document.addEventListener("visibilitychange", checkWhenVisible);
+    window.addEventListener("focus", checkWhenVisible);
     window.addEventListener("beforeinstallprompt", captureInstallPrompt);
     window.addEventListener("appinstalled", markInstalled);
     standaloneQuery.addEventListener("change", updateInstallState);
@@ -2127,6 +2140,7 @@ export default function Home() {
       window.removeEventListener("appinstalled", markInstalled);
       standaloneQuery.removeEventListener("change", updateInstallState);
       document.removeEventListener("visibilitychange", checkWhenVisible);
+      window.removeEventListener("focus", checkWhenVisible);
       window.clearInterval(versionTimer);
     };
   }, []);
@@ -2281,8 +2295,7 @@ export default function Home() {
       setDeferredInstallPrompt(null);
       return;
     }
-    const isAppleMobile = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-    if (isAppleMobile) {
+    if (isAppleMobileDevice()) {
       setMobileInstallHelp("ios");
       return;
     }
@@ -2401,16 +2414,34 @@ export default function Home() {
         setNotificationPermission("granted");
         markNotificationsEnabled(true);
       } else {
+        // iOS exposes notification permission only to apps launched from the
+        // Home Screen. Keep this check synchronous to preserve the tap gesture.
+        if (isAppleMobileDevice() && !isStandaloneWebApp()) {
+          try { window.localStorage.setItem(mobileNotificationSetupKey, "pending"); } catch { /* Optional prompt state. */ }
+          setNotificationSetupOpen(false);
+          setMobileInstallHelp("ios");
+          return;
+        }
         if (!("Notification" in window) || !("serviceWorker" in navigator)) {
           setNotificationPermission("unsupported");
+          if (isAppleMobileDevice()) {
+            setNotificationSetupOpen(true);
+            throw new Error("Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Hãy cập nhật iOS rồi mở GM Manager từ Màn hình chính.");
+          }
           throw new Error("Thiết bị này chưa hỗ trợ thông báo. Trên iPhone, hãy cài ứng dụng vào màn hình chính rồi bật thông báo.");
         }
         let permission = Notification.permission;
         if (permission === "default") permission = await Notification.requestPermission();
         setNotificationPermission(permission);
-        if (permission !== "granted") throw new Error("Chưa được cấp quyền thông báo. Hãy cho phép GM Manager trong cài đặt thông báo của trình duyệt.");
+        if (permission !== "granted") {
+          if (permission === "denied" && isAppleMobileDevice()) {
+            setNotificationSetupOpen(true);
+            throw new Error("Thông báo đang bị chặn. Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo rồi quay lại ứng dụng.");
+          }
+          throw new Error("Chưa được cấp quyền thông báo. Hãy cho phép GM Manager trong cài đặt thông báo của trình duyệt.");
+        }
         let timeout = 0;
-        const registration = serviceWorkerRegistration.current || await Promise.race([
+        const registration = serviceWorkerRegistration.current?.active ? serviceWorkerRegistration.current : await Promise.race([
           navigator.serviceWorker.ready,
           new Promise<never>((_, reject) => { timeout = window.setTimeout(() => reject(new Error("Bộ phận thông báo chưa sẵn sàng. Hãy mở lại ứng dụng rồi thử lại.")), 6000); }),
         ]).finally(() => window.clearTimeout(timeout));
@@ -5328,8 +5359,8 @@ export default function Home() {
           <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
-            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>.</li><li>Nhấn nút <b>Chia sẻ</b> ở thanh dưới.</li><li>Chọn <b>Thêm vào Màn hình chính</b>, rồi nhấn Thêm.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
-            <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
+            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>, nhấn <b>Chia sẻ</b>.</li><li>Chọn <b>Thêm vào Màn hình chính</b>. Nếu có tuỳ chọn <b>Mở dưới dạng ứng dụng web</b>, hãy bật rồi nhấn Thêm.</li><li>Đóng Safari, mở <b>GM Manager</b> bằng biểu tượng trên Màn hình chính.</li><li>Trong ứng dụng, nhấn <b>Bật thông báo</b>, rồi chọn <b>Cho phép</b> khi iOS hỏi.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
+            <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : mobileInstallHelp === "ios" ? "Đăng nhập và làm việc trên iOS 16 trở lên. Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
             {mobileInstallHelp !== "desktop" && <div className="dialog-actions"><button type="button" onClick={() => setMobileInstallHelp(null)}>Để sau</button><button type="button" className="add-button" onClick={() => { setMobileInstallHelp(null); promptForMobileNotifications(); }}>Đã cài xong</button></div>}
           </section>
         </div>
@@ -5339,9 +5370,9 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
           <section className="security-dialog notification-setup-dialog" role="dialog" aria-label="Bật thông báo" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
-            <p className="eyebrow">GM Manager đã được cài</p><h2>Bật thông báo?</h2>
-            <p>Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Bạn luôn có thể bật lại từ nút Thông báo.</p>
-            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>Bật thông báo</button></div>
+            <p className="eyebrow">GM Manager</p><h2>{notificationPermission === "denied" ? "Cho phép thông báo" : "Bật thông báo?"}</h2>
+            <p>{notificationPermission === "unsupported" && isAppleMobileDevice() ? "Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Với iOS 16.0–16.3, bạn vẫn đăng nhập và làm việc được; hãy cập nhật iOS để bật thông báo." : notificationPermission === "denied" && isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo. Sau đó quay lại ứng dụng và nhấn Kiểm tra lại." : "Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Trên iPhone/iPad, hãy mở GM Manager từ Màn hình chính để bật thông báo."}</p>
+            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>{notificationPermission === "denied" ? "Kiểm tra lại" : "Bật thông báo"}</button></div>
           </section>
         </div>
       )}

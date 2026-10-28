@@ -53,9 +53,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 /* Overview: a wide directory and a persistent, readable activity rail. */
 .customer-gateway { background: var(--cream); }
-.customer-gateway__header { min-height: 80px; padding: 12px clamp(20px, 4vw, 64px); border-bottom-color: var(--line); background: rgb(255 255 255 / 97%); box-shadow: 0 1px 5px #1b2d4910; }
-.customer-gateway__brand { margin: 0; transform: none; }
-.customer-gateway__actions { gap: 8px; padding: 3px; }
+.customer-gateway__header { display: grid; grid-template-columns: max-content minmax(0, 1fr); min-height: 80px; padding: 12px clamp(20px, 4vw, 64px); border-bottom-color: var(--line); background: rgb(255 255 255 / 97%); box-shadow: 0 1px 5px #1b2d4910; }
+.customer-gateway__brand { min-width: 0; max-width: 100%; margin: 0; transform: none; }
+.customer-gateway__actions { flex-wrap: wrap; gap: 8px; padding: 3px; overflow: visible; }
+.customer-gateway__actions .pwa-action--login { order: -1; }
 .workspace-overview { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; width: 100%; margin: 0; padding: 0; }
 .workspace-overview h1 { margin: 0; color: #1d293a; font-size: clamp(25px, 2.8vw, 34px); font-weight: 730; line-height: 1.2; letter-spacing: -.9px; }
 .workspace-overview > div > p:not(.eyebrow) { margin: 10px 0 0; color: var(--gm-muted); font-size: 14px; }
@@ -438,7 +439,7 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 }
 @media (max-width: 960px) {
   .customer-gateway__header { padding: 12px 20px; }
-  .customer-gateway__actions { max-width: 70%; }
+  .customer-gateway__actions { max-width: 100%; }
   .customer-gateway__overview { width: calc(100% - 40px); }
   .workspace-overview { flex-wrap: wrap; gap: 8px; }
   .customer-gateway__overview { grid-template-columns: 240px minmax(0, 1fr); gap: 18px; }
@@ -475,10 +476,10 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
   .sidebar-activity.is-open { display: block; }
   .customer-gateway__overview .customer-gateway__summaries { display: none; }
   .customer-gateway__overview .customer-gateway__summaries.is-open { display: grid; }
-  .customer-gateway__header { gap: 12px; min-height: 72px; padding: 10px 16px; }
+  .customer-gateway__header { grid-template-columns: minmax(0, 1fr); gap: 12px; min-height: 72px; padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left)); }
   .customer-gateway__brand .brand__wordmark { font-size: 16px; }
-  .customer-gateway__actions { max-width: 65%; }
-  .customer-gateway__actions .pwa-action { min-height: 37px; padding-inline: 10px; font-size: 11px; }
+  .customer-gateway__actions { justify-content: flex-start; width: 100%; max-width: 100%; }
+  .customer-gateway__actions .pwa-action { min-height: 44px; padding-inline: 10px; font-size: 12px; }
   .customer-gateway__actions .reload-drive { display: inline-block; }
   .customer-gateway__overview { width: calc(100% - 32px); }
   .workspace-overview { padding-top: 0; }
@@ -544,11 +545,12 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
   .three-d-library { padding: 20px; }
   .three-d-library__grid { grid-template-columns: 1fr; }
   .record-detail__footer { align-items: flex-start; flex-wrap: wrap; padding: 16px; }
-  .dialog-backdrop, .detail-backdrop { padding: 16px; }
-  .add-dialog, .security-dialog { max-height: calc(100dvh - 32px); padding: 26px; border-radius: 15px; }
+  .dialog-backdrop, .detail-backdrop { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .add-dialog, .security-dialog { max-height: calc(100dvh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom))); padding: 26px; border-radius: 15px; }
+  .login-dialog input { font-size: 16px; }
 }
 @media (max-width: 480px) {
-  .customer-gateway__header { align-items: flex-start; flex-direction: column; gap: 10px; padding-top: 12px; }
+  .customer-gateway__header { align-items: flex-start; gap: 10px; }
   .customer-gateway__brand { gap: 9px; }
   .customer-gateway__brand img { width: 32px; height: 32px; }
   .customer-gateway__brand .brand__wordmark { font-size: 17px; }
@@ -604,8 +606,8 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
   .document-day__actions { justify-content: flex-end; width: 100%; padding: 0 16px 12px; }
   .personnel-add-form, .message-task-dialog__grid { grid-template-columns: 1fr; }
   .personnel-add-form > div { flex-wrap: wrap; }
-  .dialog-backdrop, .detail-backdrop { padding: 12px; }
-  .add-dialog, .security-dialog { max-height: calc(100dvh - 24px); padding: 24px 20px; }
+  .dialog-backdrop, .detail-backdrop { padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  .add-dialog, .security-dialog { max-height: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom))); padding: 24px 20px; }
   .add-dialog input, .add-dialog select, .security-dialog input, .security-dialog select { font-size: 16px; }
   .add-dialog h2, .security-dialog h2 { padding-right: 20px; font-size: 23px; }
   .toast { right: 16px; bottom: 16px; padding: 13px 15px; font-size: 12px; }

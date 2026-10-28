@@ -171,15 +171,15 @@ const frontendNotificationCode = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
 ).outputText;
 
-function frontendFixture({ permission = "granted", requestPermission, desktop = null, showNotification, ready, fakeTimeout = false } = {}) {
+function frontendFixture({ permission = "granted", requestPermission, desktop = null, showNotification, ready, fakeTimeout = false, ios = false, standalone = true, supported = true, currentRegistration } = {}) {
   const storage = new Map();
   const state = {};
   const shown = [];
-  const registration = { showNotification: showNotification || (async (title, options) => { shown.push({ title, options }); }) };
+  const registration = { active: {}, showNotification: showNotification || (async (title, options) => { shown.push({ title, options }); }) };
   const Notification = { permission, requestPermission: requestPermission || (async () => "granted") };
   let scheduledTimeout;
   const context = vm.createContext({
-    window: { Notification, location: { origin: new URL(appUrl).origin }, localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) }, setTimeout: fakeTimeout ? (callback) => { scheduledTimeout = callback; return 1; } : setTimeout, clearTimeout: fakeTimeout ? () => {} : clearTimeout },
+    window: { ...(supported ? { Notification } : {}), location: { origin: new URL(appUrl).origin }, localStorage: { getItem: (key) => storage.get(key), setItem: (key, value) => storage.set(key, value) }, setTimeout: fakeTimeout ? (callback) => { scheduledTimeout = callback; return 1; } : setTimeout, clearTimeout: fakeTimeout ? () => {} : clearTimeout },
     navigator: { serviceWorker: { ready: ready || Promise.resolve(registration) } },
     Notification, Error,
     desktopBridge: () => desktop,
@@ -188,10 +188,14 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     setNotificationsEnabled: (value) => { state.enabled = value; },
     setNotificationPermission: (value) => { state.permission = value; },
     setNotice: (value) => { state.notice = value; },
+    setMobileInstallHelp: (value) => { state.installHelp = value; },
+    setNotificationSetupOpen: (value) => { state.setupOpen = value; },
     notificationEnabledStorageKey: "gm-manager-notifications-enabled-v1",
     mobileNotificationSetupKey: "gm-manager-mobile-notification-setup-v1",
-    serviceWorkerRegistration: { current: ready ? null : registration },
-    isMobileDevice: () => false,
+    serviceWorkerRegistration: { current: currentRegistration || (ready ? null : registration) },
+    isMobileDevice: () => ios,
+    isAppleMobileDevice: () => ios,
+    isStandaloneWebApp: () => standalone,
   });
   vm.runInContext(frontendNotificationCode, context);
   return { enable: context.enable, storage, state, shown, runTimeout: () => scheduledTimeout?.() };
@@ -245,4 +249,54 @@ test("native acceptance persists the notification setting across later app launc
   assert.equal(received[0].url, appUrl);
   assert.equal(fixture.storage.get("gm-manager-notifications-enabled-v1"), "enabled");
   assert.equal(fixture.state.permission, "granted");
+});
+
+test("iPhone Safari opens Home Screen instructions without requesting an unavailable permission", async () => {
+  let requests = 0;
+  const fixture = frontendFixture({ ios: true, standalone: false, supported: false, requestPermission: async () => { requests++; return "granted"; } });
+  await fixture.enable();
+  assert.equal(fixture.state.installHelp, "ios");
+  assert.equal(fixture.storage.get("gm-manager-mobile-notification-setup-v1"), "pending");
+  assert.equal(requests, 0);
+  assert.equal(fixture.shown.length, 0);
+  assert.notEqual(fixture.state.enabled, true);
+  assert.equal(fixture.state.busy, false);
+});
+
+test("iOS 16.0–16.3 explains the system limit instead of reporting successful delivery", async () => {
+  const fixture = frontendFixture({ ios: true, supported: false });
+  await fixture.enable();
+  assert.equal(fixture.state.setupOpen, true);
+  assert.equal(fixture.state.permission, "unsupported");
+  assert.match(fixture.state.notice, /16\.4/);
+  assert.equal(fixture.state.enabled, false);
+  assert.equal(fixture.shown.length, 0);
+});
+
+test("a denied iOS permission gives settings instructions without trying to prompt again", async () => {
+  let requests = 0;
+  const fixture = frontendFixture({ ios: true, permission: "denied", requestPermission: async () => { requests++; return "granted"; } });
+  await fixture.enable();
+  assert.equal(fixture.state.setupOpen, true);
+  assert.match(fixture.state.notice, /Cài đặt → Thông báo → GM Manager/);
+  assert.equal(requests, 0);
+  assert.equal(fixture.state.enabled, false);
+});
+
+test("an iOS tap requests permission before waiting for an installing service worker", async () => {
+  let permissionRequested = false;
+  let activate;
+  const fixture = frontendFixture({
+    ios: true, permission: "default", requestPermission: () => { permissionRequested = true; return Promise.resolve("granted"); },
+    currentRegistration: { active: null, showNotification: async () => { throw new Error("must wait for activation"); } },
+    ready: new Promise((resolve) => { activate = resolve; }),
+  });
+  const pending = fixture.enable();
+  assert.equal(permissionRequested, true, "keep the native permission request inside the tap gesture");
+  assert.equal(fixture.shown.length, 0);
+  activate({ showNotification: async (title, options) => fixture.shown.push({ title, options }) });
+  await pending;
+  assert.equal(fixture.state.enabled, true);
+  assert.equal(fixture.shown.length, 1);
+  assert.equal(fixture.storage.get("gm-manager-mobile-notification-setup-v1"), "complete");
 });
