@@ -12,7 +12,7 @@ const workflowCode = await transform(workflowSource, { loader: "ts", format: "cj
 const workflowExports = {};
 const workflowContext = vm.createContext({ module: { exports: workflowExports }, exports: workflowExports, console, Date, Intl, URL, Set, Map });
 vm.runInContext(workflowCode.code, workflowContext);
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError, normalizeDesignProgress, mergeSharedWorkspaceYears, mergeWorkflowDesignRows };`, {
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, browserWorkspaceAtPath, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError, normalizeDesignProgress, mergeSharedWorkspaceYears, mergeWorkflowDesignRows };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
@@ -91,6 +91,20 @@ test("browser folder validation requires both workspace folders and accepts the 
   const outer = directory("I", {"Shared drives":directory("Shared drives", {"GM Manager":directory("GM Manager", {"GM Manager":valid})})});
   assert.equal(await helpers.verifyBrowserWorkspace(outer),valid);
   await assert.rejects(helpers.verifyBrowserWorkspace(directory("GM Manager", {"Khách hàng":directory("Khách hàng")})),/Khách hàng và Nhân lực/);
+});
+
+test("browser drive selection discovers nested workspaces and accepts an authorized Customers handle", async () => {
+  const directory = (name, children = {}) => ({ name, kind: "directory", async getDirectoryHandle(child) { if (!children[child]) throw new Error("not found"); return children[child]; }, async *values() { yield* Object.values(children); } });
+  const customers = directory("Khách hàng", { "2026": directory("2026") });
+  const workspace = directory("GM Manager", { "Khách hàng": customers, "Nhân lực": directory("Nhân lực") });
+  const drive = directory("I", { "Company": directory("Company", { "Project data": directory("Project data", { "GM Manager": workspace }) }) });
+  assert.equal(await helpers.verifyBrowserWorkspace(drive), workspace);
+  assert.equal(await helpers.verifyBrowserWorkspace(customers), customers);
+  assert.equal(await helpers.browserWorkspaceAtPath(drive, "I:\\Company\\Project data\\GM Manager\\Khách hàng"), customers);
+  assert.equal(await helpers.browserWorkspaceAtPath(workspace, "I:\\Shared drives\\GM Manager\\GM Manager\\Khách hàng\\2026"), customers);
+  assert.equal(await helpers.browserWorkspaceAtPath(drive, "I:"), workspace);
+  await assert.rejects(helpers.browserWorkspaceAtPath(workspace, "I:\\Private\\other-workspace"), /vị trí đã cấp quyền/);
+  await assert.rejects(helpers.browserWorkspaceAtPath(workspace, "..\\other-workspace"), /không hợp lệ/);
 });
 
 test("mobile document opening uses the correct PDF/Office MIME with a browser fallback", () => {

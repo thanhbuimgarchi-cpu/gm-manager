@@ -32,12 +32,34 @@ async function directoryChild(parent, name, root = parent) {
 }
 
 async function normalizeWorkspaceRoot(value) {
-  const selected = String(value || "").trim().replace(/^"(.*)"$/, "$1");
+  let selected = String(value || "").trim().replace(/^["'](.*)["']$/, "$1").trim();
+  if (/^[a-z]:$/i.test(selected)) selected += path.sep;
   if (!selected || !path.isAbsolute(selected)) return "";
-  // Only inspect known GM Manager branches. Selecting an entire drive must
-  // never trigger a recursive scan of every local or shared-drive folder.
+  try {
+    selected = await fs.realpath(selected);
+    if (!(await fs.stat(selected)).isDirectory()) return "";
+  } catch { return ""; }
+  const workspaceAt = async (candidate) => {
+    const [customers, personnel] = await Promise.all([
+      directoryChild(candidate, "Khách hàng", candidate),
+      directoryChild(candidate, "Nhân lực", candidate),
+    ]);
+    return customers && personnel ? candidate : "";
+  };
+  // A pasted path may point at Customers, a month, or a document day. Resolve
+  // an existing workspace ancestor before searching below the selected drive.
+  let ancestor = selected;
+  while (true) {
+    const workspace = await workspaceAt(ancestor);
+    if (workspace) return workspace;
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  if (sameDriveEntryName(path.basename(selected), "Khách hàng")) return selected;
+  // Try the common Drive layouts first, then inspect directories only. Both
+  // search limits keep an entire-drive selection responsive on large disks.
   const candidates = [
-    selected,
     path.join(selected, "GM Manager"),
     path.join(selected, "GM Manager", "GM Manager"),
     path.join(selected, "Shared drives", "GM Manager"),
@@ -46,15 +68,31 @@ async function normalizeWorkspaceRoot(value) {
     path.join(selected, "My Drive", "GM Manager", "GM Manager"),
   ];
   for (const candidate of candidates) {
-    if (!sameDriveEntryName(path.basename(candidate), "GM Manager")) continue;
     try {
       const realCandidate = await fs.realpath(candidate);
-      const [customers, personnel] = await Promise.all([
-        directoryChild(realCandidate, "Khách hàng", realCandidate),
-        directoryChild(realCandidate, "Nhân lực", realCandidate),
-      ]);
-      if (customers && personnel) return realCandidate;
+      if (!isWithinRoot(selected, realCandidate)) continue;
+      const workspace = await workspaceAt(realCandidate);
+      if (workspace) return workspace;
     } catch { /* Try the next explicit GM Manager branch. */ }
+  }
+  const queue = [{ folder: selected, depth: 0 }];
+  const visited = new Set();
+  const skipped = new Set(["$recycle.bin", "system volume information", "windows", "node_modules", ".git", ".dropbox.cache"]);
+  for (let index = 0; index < queue.length && visited.size < 2048; index++) {
+    const { folder, depth } = queue[index];
+    if (visited.has(folder)) continue;
+    visited.add(folder);
+    const workspace = await workspaceAt(folder);
+    if (workspace) return workspace;
+    if (depth >= 8) continue;
+    let entries;
+    try { entries = await fs.readdir(folder, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || skipped.has(entry.name.toLowerCase())) continue;
+      if (queue.length >= 4096) break;
+      const child = path.join(folder, entry.name);
+      if (isWithinRoot(selected, child)) queue.push({ folder: child, depth: depth + 1 });
+    }
   }
   return "";
 }
@@ -65,7 +103,7 @@ async function findProjectDocumentsAtRoot(root, payload = {}) {
   if (!/^\d{4}$/.test(year) || !Number.isInteger(month) || month < 1 || month > 12) return "";
   const identifiers = [payload.houseId, payload.projectId].map(safeDriveEntryName).filter((name, index, values) => name && values.indexOf(name) === index);
   if (!identifiers.length) return "";
-  let current = await directoryChild(root, "Khách hàng", root);
+  let current = sameDriveEntryName(path.basename(root), "Khách hàng") ? root : await directoryChild(root, "Khách hàng", root);
   if (!current) return "";
   current = await directoryChild(current, year, root);
   if (!current) return "";

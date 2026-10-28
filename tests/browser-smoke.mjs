@@ -246,7 +246,7 @@ await login.getByLabel('Mã đăng nhập',{exact:true}).fill('00123');
 await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
 await login.getByRole('alert').waitFor();
 assert.ok((await login.getByRole('alert').innerText()).includes('thư mục'),'PC rejects missing workspace folder');
-await login.getByRole('button',{name:'Chọn thư mục',exact:true}).click();
+await login.getByRole('button',{name:'Chọn ổ / thư mục',exact:true}).click();
 await login.getByLabel('Mã đăng nhập',{exact:true}).fill('wrong-code');
 await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
 await page.waitForFunction(()=>document.querySelector('.login-dialog [role=alert]')?.textContent.includes('mã đăng nhập'));
