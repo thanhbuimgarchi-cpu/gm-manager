@@ -436,6 +436,7 @@ function doPost(event) {
     if (payload.action === "load-assigned-design-tasks") return json_(loadAssignedDesignTasks_(payload));
     if (payload.action === "load-workspace-cache") return json_(loadWorkspaceCache_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
+    if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
     if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
     if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
@@ -468,7 +469,6 @@ function doPost(event) {
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
     if (payload.action === "delete-document-snapshot") return json_(deleteDocumentSnapshot_(payload));
-    if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
@@ -2087,7 +2087,7 @@ function loadAssignedWorkNotes_(payload) {
   // while each employee continues to receive only work assigned to them.
   if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, notes: activeNotes };
   const member = actor ? actor.member : employeeRosterMember_(email);
-  if (member && member.role === "Quản lý chung") return { ...metadata, notes: activeNotes };
+  if (personnelIsManager_(member)) return { ...metadata, notes: activeNotes };
   return { ...metadata, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
 }
 
@@ -2724,7 +2724,7 @@ function workflowActor_(payload) {
   if (account === "admin") return { account: account, name: "Admin", admin: true, manager: true, member: null, permissions: ["Ghi chú", "Thiết kế", "Tin nhắn"] };
   const member = employeeRosterMember_(account);
   if (!member) throw workflowError_("AUTH_REQUIRED", "Nhân viên không còn hoạt động trong danh sách Nhân lực. Hãy đăng nhập lại hoặc liên hệ admin.");
-  return { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160), admin: false, manager: member.role === "Quản lý chung", member: member, permissions: Array.isArray(member.permissions) ? member.permissions : [] };
+  return { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160), admin: false, manager: personnelIsManager_(member), member: member, permissions: Array.isArray(member.permissions) ? member.permissions : [] };
 }
 
 function workflowMayUse_(actor, permission) {
@@ -3419,7 +3419,7 @@ function loadAssignedDesignTasks_(payload) {
   const tasks = queue.items.filter(function(task) { return !task.actualDate && (actor || task.collectionRevision === undefined); });
   if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, tasks: tasks };
   const member = actor ? actor.member : employeeRosterMember_(email);
-  if (member && member.role === "Quản lý chung") return { ...metadata, tasks: tasks };
+  if (personnelIsManager_(member)) return { ...metadata, tasks: tasks };
   return { ...metadata, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
 }
 
@@ -3461,8 +3461,8 @@ function listDocumentSnapshots_(documentsFolder, projectId) {
   return snapshots;
 }
 
-function readDocumentManifest_(documentsFolder) {
-  const file = findFileByName_(documentsFolder, DOCUMENT_MANIFEST_NAME);
+function readDocumentManifest_(documentsFolder, manifestFileId) {
+  const file = manifestFileId === undefined ? findFileByName_(documentsFolder, DOCUMENT_MANIFEST_NAME) : manifestFileId ? DriveApp.getFileById(manifestFileId) : null;
   if (!file) return { files: {}, snapshots: {} };
   try {
     const manifest = JSON.parse(file.getBlob().getDataAsString("UTF-8") || "{}");
@@ -3579,7 +3579,11 @@ function threeDFoldersForPayload_(payload, createMissing) {
 function threeDFoldersForCustomerFolder_(customerFolder, createMissing) {
   if (!customerFolder) return null;
   if (createMissing) return ensureThreeDFolders_(customerFolder);
-  const root = findFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  let root = findFolder_(customerFolder, THREE_D_FOLDER_NAME);
+  if (!root) {
+    const documentsFolder = findFolder_(customerFolder, DOCUMENTS_FOLDER_NAME);
+    root = documentsFolder ? findFolder_(documentsFolder, THREE_D_FOLDER_NAME) : null;
+  }
   if (!root) return null;
   const folders = THREE_D_CATEGORIES.map(function(category) {
     const folder = createMissing ? getOrCreateFolder_(root, category.name) : findFolder_(root, category.name);
@@ -3682,6 +3686,26 @@ function projectSourceFiles_(customerFolder) {
   return sources;
 }
 
+function documentListingIndex_(documentsFolder, projectId) {
+  try {
+    // Enumerate only metadata once for the index. DriveApp otherwise needs
+    // several remote property calls for every historical daily folder.
+    const children = listDriveChildrenMetadata_(documentsFolder.getId());
+    const snapshots = children.filter(function(item) {
+      return item.mimeType === "application/vnd.google-apps.folder" && !!documentSnapshotDate_(item.name);
+    }).map(function(item) { return { id: item.id, name: item.name, date: documentSnapshotDate_(item.name) }; });
+    snapshots.sort(function(a, b) {
+      const order = function(item) { const parts = item.date.split("/"); return parts[2] + parts[1] + parts[0]; };
+      return order(b).localeCompare(order(a)) || b.name.localeCompare(a.name);
+    });
+    const manifestFile = children.find(function(item) { return item.name === DOCUMENT_MANIFEST_NAME && item.mimeType !== "application/vnd.google-apps.folder"; });
+    return { snapshots: snapshots, manifest: readDocumentManifest_(documentsFolder, manifestFile ? manifestFile.id : "") };
+  } catch (error) {
+    // Keep older deployments working when the REST Drive scope is missing.
+    return { snapshots: listDocumentSnapshots_(documentsFolder, projectId), manifest: readDocumentManifest_(documentsFolder) };
+  }
+}
+
 function listDocuments_(payload) {
   const year = Number(payload.year);
   const month = Number(payload.month);
@@ -3691,16 +3715,20 @@ function listDocuments_(payload) {
   // Listing must stay read-only. A new day is created only by the explicit
   // "Bản ngày mới" command, never when the user merely opens or switches days.
   const documentsFolder = documentsFolderForPayload_(payload, false);
-  if (!documentsFolder) return { ok: true, snapshots: [], activeSnapshotId: "", files: [] };
-  const snapshots = listDocumentSnapshots_(documentsFolder, folderKey);
-  const requestedId = String(payload.snapshotId || "");
+  const metadataOnly = payload.metadataOnly === true;
+  if (!documentsFolder) return { ok: true, snapshots: [], activeSnapshotId: "", latestSnapshotId: "", files: [], metadataOnly: metadataOnly };
+  const index = documentListingIndex_(documentsFolder, folderKey);
+  const snapshots = index.snapshots;
+  const requestedId = payload.latest === true ? "" : String(payload.snapshotId || "");
   const snapshotIndex = Math.max(0, snapshots.findIndex(function(snapshot) { return snapshot.id === requestedId; }));
   const target = snapshots[snapshotIndex];
-  const manifest = readDocumentManifest_(documentsFolder);
+  const manifest = index.manifest;
   const files = [];
-  if (target) {
+  if (target && !metadataOnly) {
     try {
-      listDriveChildrenMetadata_(target.folder.getId()).forEach(function(item) {
+      // Read children directly every time. A parent folder's modifiedTime
+      // does not reliably change when a desktop upload changes its children.
+      listDriveChildrenMetadata_(target.id).forEach(function(item) {
         if (item.mimeType === "application/vnd.google-apps.folder") return;
         if (isHiddenDocumentFile_(item.name)) return;
         if (isSpreadsheetFile_(item.name, item.mimeType)) return;
@@ -3718,7 +3746,7 @@ function listDocuments_(payload) {
         });
       });
     } catch (error) {
-      const iterator = target.folder.getFiles();
+      const iterator = (target.folder || DriveApp.getFolderById(target.id)).getFiles();
       while (iterator.hasNext()) {
         const file = iterator.next();
         if (isHiddenDocumentFile_(file.getName())) continue;
@@ -3730,7 +3758,7 @@ function listDocuments_(payload) {
     }
   }
   files.sort(function(a, b) { return b.updatedAtMillis - a.updatedAtMillis || a.name.localeCompare(b.name); });
-  return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date, locked: !!((manifest.snapshots || {})[snapshot.id] || {}).locked }; }), activeSnapshotId: target ? target.id : "", files: files };
+  return { ok: true, snapshots: snapshots.map(function(snapshot) { return { id: snapshot.id, name: snapshot.name, date: snapshot.date, locked: !!((manifest.snapshots || {})[snapshot.id] || {}).locked }; }), activeSnapshotId: target ? target.id : "", latestSnapshotId: snapshots.length ? snapshots[0].id : "", files: files, metadataOnly: metadataOnly };
 }
 
 function listThreeDFolderFiles_(folder) {
@@ -3770,12 +3798,15 @@ function list3DFiles_(payload) {
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
   if (!year || month < 1 || month > 12 || !projectId) throw new Error("Thiếu thông tin thư mục 3D.");
-  const structure = threeDFoldersForPayload_(payload, true);
+  // Opening/refreshing a library is read-only and must not wait for the global
+  // mutation/export lock or create missing folders as a side effect.
+  const structure = threeDFoldersForPayload_(payload, false);
+  if (!structure) return { ok: true, rootUrl: "", folders: THREE_D_CATEGORIES.map(function(item) { return { key: item.key, name: item.name, folderUrl: "", files: [] }; }) };
   return {
     ok: true,
     rootUrl: structure.root.getUrl(),
     folders: structure.folders.map(function(item) {
-      return { key: item.key, name: item.name, folderUrl: item.folder.getUrl(), files: listThreeDFolderFiles_(item.folder) };
+      return { key: item.key, name: item.name, folderUrl: item.folder ? item.folder.getUrl() : "", files: listThreeDFolderFiles_(item.folder) };
     }),
   };
 }
@@ -3900,6 +3931,16 @@ function personnelFolder_() {
 }
 
 const PERSONNEL_CACHE_PROPERTY_KEY = "gmcrm-personnel-state-v1";
+function personnelRole_(value) {
+  const key = String(value === null || value === undefined ? "" : value).normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi");
+  if (key === "quản lý" || key === "quản lý chung") return "Quản lý chung";
+  const roles = ["Nhân viên kỹ thuật", "Nhân viên văn phòng", "Marketing", "Giám sát", "Thợ xưởng", "Thợ công trình", "Kế toán", "Nhân viên thiết kế"];
+  return roles.find(function(role) { return role.toLocaleLowerCase("vi") === key; }) || "";
+}
+
+function personnelIsManager_(member) {
+  return Boolean(member && personnelRole_(member.role) === "Quản lý chung");
+}
 // Kept only for one-time migration of rosters created before the Drive root
 // was changed. New reads/writes never depend on this folder.
 const LEGACY_PERSONNEL_ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
@@ -3912,6 +3953,7 @@ function savePersonnelCache_(personnel) {
       if (!member || typeof member !== "object" || Array.isArray(member)) return member;
       const result = Object.assign({}, member);
       if (Object.prototype.hasOwnProperty.call(member, "loginCode")) result.loginCode = employeeLoginCode_(member.loginCode);
+      if (Object.prototype.hasOwnProperty.call(member, "role")) result.role = personnelRole_(member.role);
       return result;
     });
   });
@@ -4211,7 +4253,7 @@ function verifyEmployeeCodeLogin_(payload) {
       email: String(member.email || "").trim().toLowerCase(),
       birthDate: String(member.birthDate || ""),
       phone: normalizePersonnelPhone_(member.phone),
-      role: String(member.role || ""),
+      role: personnelRole_(member.role),
       permissions: Array.isArray(member.permissions) ? member.permissions.map(function(value) { return String(value || ""); }) : [],
       address: String(member.address || ""),
     },

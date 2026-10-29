@@ -7,6 +7,7 @@ Phát hành, sửa, nhận và xóa ghi chú gửi một lệnh, không đọc l
 - Máy chủ xác thực phiên đăng nhập, kiểm tra lại nhân viên đang hoạt động và quyền hiện tại.
 - Người tạo được sửa/xóa ghi chú chưa hoàn thành; người phụ trách vẫn được nhận và hoàn thành việc trong Ghi chú.
 - Tin nhắn khách, Tư vấn và Thiết kế chỉ cho admin/Quản lý chung thao tác: giao việc, đổi trạng thái, sửa dữ liệu, phát hành, nhận/hoàn thành thiết kế và xuất Drive. Nhân viên được xem trong phạm vi đã cấp quyền. Máy chủ kiểm tra vai trò hiện tại theo phiên đã ký; cache từ nhân viên không được ghi đè dữ liệu Tư vấn/Thiết kế đã lưu.
+- Chức danh cũ “Quản lý” được chuẩn hóa thành “Quản lý chung”, không phân biệt hoa thường, dấu Unicode hay khoảng trắng. Không suy đoán quyền từ tên nhân viên hoặc tên chức danh gần giống. Tạo/xóa khách và Thiết lập vẫn chỉ dành cho admin.
 - Ngày hoàn thành và thời điểm nhận việc do máy chủ ghi theo giờ Việt Nam. Ngày dự kiến mới phải là hôm nay hoặc tương lai.
 - Mỗi yêu cầu có mã cố định khi gửi lại. Revision ngăn bản cũ ghi đè thay đổi mới; tombstone ngăn ghi chú đã xóa xuất hiện lại.
 
@@ -25,6 +26,12 @@ Dữ liệu hoạt động dùng cache chia sẻ của Apps Script. Các khối 
 Hoàn thành được xác nhận trong cache trước. Nếu Drive lỗi, công việc được đánh dấu chờ lưu và có nút thử lại. Ghi chú chỉ được ẩn sau hai ngày khi đã lưu trữ; tin nhắn chỉ được gỡ khỏi giao diện sau khi Excel được lưu thành công. Trường hợp thử nghiệm Bùi Đức Thành không tạo tệp Drive.
 
 Excel được xuất qua Drive `files.export`, kiểm tra phản hồi và định dạng ZIP/XLSX. Tệp cũ chỉ được chuyển vào thùng rác sau khi tạo thành công tệp mới; lịch sử không đọc được sẽ dừng thao tác thay vì bị bỏ qua.
+
+## Cập nhật tài liệu
+
+Khi mở Tài liệu hoặc 3D, giao diện hiện cache trước và làm mới từ Drive. Trong khi thư viện đang hiển thị và có mạng, lượt kiểm tra tiếp theo chạy sau khi lượt trước hoàn thành 3 giây. Quay lại cửa sổ hoặc có mạng trở lại sẽ kiểm tra ngay; không gửi chồng các lượt đọc cùng dự án.
+
+Ngày mới nhất tự nạp tên tệp và ngày sửa, không đọc nội dung tệp. Khi xem ngày cũ, cập nhật nền chỉ kiểm tra danh sách ngày; nội dung ngày cũ vẫn nạp theo yêu cầu và giữ trên giao diện khi đã nạp. Phản hồi đến muộn không đổi ngày/khách đang xem. Tài liệu và 3D dùng đường đọc riêng, không chờ khóa xuất/ghi dữ liệu toàn hệ thống.
 
 ## Tương thích và kiểm tra
 

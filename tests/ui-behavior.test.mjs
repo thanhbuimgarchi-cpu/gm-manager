@@ -12,7 +12,7 @@ const workflowCode = await transform(workflowSource, { loader: "ts", format: "cj
 const workflowExports = {};
 const workflowContext = vm.createContext({ module: { exports: workflowExports }, exports: workflowExports, console, Date, Intl, URL, Set, Map });
 vm.runInContext(workflowCode.code, workflowContext);
-const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, browserWorkspaceAtPath, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError, normalizeDesignProgress, mergeSharedWorkspaceYears, mergeWorkflowDesignRows };`, {
+const { code } = await transform(`${source}\nexport { uniqueCustomerProjectId, compareOutstandingWorkNotes, mergeWorkNotesForSync, reconcileWorkNoteEdit, parseDesignDate, saveWorkspace, employeeByLoginCode, verifyBrowserWorkspace, browserWorkspaceAtPath, mobileFileOpenUrl, customerRecordsAfterDriveMutation, customerDriveMutationError, normalizeDesignProgress, mergeSharedWorkspaceYears, mergeWorkflowDesignRows, normalizePersonnelRole, isPersonnelManager, normalizePersonnelMap };`, {
   loader: "tsx",
   format: "cjs",
   define: { "import.meta.env": JSON.stringify({ VITE_APP_VERSION: "test", BASE_URL: "/" }) },
@@ -83,6 +83,17 @@ test("roster login matches the full accented name and an exact code, rejecting a
   assert.equal(helpers.employeeByLoginCode([member], member.name, "123"), null);
   assert.equal(helpers.employeeByLoginCode([member, {...member,id:"p2"}], member.name, member.loginCode), null);
   assert.equal(helpers.employeeByLoginCode([{...member,status:"Ngưng"}], member.name, member.loginCode), null);
+});
+
+test("manager titles survive cached roster normalization without granting similarly named staff access", () => {
+  for (const role of ["Quản lý chung", "Quản lý", "  QUẢN   LÝ  CHUNG ", "Quản lý".normalize("NFD")]) {
+    const member = { id: "manager", name: "Quản lý kiểm thử", role, status: "Có", permissions: [] };
+    assert.equal(helpers.normalizePersonnelRole(role), "Quản lý chung");
+    assert.equal(helpers.isPersonnelManager(member), true);
+    assert.equal(helpers.normalizePersonnelMap({ office: [member] }).office[0].role, "Quản lý chung");
+  }
+  for (const role of ["Giám sát", "Nhân viên văn phòng", "Nhân viên quản lý", "Quản lý kỹ thuật", "", null]) assert.equal(helpers.isPersonnelManager({ role }), false);
+  assert.equal(helpers.isPersonnelManager(null), false);
 });
 
 test("browser folder validation requires both workspace folders and accepts the outer Drive root", async () => {

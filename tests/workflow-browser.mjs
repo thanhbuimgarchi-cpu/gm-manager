@@ -11,7 +11,7 @@ const scriptUrl = pageSource.match(/scriptUrl:\s*"(https:\/\/script\.google\.com
 const fixedNow = '2026-10-28T02:00:00.000Z';
 const permissions = ['Ghi chú','Tư vấn','Thiết kế','Dự toán','Thi công','Nghiệm thu','Bảo hành','Tài liệu','3D'];
 const member = {id:'workflow-employee',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',loginCode:'00123',role:'Nhân viên thiết kế',permissions,birthDate:'',phone:'',address:''};
-const manager = {...member,id:'workflow-manager',name:'Quản lý kiểm thử',email:'manager@example.com',loginCode:'manager-code',role:'Quản lý chung'};
+const manager = {...member,id:'workflow-manager',name:'Quản lý kiểm thử',email:'manager@example.com',loginCode:'manager-code',role:'  QUẢN   LÝ '.normalize('NFD'),permissions:[]};
 const personnel = {office:[member,manager]};
 const token = (account, purpose='workflow', version=2) => `${Buffer.from(JSON.stringify({version,purpose,account,expiresAt:Date.parse('2026-11-28T02:00:00Z'),nonce:`qa-${account}`})).toString('base64url')}.fixture-signature`;
 const tokens = Object.fromEntries(['admin',member.email,manager.email].map(account=>[account,token(account)]));

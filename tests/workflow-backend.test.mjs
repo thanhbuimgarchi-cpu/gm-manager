@@ -223,6 +223,30 @@ test("only a current manager may change message status or assign work, even with
   assert.throws(() => f.command("manager", "message.status", { messageId: group.id, status: "resolved" }), code("FORBIDDEN"), "a saved session cannot preserve a revoked management role");
 });
 
+test("normalized roster manager titles have admin message actions while admin-only actions stay protected", () => {
+  for (const role of ["Quản lý chung", "Quản lý", "  QUẢN   LÝ   CHUNG ", "Quản lý".normalize("NFD")]) {
+    const f = fixture();
+    const manager = f.personnel.find(member => member.id === "manager");
+    manager.role = role;
+    const login = f.context.verifyEmployeeLogin_({ name: manager.name, loginCode: manager.loginCode });
+    assert.equal(login.valid, true);
+    assert.equal(login.member.role, "Quản lý chung");
+    assert.equal(f.context.workflowActor_({ workflowSessionToken: f.tokens.manager }).manager, true);
+    assert.throws(() => f.context.requireCustomerAdminSession_({ adminSessionToken: f.tokens.manager }), /Chỉ admin/);
+    const group = f.message();
+    f.context.workflowIngestMessages_([group]);
+    for (const status of ["processing", "new"]) {
+      assert.equal(f.command("manager", "message.status", { messageId: group.id, status }).message.status, status);
+    }
+    const assigned = f.command("manager", "message.assign", { messageId: group.id, selectedLineIds: ["line-one"], assignment: f.note("manager-assignment") });
+    assert.equal(assigned.note.creatorEmail, manager.email);
+    f.context.appendPancakeMessageWorkbook_ = () => ({});
+    assert.equal(f.command("manager", "message.status", { messageId: group.id, status: "resolved" }).message.status, "resolved");
+    manager.role = "Nhân viên quản lý";
+    assert.throws(() => f.command("manager", "message.status", { messageId: group.id, status: "new" }), code("FORBIDDEN"));
+  }
+});
+
 test("consulting and draft design fields are protected from employee cache writes while warranty updates remain available", () => {
   const f = fixture();
   const years = f.context.loadWorkspaceCache_().years;

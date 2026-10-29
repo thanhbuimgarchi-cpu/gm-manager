@@ -772,7 +772,7 @@ async function postToAppsScript<T extends { ok?: boolean; error?: string }>(conf
     const account = window.localStorage.getItem(personnelSessionEmailKey);
     if (!requestPayload.workflowSessionToken && session?.scriptUrl === config.scriptUrl.trim() && session?.account === account && typeof session?.token === "string") requestPayload.workflowSessionToken = session.token;
   } catch { /* Public reads and login do not require a saved session. */ }
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "list-3d-files", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -825,6 +825,15 @@ const syncedDriveFolders: DriveFolder[] = [
 ].filter((folder) => !folder.label.startsWith("-"));
 
 const personnelRoles = ["Nhân viên kỹ thuật", "Quản lý chung", "Nhân viên văn phòng", "Marketing", "Giám sát", "Thợ xưởng", "Thợ công trình", "Kế toán", "Nhân viên thiết kế"] as const;
+function normalizePersonnelRole(value: unknown) {
+  const key = String(value ?? "").normalize("NFC").trim().replace(/\s+/g, " ").toLocaleLowerCase("vi");
+  if (key === "quản lý") return "Quản lý chung";
+  return personnelRoles.find((role) => role.toLocaleLowerCase("vi") === key) ?? "";
+}
+
+function isPersonnelManager(member: Pick<PersonnelMember, "role"> | null | undefined) {
+  return normalizePersonnelRole(member?.role) === "Quản lý chung";
+}
 const personnelPermissionOptions = ["Ghi chú", "Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Tài liệu", "3D"] as const;
 const builtInAdminAccount = "admin";
 const builtInAdminPassword = "1";
@@ -1711,7 +1720,7 @@ function normalizePersonnelMap(value: Record<string, PersonnelMember[]>): Record
     email: String(member.email ?? "").trim().toLowerCase(),
     loginCode: String(member.loginCode ?? "").trim(),
     phone: normalizePersonnelPhone(member.phone),
-    role: personnelRoles.includes(member.role as typeof personnelRoles[number]) ? member.role : "",
+    role: normalizePersonnelRole(member.role),
     permissions: Array.from(new Set((Array.isArray(member.permissions) ? member.permissions : []).filter((permission): permission is typeof personnelPermissionOptions[number] => personnelPermissionOptions.includes(permission as typeof personnelPermissionOptions[number])))),
   }))]));
 }
@@ -2062,8 +2071,10 @@ export default function Home() {
   workflowView.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, activeFolder, account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl };
   const personnelLoadRevision = useRef(0);
   const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
-  const documentViewContext = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId });
-  documentViewContext.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId };
+  const documentViewContext = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() });
+  documentViewContext.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
+  const documentReadInFlight = useRef(new Map<string, Promise<void>>());
+  const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
   const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
@@ -3277,13 +3288,14 @@ export default function Home() {
     const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
     return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
   };
-  const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false, quietly = false) => {
+  const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false, quietly = false, metadataOnly = false): Promise<void> => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
     const requestedLocation = selectedCustomerLocation;
-    const viewedSnapshotAtStart = documentViewContext.current.snapshotId;
+    const viewAtStart = { ...documentViewContext.current };
+    const viewedSnapshotAtStart = viewAtStart.snapshotId;
     const requestedSnapshotId = snapshotId || "";
     const cacheKey = documentCacheKey(requestedSnapshotId);
-    const requestKey = `document-list:${cacheKey}`;
+    const requestKey = JSON.stringify([viewAtStart.scriptUrl, viewAtStart.driveUrl, requestedLocation.year, requestedLocation.month, requestedLocation.record.projectId]);
     const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
     if (cached && !refresh) {
       setDocumentSnapshots(cached.snapshots);
@@ -3296,41 +3308,69 @@ export default function Home() {
       setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
       return;
     }
-    if (driveRequestsInFlight.current.has(requestKey)) return;
-    driveRequestsInFlight.current.add(requestKey);
-    if (!quietly) { setLoadingDocuments(true); setDocumentsError(""); }
-    try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "list-documents",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-        snapshotId: requestedSnapshotId || undefined,
-        refresh,
-      });
-      if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
-      const currentView = documentViewContext.current;
-      if (currentView.projectId !== requestedLocation.record.projectId || currentView.year !== requestedLocation.year || currentView.month !== requestedLocation.month || (quietly && currentView.snapshotId !== viewedSnapshotAtStart)) return;
-      const activeId = requestedSnapshotId || result.activeSnapshotId || "";
-      const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
-      writeDriveCache(cacheKey, next);
-      if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
-      setDocumentSnapshots(next.snapshots);
-      setDocumentsError("");
-      setDocumentFiles(next.files);
-      if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: next.files }));
-      setSelectedDocumentSnapshotId(activeId);
-      setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
-      if (!cached && !quietly) setDocumentsError(message);
-      if (refresh && !quietly) setNotice(message);
-    } finally {
-      driveRequestsInFlight.current.delete(requestKey);
-      if (!quietly) setLoadingDocuments(false);
+    const pending = documentReadInFlight.current.get(requestKey);
+    if (pending) {
+      await pending;
+      if (quietly) return;
+      const view = documentViewContext.current;
+      if (view.projectId !== requestedLocation.record.projectId || view.year !== requestedLocation.year || view.month !== requestedLocation.month || view.scriptUrl !== viewAtStart.scriptUrl || view.driveUrl !== viewAtStart.driveUrl || (requestedSnapshotId && view.snapshotId !== requestedSnapshotId && view.snapshotId !== viewedSnapshotAtStart)) return;
+      return loadDocuments(snapshotId, refresh, activateLatest, quietly, metadataOnly);
     }
+    const request = (async () => {
+      if (!quietly) { setLoadingDocuments(true); setDocumentsError(""); }
+      try {
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; latestSnapshotId?: string; files?: DocumentFile[]; metadataOnly?: boolean }>({ scriptUrl: viewAtStart.scriptUrl }, {
+          action: "list-documents",
+          year: selectedCustomerLocation.year,
+          month: selectedCustomerLocation.month,
+          projectId: selectedCustomerLocation.record.projectId,
+          houseId: selectedCustomerLocation.record.houseId,
+          snapshotId: requestedSnapshotId || undefined,
+          latest: !requestedSnapshotId,
+          metadataOnly,
+          refresh,
+        });
+        if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
+        const currentView = documentViewContext.current;
+        if (currentView.projectId !== requestedLocation.record.projectId || currentView.year !== requestedLocation.year || currentView.month !== requestedLocation.month || currentView.scriptUrl !== viewAtStart.scriptUrl || currentView.driveUrl !== viewAtStart.driveUrl) return;
+        // A delayed latest response may refresh its cache, but must never move
+        // the user away from a different day selected while it was in flight.
+        const activeId = result.activeSnapshotId || (result.snapshots.some((snapshot) => snapshot.id === requestedSnapshotId) ? requestedSnapshotId : "");
+        const hydratedFromCache = !viewedSnapshotAtStart && currentView.snapshotId === (cached?.activeSnapshotId || activeId);
+        const sameDay = hydratedFromCache || currentView.snapshotId === viewedSnapshotAtStart || Boolean(requestedSnapshotId && currentView.snapshotId === requestedSnapshotId);
+        if (metadataOnly || result.metadataOnly) {
+          setDocumentSnapshots(result.snapshots);
+          const latest = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(""), DRIVE_DOCUMENT_CACHE_MS);
+          if (latest && latest.activeSnapshotId === (result.latestSnapshotId ?? result.snapshots[0]?.id ?? "")) writeDriveCache(documentCacheKey(""), { ...latest, snapshots: result.snapshots });
+          else try { window.localStorage.removeItem(`${driveCachePrefix}${documentCacheKey("")}`); } catch { /* Optional index cache. */ }
+          return;
+        }
+        const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
+        writeDriveCache(cacheKey, next);
+        if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
+        if (!sameDay) return;
+        setDocumentSnapshots(next.snapshots);
+        setDocumentsError("");
+        setDocumentFiles(next.files);
+        if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: next.files }));
+        setSelectedDocumentSnapshotId(activeId);
+        setLoadedDocumentSnapshotId(activeId);
+        setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
+        const view = documentViewContext.current;
+        if (view.projectId === viewAtStart.projectId && view.scriptUrl === viewAtStart.scriptUrl && view.driveUrl === viewAtStart.driveUrl) {
+          if (!cached && !quietly) setDocumentsError(message);
+          if (refresh && !quietly) setNotice(message);
+        }
+      } finally {
+        documentReadInFlight.current.delete(requestKey);
+        const view = documentViewContext.current;
+        if (!quietly && view.projectId === viewAtStart.projectId && view.scriptUrl === viewAtStart.scriptUrl && view.driveUrl === viewAtStart.driveUrl) setLoadingDocuments(false);
+      }
+    })();
+    documentReadInFlight.current.set(requestKey, request);
+    await request;
   };
 
   const createDocumentSnapshot = async () => {
@@ -3379,8 +3419,9 @@ export default function Home() {
   };
 
   const threeDCacheKey = (location = selectedCustomerLocation) => location ? `three-d-v1:${location.year}-${location.month}-${location.record.projectId}` : "";
-  const loadThreeDLibrary = async (refresh = false) => {
+  const loadThreeDLibrary = async (refresh = false, quietly = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    const viewAtStart = { ...documentViewContext.current };
     const cacheKey = threeDCacheKey();
     const cached = readDriveCache<{ rootUrl: string; folders: ThreeDLibraryFolder[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
     if (cached && !refresh) {
@@ -3389,7 +3430,7 @@ export default function Home() {
     }
     if (driveRequestsInFlight.current.has(cacheKey)) return;
     driveRequestsInFlight.current.add(cacheKey);
-    setLoadingThreeDLibrary(true);
+    if (!quietly) setLoadingThreeDLibrary(true);
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; rootUrl?: string; folders?: ThreeDLibraryFolder[] }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "list-3d-files",
@@ -3397,16 +3438,20 @@ export default function Home() {
         month: selectedCustomerLocation.month,
         projectId: selectedCustomerLocation.record.projectId,
         houseId: selectedCustomerLocation.record.houseId,
+        refresh,
       });
-      if (!response.ok || !result.ok || !result.rootUrl || !result.folders) throw new Error(result.error || "Không thể nạp thư mục 3D.");
+      if (!response.ok || !result.ok || typeof result.rootUrl !== "string" || !result.folders) throw new Error(result.error || "Không thể nạp thư mục 3D.");
+      const view = documentViewContext.current;
+      if (view.projectId !== viewAtStart.projectId || view.year !== viewAtStart.year || view.month !== viewAtStart.month || view.scriptUrl !== viewAtStart.scriptUrl || view.driveUrl !== viewAtStart.driveUrl) return;
       const next = { rootUrl: result.rootUrl, folders: result.folders };
       writeDriveCache(cacheKey, next);
       setThreeDLibrary(next);
     } catch (error) {
-      if (refresh) setNotice(error instanceof Error ? error.message : "Không thể cập nhật thư mục 3D.");
+      if (refresh && !quietly) setNotice(error instanceof Error ? error.message : "Không thể cập nhật thư mục 3D.");
     } finally {
       driveRequestsInFlight.current.delete(cacheKey);
-      setLoadingThreeDLibrary(false);
+      const view = documentViewContext.current;
+      if (!quietly && view.projectId === viewAtStart.projectId && view.year === viewAtStart.year && view.month === viewAtStart.month && view.scriptUrl === viewAtStart.scriptUrl && view.driveUrl === viewAtStart.driveUrl) setLoadingThreeDLibrary(false);
     }
   };
 
@@ -3517,6 +3562,13 @@ export default function Home() {
   };
 
   useEffect(() => {
+    // A read still finishing for another customer/connection must not leave
+    // the new library's buttons or live refresh blocked by its loading flag.
+    setLoadingDocuments(false);
+    setLoadingThreeDLibrary(false);
+  }, [selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
+
+  useEffect(() => {
     if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
       // Returning to Tài liệu always prioritizes the newest day. Older days
       // remain on demand, while a day that was already loaded stays in cache.
@@ -3525,24 +3577,54 @@ export default function Home() {
     if (activeFolder === "3D" && selectedCustomerLocation) {
       void loadThreeDLibrary();
     }
-  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl]);
+  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
+
+  // Read the current render through a ref. Capturing loadingDocuments in the
+  // timer's initial closure previously left some libraries permanently stale.
+  refreshVisibleFiles.current = async () => {
+    if (documentSnapshotActionId || loadingDocuments || loadingThreeDLibrary) return;
+    if (activeFolder === "Tài liệu") {
+      const viewingOlder = Boolean(selectedDocumentSnapshotId && documentSnapshots.some((snapshot) => snapshot.id === selectedDocumentSnapshotId) && documentSnapshots[0]?.id !== selectedDocumentSnapshotId);
+      // Discover new dates without loading the contents of historical days.
+      await loadDocuments(undefined, true, false, true, viewingOlder);
+    } else if (activeFolder === "3D") await loadThreeDLibrary(true, true);
+  };
 
   useEffect(() => {
-    if (activeFolder !== "Tài liệu" || !selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    const refreshLatest = () => {
-      if (document.visibilityState !== "visible" || navigator.onLine === false || documentSnapshotActionId || loadingDocuments) return;
-      // Older days remain strictly on demand; only the visible newest day is
-      // refreshed. Background metadata updates never collapse a loaded day.
-      if (selectedDocumentSnapshotId && documentSnapshots[0]?.id !== selectedDocumentSnapshotId) return;
-      void loadDocuments(undefined, true, false, true);
+    if (!["Tài liệu", "3D"].includes(activeFolder) || !selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    let stopped = false;
+    let running = false;
+    let lastStarted = -Infinity;
+    let timer: number | undefined;
+    const available = () => document.visibilityState === "visible" && navigator.onLine !== false;
+    const refresh = async () => {
+      if (stopped || running) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (!available()) return;
+      const delay = Math.max(0, 1000 - (performance.now() - lastStarted));
+      if (delay) { timer = window.setTimeout(() => { void refresh(); }, delay); return; }
+      running = true;
+      lastStarted = performance.now();
+      try { await refreshVisibleFiles.current(); }
+      finally {
+        running = false;
+        // Schedule after completion so slow Google responses cannot pile up.
+        if (!stopped && available()) timer = window.setTimeout(() => { void refresh(); }, 3_000);
+      }
     };
-    refreshLatest();
-    const timer = window.setInterval(refreshLatest, 20_000);
-    document.addEventListener("visibilitychange", refreshLatest);
-    window.addEventListener("focus", refreshLatest);
-    window.addEventListener("online", refreshLatest);
-    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refreshLatest); window.removeEventListener("focus", refreshLatest); window.removeEventListener("online", refreshLatest); };
-  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, selectedDocumentSnapshotId, documentSnapshotActionId]);
+    const wake = () => { void refresh(); };
+    void refresh();
+    document.addEventListener("visibilitychange", wake);
+    window.addEventListener("focus", wake);
+    window.addEventListener("online", wake);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", wake);
+      window.removeEventListener("focus", wake);
+      window.removeEventListener("online", wake);
+    };
+  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
 
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim();
@@ -4339,15 +4421,15 @@ export default function Home() {
     if (!isBuiltInAdminLoggedIn) { setNotice("Hãy liên hệ admin để thiết lập kết nối ứng dụng."); return; }
     setDriveConfigOpen(true);
   };
-  const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || loggedInEmployee.role === "Quản lý chung"));
+  const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || isPersonnelManager(loggedInEmployee)));
   const canManageCustomerWorkflows = canViewAllNotesAndMessages;
   const requireCustomerWorkflowManager = () => {
     if (canManageCustomerWorkflows) return true;
     setNotice("Chỉ admin và quản lý được thao tác Tin nhắn khách, Tư vấn và Thiết kế. Tài khoản này chỉ được xem.");
     return false;
   };
-  const employeePermissions = loggedInEmployee?.role === "Quản lý chung" ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
-  const canManagePersonnel = !loggedInEmployee || loggedInEmployee.role === "Quản lý chung";
+  const employeePermissions = isPersonnelManager(loggedInEmployee) ? [...personnelPermissionOptions] : loggedInEmployee?.permissions ?? [];
+  const canManagePersonnel = !loggedInEmployee || isPersonnelManager(loggedInEmployee);
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
   // Tin nhắn khách là luồng thông tin chung: mọi nhân viên đã đăng nhập đều
@@ -4703,7 +4785,7 @@ export default function Home() {
     setEmployeeLoginPassword("");
     setEmployeeLoginError("");
     setLoginOpen(false);
-    const allowedFolders = member.role === "Quản lý chung" ? personnelPermissionOptions : member.permissions;
+    const allowedFolders = isPersonnelManager(member) ? personnelPermissionOptions : member.permissions;
     if (allowedFolders.length) setActiveFolder(allowedFolders[0]);
     setNotice(`Đã đăng nhập ${member.name}.`);
   };
@@ -4719,7 +4801,7 @@ export default function Home() {
       const member = result.account === builtInAdminAccount ? builtInAdminPersonnel : result.member;
       if (!member || (result.account === builtInAdminAccount && !result.adminSessionToken)) throw new Error("Máy chủ chưa trả đủ thông tin đăng nhập. Hãy cập nhật ứng dụng.");
       if (result.account !== builtInAdminAccount) {
-        const verifiedMember = { ...member, loginCode: employeeLoginPassword.trim() };
+        const verifiedMember = { ...member, role: normalizePersonnelRole(member.role), loginCode: employeeLoginPassword.trim() };
         setPersonnelByCategory((current) => {
           let found = false;
           const next = Object.fromEntries(Object.entries(current).map(([category, members]) => [category, members.map((item) => {
