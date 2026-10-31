@@ -40,8 +40,10 @@ export function desktopManifestFromRelease(release) {
 export async function fetchDesktopManifest({ fetcher = fetch, token = '', pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) } = {}) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetcher(releaseApiUrl, {
-        headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'GM-Manager-Release-Manifest', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      const requestUrl = `${releaseApiUrl}?gm-manifest-check=${Date.now()}-${attempt}`;
+      const response = await fetcher(requestUrl, {
+        headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'GM-Manager-Release-Manifest', 'Cache-Control': 'no-cache', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        cache: 'no-store',
         signal: AbortSignal.timeout(15000),
       });
       if (response.status === 404) return { available: false };

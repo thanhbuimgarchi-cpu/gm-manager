@@ -31,10 +31,10 @@ async function fixture({ mode = 'legacy', version = '1.1.0', manifest = release(
     window.open = url => { qa.downloads.push(url); return null; };
     if (mode === 'web') return;
     window.gmDesktop = {
-      isDesktop: true, isWindows: mode !== 'mac', platform: mode === 'mac' ? 'darwin' : 'win32',
+      ...(mode === 'legacy-first' ? {} : { isDesktop: true, platform: mode === 'mac' ? 'darwin' : 'win32' }), isWindows: mode !== 'mac',
       showNotification: async payload => { qa.notifications.push(payload); return true; },
       ...(mode === 'legacy-startup' ? { getStartupSettings: async () => ({ supported: true, canChange: true, openAtLogin: false }), setStartupSettings: async () => ({ supported: true, canChange: true, openAtLogin: false }) } : {}),
-      ...(['legacy', 'legacy-startup'].includes(mode) ? {} : {
+      ...(['legacy-first', 'legacy', 'legacy-startup'].includes(mode) ? {} : {
         getAppInfo: async () => {
           qa.infoCalls += 1;
           if (qa.failInfo) throw new Error('synthetic native connection failure');
@@ -102,6 +102,13 @@ try {
   await legacyStartup.button.waitFor();
   assert.equal(await legacyStartup.page.locator('.pwa-action--startup').count(), 1, 'the 1.1 startup-capable runtime also receives native update offers');
   await legacyStartup.context.close();
+
+  const earliest = await fixture({ mode: 'legacy-first' });
+  await earliest.banner.waitFor();
+  assert.deepEqual(await earliest.page.evaluate(() => Object.keys(gmDesktop).sort()), ['isWindows', 'showNotification'].sort());
+  await earliest.banner.getByRole('button', { name: 'Tải bản PC 1.2.0', exact: true }).click();
+  assert.deepEqual(await earliest.page.evaluate(() => qaUpdates.downloads), [release('1.2.0').installerUrl], 'the earliest Windows bridge can detect and download native upgrades');
+  await earliest.context.close();
 
   const current = await fixture({ mode: 'current', version: '1.2.0' });
   await current.page.waitForFunction(() => qaUpdates.infoCalls > 0);

@@ -2298,7 +2298,7 @@ export default function Home() {
 
   useEffect(() => {
     const desktop = desktopBridge();
-    if (isCustomerPortal || !desktop?.isDesktop || !desktop.isWindows) return;
+    if (isCustomerPortal || !desktop?.isWindows || (!desktop.isDesktop && typeof desktop.showNotification !== "function")) return;
     let disposed = false;
     let running = false;
     const check = async () => {
@@ -2794,7 +2794,7 @@ export default function Home() {
     setOpeningDesktopUpdate(true);
     try {
       const desktop = desktopBridge();
-      if (!desktop?.isWindows || !desktop.isDesktop) return;
+      if (!desktop?.isWindows || (!desktop.isDesktop && typeof desktop.showNotification !== "function")) return;
       if (desktop.downloadUpdate) {
         const result = await desktop.downloadUpdate();
         if (!result?.ok) throw new Error(result?.error || "Chưa mở được bộ cài PC. Hãy thử lại.");

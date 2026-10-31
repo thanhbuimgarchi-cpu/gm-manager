@@ -58,7 +58,9 @@ test('CI performs authenticated release discovery without publishing its token i
   const requests = [];
   const manifest = await fetchDesktopManifest({ token: 'qa-token', fetcher: async (url, options) => { requests.push({ url, options }); return readyResponse(release(installer())); } });
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, releaseApiUrl);
+  assert.ok(requests[0].url.startsWith(`${releaseApiUrl}?gm-manifest-check=`));
+  assert.equal(requests[0].options.cache, 'no-store');
+  assert.equal(requests[0].options.headers['Cache-Control'], 'no-cache');
   assert.equal(requests[0].options.headers.Authorization, 'Bearer qa-token');
   assert.equal(JSON.stringify(manifest).includes('qa-token'), false);
   assert.equal(manifest.version, '1.2.0');
@@ -68,10 +70,12 @@ test('unpublished releases remain unavailable and transient API failures retry w
   assert.deepEqual(await fetchDesktopManifest({ fetcher: async () => ({ ok: false, status: 404 }) }), { available: false });
   let attempts = 0;
   const delays = [];
-  const manifest = await fetchDesktopManifest({ fetcher: async () => ++attempts < 3 ? { ok: false, status: 503 } : readyResponse(release(installer())), pause: async (value) => delays.push(value) });
+  const requestUrls = [];
+  const manifest = await fetchDesktopManifest({ fetcher: async (url) => { requestUrls.push(url); return ++attempts < 3 ? { ok: false, status: 503 } : readyResponse(release(installer())); }, pause: async (value) => delays.push(value) });
   assert.equal(manifest.version, '1.2.0');
   assert.equal(attempts, 3);
   assert.deepEqual(delays, [1000, 2000]);
+  assert.equal(new Set(requestUrls).size, 3, 'each retry bypasses a previously cached release response');
 });
 
 test('a failed discovery preserves the existing output instead of advertising unverified bytes', async (t) => {
