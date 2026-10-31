@@ -441,6 +441,8 @@ type DriveSyncConfig = {
   driveUrl?: string;
 };
 
+type DesktopStartupSettings = { supported: boolean; openAtLogin: boolean; canChange?: boolean; error?: string };
+
 type DesktopNotificationBridge = {
   isWindows: boolean;
   isDesktop?: boolean;
@@ -451,6 +453,9 @@ type DesktopNotificationBridge = {
   selectWorkspaceFolder?: () => Promise<{ ok: boolean; path: string; error?: string; canceled?: boolean }>;
   validateWorkspaceFolder?: (payload?: { path?: string }) => Promise<{ ok: boolean; path: string; error?: string }>;
   openDocumentFolder?: (payload: { projectId: string; houseId?: string; year: number; month: number; snapshotName?: string }) => Promise<string>;
+  getStartupSettings?: () => Promise<DesktopStartupSettings>;
+  setStartupSettings?: (payload: { openAtLogin: boolean }) => Promise<DesktopStartupSettings>;
+  onStartupChanged?: (listener: (settings: DesktopStartupSettings) => void) => () => void;
 };
 
 type LocalDirectoryHandle = FileSystemDirectoryHandle & {
@@ -1975,6 +1980,11 @@ export default function Home() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
+  const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
+  const [startupSettingsError, setStartupSettingsError] = useState("");
+  const [changingStartup, setChangingStartup] = useState(false);
+  const startupChangeInFlight = useRef(false);
+  const startupSettingsRevision = useRef(0);
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -2221,6 +2231,40 @@ export default function Home() {
       : loggedInEmployeeEmail === builtInAdminAccount && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
     workflowClient.current?.resumeForAccount(token ? { account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), token } : null);
   }, [loggedInEmployeeEmail, driveScriptUrl, workflowSession, adminSession]);
+
+  useEffect(() => {
+    const desktop = desktopBridge();
+    if (isCustomerPortal || !desktop?.isWindows || !desktop.getStartupSettings || !desktop.setStartupSettings) return;
+    let disposed = false;
+    const applySettings = (settings: DesktopStartupSettings) => {
+      if (disposed) return;
+      if (!settings || typeof settings.supported !== "boolean" || typeof settings.openAtLogin !== "boolean") throw new Error("Không đọc được thiết lập khởi động Windows.");
+      setStartupSettings(settings);
+      setStartupSettingsError(settings.error || "");
+    };
+    const refresh = async () => {
+      if (startupChangeInFlight.current) return;
+      const revision = ++startupSettingsRevision.current;
+      try {
+        const settings = await desktop.getStartupSettings!();
+        if (!disposed && revision === startupSettingsRevision.current) applySettings(settings);
+      } catch (error) {
+        if (!disposed && revision === startupSettingsRevision.current) setStartupSettingsError(error instanceof Error ? error.message : "Không đọc được thiết lập khởi động Windows.");
+      }
+    };
+    const changed = (settings: DesktopStartupSettings) => {
+      ++startupSettingsRevision.current;
+      try {
+        applySettings(settings);
+        if (!disposed && settings.error) setNotice(settings.error);
+      } catch (error) { if (!disposed) setStartupSettingsError(error instanceof Error ? error.message : "Không đọc được thiết lập khởi động Windows."); }
+    };
+    const focus = () => { void refresh(); };
+    const unsubscribe = desktop.onStartupChanged?.(changed);
+    void refresh();
+    window.addEventListener("focus", focus);
+    return () => { disposed = true; ++startupSettingsRevision.current; unsubscribe?.(); window.removeEventListener("focus", focus); };
+  }, [isCustomerPortal]);
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
@@ -2624,12 +2668,44 @@ export default function Home() {
     } finally { setEnablingNotifications(false); }
   };
 
+  const toggleWindowsStartup = async () => {
+    const desktop = desktopBridge();
+    if (!desktop?.isWindows || !desktop.setStartupSettings || !startupSettings?.supported || startupSettings.canChange === false || startupChangeInFlight.current) return;
+    const openAtLogin = !startupSettings.openAtLogin;
+    const revision = ++startupSettingsRevision.current;
+    startupChangeInFlight.current = true;
+    setChangingStartup(true);
+    setStartupSettingsError("");
+    try {
+      const settings = await desktop.setStartupSettings({ openAtLogin });
+      if (!settings || typeof settings.supported !== "boolean" || typeof settings.openAtLogin !== "boolean") throw new Error("Windows chưa xác nhận thiết lập khởi động ứng dụng.");
+      if (revision === startupSettingsRevision.current) {
+        setStartupSettings(settings);
+        setStartupSettingsError(settings.error || "");
+        setNotice(settings.error || (settings.openAtLogin ? "Đã bật khởi động cùng Windows. GM Manager sẽ chạy nền ở khay hệ thống khi đăng nhập Windows." : "Đã tắt khởi động cùng Windows."));
+      }
+    } catch (error) {
+      if (revision === startupSettingsRevision.current) {
+        const message = error instanceof Error ? error.message : "Không thể thay đổi thiết lập khởi động Windows.";
+        setStartupSettingsError(message);
+        setNotice(message);
+      }
+    } finally { startupChangeInFlight.current = false; setChangingStartup(false); }
+  };
+  const renderWindowsStartupAction = () => {
+    const desktop = desktopBridge();
+    if (isCustomerPortal || !desktop?.isWindows || !desktop.getStartupSettings || !desktop.setStartupSettings || startupSettings?.supported === false) return null;
+    const enabled = Boolean(startupSettings?.openAtLogin);
+    const label = changingStartup ? "Đang lưu khởi động…" : startupSettingsError ? "Khởi động Windows: chưa xác nhận" : !startupSettings ? "Đang kiểm tra Windows…" : enabled ? "Đã bật cùng Windows" : "Khởi động cùng Windows";
+    return <button type="button" className={`pwa-action pwa-action--startup ${enabled && !startupSettingsError ? "pwa-action--notifications-enabled" : ""}`.trim()} aria-pressed={enabled} title={startupSettingsError || (enabled ? "GM Manager tự chạy nền khi đăng nhập Windows. Nhấn để tắt." : "Tự chạy GM Manager ở khay hệ thống khi đăng nhập Windows.")} onClick={() => void toggleWindowsStartup()} disabled={changingStartup || !startupSettings || startupSettings.canChange === false || Boolean(startupSettingsError)}>⊞ {label}</button>;
+  };
   const renderUpdateAction = () => updateAvailable ? <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button> : null;
   const renderMobileAppActions = (includeInstall = true) => <>
     {includeInstall && renderUpdateAction()}
     {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
+    {renderWindowsStartupAction()}
   </>;
 
   const flushWorkspaceCacheSync = async () => {
@@ -5330,7 +5406,7 @@ export default function Home() {
             <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager<small>PROJECT WORKSPACE</small></span></div>
             <div className="customer-gateway__actions">
               {!personnelView && renderMobileAppActions()}
-              {personnelView && renderUpdateAction()}
+              {personnelView && <>{renderUpdateAction()}{renderWindowsStartupAction()}</>}
               {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
             </div>
           </header>

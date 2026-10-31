@@ -1,8 +1,9 @@
-const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog } = require("electron");
+const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog, Tray, Menu, nativeImage } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder } = require("./path-utils.cjs");
+const { createBackgroundController } = require(path.join(__dirname, "background.cjs"));
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -12,10 +13,14 @@ const WINDOWS_DRIVE_ROOTS = ["I:\\Shared drives", "I:\\My Drive", "G:\\Shared dr
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
 let workspaceFolder;
+let pendingForegroundLaunch = false;
 const pendingProtocolUrls = [];
 const activeNotifications = new Set();
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
+const backgroundController = createBackgroundController({ app, Tray, Menu, nativeImage, platform: process.platform, execPath: process.execPath, argv: process.argv, iconPath: APP_ICON, getWindow: () => mainWindow, createWindow: () => createWindow() });
+app.on("before-quit", backgroundController.beginQuit);
+app.on("will-quit", backgroundController.dispose);
 
 function isTrustedUrl(value) {
   try {
@@ -27,6 +32,15 @@ function isTrustedUrl(value) {
 
 function trustedIpcSender(event) {
   return isTrustedUrl(event.senderFrame?.url || event.sender?.getURL?.() || "");
+}
+
+function trustedStartupIpcSender(event) {
+  try {
+    const frame = event.senderFrame;
+    if (!frame || frame.parent || (frame.top && frame.top !== frame) || (event.sender?.mainFrame && event.sender.mainFrame !== frame)) return false;
+    const url = new URL(frame.url);
+    return url.origin === APP_ORIGIN && (url.pathname === "/gm-manager" || url.pathname.startsWith("/gm-manager/"));
+  } catch { return false; }
 }
 
 async function readWorkspaceFolder() {
@@ -62,7 +76,7 @@ async function selectWorkspaceFolder() {
   return validateWorkspaceFolder({ path: selected.filePaths[0] });
 }
 
-function createWindow() {
+function createWindow({ show = true } = {}) {
   const window = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -70,10 +84,12 @@ function createWindow() {
     minHeight: 700,
     title: "GM-CRM",
     icon: APP_ICON,
+    show,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: process.platform !== "win32",
       preload: path.join(__dirname, "preload.cjs"),
     },
   });
@@ -88,6 +104,7 @@ function createWindow() {
     void shell.openExternal(url);
   });
   mainWindow = window;
+  backgroundController.attachWindow(window);
   window.on("closed", () => {
     if (mainWindow === window) mainWindow = null;
   });
@@ -230,7 +247,10 @@ if (singleInstance) app.on("second-instance", (_event, argv) => {
     if (app.isReady()) void handleProtocolUrl(target);
     else pendingProtocolUrls.push(target);
   }
-  if (mainWindow && !mainWindow.isDestroyed()) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }
+  if (!backgroundController.shouldStartHidden(argv) || target) {
+    if (app.isReady()) backgroundController.showWindow();
+    else pendingForegroundLaunch = true;
+  }
 });
 if (singleInstance) app.on("open-url", (event, target) => {
   event.preventDefault();
@@ -253,6 +273,9 @@ if (singleInstance) app.whenReady().then(() => {
   ipcMain.handle("gmcrm:validate-workspace-folder", (event, payload = {}) => trustedIpcSender(event) ? validateWorkspaceFolder(payload) : { ok: false, path: "", error: "Nguồn yêu cầu không hợp lệ." });
   ipcMain.handle("gmcrm:open-document-folder", (event, payload = {}) => trustedIpcSender(event) ? openDocumentFolder(payload) : "Nguồn yêu cầu không hợp lệ.");
   ipcMain.handle("gmcrm:notification-support", (event) => trustedIpcSender(event) && Notification.isSupported());
+  const deniedStartupSettings = () => ({ supported: false, canChange: false, openAtLogin: false, ok: false, error: "Nguồn yêu cầu không hợp lệ." });
+  ipcMain.handle("gmcrm:get-startup-settings", (event) => trustedStartupIpcSender(event) ? backgroundController.getStartupSettings() : deniedStartupSettings());
+  ipcMain.handle("gmcrm:set-startup-settings", (event, payload) => trustedStartupIpcSender(event) ? backgroundController.setStartupSettings(payload) : deniedStartupSettings());
   ipcMain.handle("gmcrm:notify", async (event, payload = {}) => {
     if (!trustedIpcSender(event)) return false;
     if (!Notification.isSupported()) return false;
@@ -305,15 +328,17 @@ if (singleInstance) app.whenReady().then(() => {
     if (!filePath) return `Không tìm thấy tệp ${fileName} trong thư mục Google Drive trên máy tính.`;
     return shell.openPath(filePath);
   });
-  createWindow();
   const initialProtocolUrl = process.argv.find((argument) => /^gmmanager:\/\//i.test(argument));
   if (initialProtocolUrl) pendingProtocolUrls.push(initialProtocolUrl);
+  backgroundController.createTray();
+  createWindow({ show: pendingForegroundLaunch || pendingProtocolUrls.length > 0 || !backgroundController.shouldStartHidden() });
   pendingProtocolUrls.splice(0).forEach((target) => { void handleProtocolUrl(target); });
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (process.platform === "win32") backgroundController.showWindow();
+    else if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && !backgroundController.hasTray()) app.quit();
 });
