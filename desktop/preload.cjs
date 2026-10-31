@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld("gmDesktop", {
   isDesktop: true,
   platform: process.platform,
   notificationSupport: () => ipcRenderer.invoke("gmcrm:notification-support"),
+  getAppInfo: () => ipcRenderer.invoke("gmcrm:get-app-info"),
+  checkForUpdates: () => ipcRenderer.invoke("gmcrm:check-for-updates"),
+  downloadUpdate: () => ipcRenderer.invoke("gmcrm:download-update"),
   getStartupSettings: () => ipcRenderer.invoke("gmcrm:get-startup-settings"),
   setStartupSettings: (payload) => ipcRenderer.invoke("gmcrm:set-startup-settings", payload),
   onStartupChanged: (listener) => {

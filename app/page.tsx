@@ -442,6 +442,8 @@ type DriveSyncConfig = {
 };
 
 type DesktopStartupSettings = { supported: boolean; openAtLogin: boolean; canChange?: boolean; error?: string };
+type DesktopUpdateManifest = { version: string; installerUrl: string; sha256: string; size: number };
+type DesktopUpdate = DesktopUpdateManifest & { currentVersion: string | null };
 
 type DesktopNotificationBridge = {
   isWindows: boolean;
@@ -456,6 +458,8 @@ type DesktopNotificationBridge = {
   getStartupSettings?: () => Promise<DesktopStartupSettings>;
   setStartupSettings?: (payload: { openAtLogin: boolean }) => Promise<DesktopStartupSettings>;
   onStartupChanged?: (listener: (settings: DesktopStartupSettings) => void) => () => void;
+  getAppInfo?: () => Promise<{ version: string; platform: string; isPackaged: boolean }>;
+  downloadUpdate?: () => Promise<{ ok: boolean; error?: string }>;
 };
 
 type LocalDirectoryHandle = FileSystemDirectoryHandle & {
@@ -651,6 +655,27 @@ function driveFolderIdFromUrl(value: string) {
 
 function desktopBridge() {
   return (window as Window & { gmDesktop?: DesktopNotificationBridge }).gmDesktop;
+}
+
+function desktopVersionParts(value: unknown): number[] | null {
+  if (typeof value !== "string" || !/^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$/.test(value)) return null;
+  const parts = value.split(".").map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : null;
+}
+
+function compareDesktopVersions(left: string, right: string): number | null {
+  const a = desktopVersionParts(left), b = desktopVersionParts(right);
+  if (!a || !b) return null;
+  for (let index = 0; index < 3; index += 1) if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  return 0;
+}
+
+function parseDesktopUpdateManifest(value: unknown): DesktopUpdateManifest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const entry = value as Partial<DesktopUpdateManifest>;
+  const installerUrl = `https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup-${entry.version}.exe`;
+  if (!desktopVersionParts(entry.version) || entry.installerUrl !== installerUrl || typeof entry.sha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.size) || Number(entry.size) < 1 || Number(entry.size) > 1024 * 1024 * 1024) return null;
+  return { version: entry.version!, installerUrl, sha256: entry.sha256.toLowerCase(), size: entry.size! };
 }
 
 function isWindowsDesktop() {
@@ -1977,6 +2002,11 @@ export default function Home() {
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
+  const [desktopUpdateDismissed, setDesktopUpdateDismissed] = useState(false);
+  const [openingDesktopUpdate, setOpeningDesktopUpdate] = useState(false);
+  const desktopUpdateOpening = useRef(false);
+  const desktopUpdateNotificationInFlight = useRef(new Set<string>());
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
@@ -2265,6 +2295,65 @@ export default function Home() {
     window.addEventListener("focus", focus);
     return () => { disposed = true; ++startupSettingsRevision.current; unsubscribe?.(); window.removeEventListener("focus", focus); };
   }, [isCustomerPortal]);
+
+  useEffect(() => {
+    const desktop = desktopBridge();
+    if (isCustomerPortal || !desktop?.isDesktop || !desktop.isWindows) return;
+    let disposed = false;
+    let running = false;
+    const check = async () => {
+      if (disposed || running || navigator.onLine === false) return;
+      running = true;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12_000);
+      try {
+        let currentVersion: string | null = null;
+        if (desktop.getAppInfo) {
+          const installed = await desktop.getAppInfo();
+          if (!installed?.isPackaged || installed.platform !== "win32" || !desktopVersionParts(installed.version)) return;
+          currentVersion = installed.version;
+        }
+        if (disposed) return;
+        const response = await fetch(`${import.meta.env.BASE_URL}desktop-version.json?time=${Date.now()}`, { cache: "no-store", redirect: "error", signal: controller.signal });
+        if (!response.ok) return;
+        const value = await response.json();
+        const manifest = parseDesktopUpdateManifest(value);
+        if (disposed) return;
+        if (!manifest) {
+          // An explicitly unavailable channel contains no installer to offer.
+          if (value?.available === false) { setDesktopUpdate(null); setDesktopUpdateDismissed(false); }
+          return;
+        }
+        if (currentVersion && compareDesktopVersions(manifest.version, currentVersion) !== 1) {
+          setDesktopUpdate(null); setDesktopUpdateDismissed(false); return;
+        }
+        let dismissed = false;
+        try { dismissed = window.localStorage.getItem("gm-manager-desktop-update-dismissed-v1") === manifest.version; } catch { /* The banner still works without optional local preferences. */ }
+        setDesktopUpdate((prior) => prior?.version === manifest.version && prior.installerUrl === manifest.installerUrl && prior.sha256 === manifest.sha256 && prior.currentVersion === currentVersion ? prior : { ...manifest, currentVersion });
+        setDesktopUpdateDismissed(dismissed);
+      } catch { /* Retain the last verified offer while temporarily offline. */ }
+      finally { window.clearTimeout(timeout); running = false; }
+    };
+    const refresh = () => { void check(); };
+    void check();
+    const timer = window.setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("online", refresh);
+    return () => { disposed = true; window.clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+  }, [isCustomerPortal]);
+
+  useEffect(() => {
+    const desktop = desktopBridge();
+    if (isCustomerPortal || !desktopUpdate || !notificationsEnabled || !desktop?.isWindows || !desktop.showNotification) return;
+    const version = desktopUpdate.version;
+    try { if (window.localStorage.getItem("gm-manager-desktop-update-alerted-v1") === version) return; } catch { /* The in-memory guard also prevents repeated alerts. */ }
+    if (desktopUpdateNotificationInFlight.current.has(version)) return;
+    desktopUpdateNotificationInFlight.current.add(version);
+    void desktop.showNotification({ title: "GM Manager có bản PC mới", body: `Phiên bản ${version} đã sẵn sàng. Mở ứng dụng và chọn Cập nhật PC để tải bộ cài mới.`, url: window.location.href }).then((shown) => {
+      if (shown) try { window.localStorage.setItem("gm-manager-desktop-update-alerted-v1", version); } catch { /* Keep the completed in-memory guard. */ }
+      else desktopUpdateNotificationInFlight.current.delete(version);
+    }).catch(() => { desktopUpdateNotificationInFlight.current.delete(version); });
+  }, [desktopUpdate?.version, notificationsEnabled, isCustomerPortal]);
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
@@ -2699,7 +2788,34 @@ export default function Home() {
     const label = changingStartup ? "Đang lưu khởi động…" : startupSettingsError ? "Khởi động Windows: chưa xác nhận" : !startupSettings ? "Đang kiểm tra Windows…" : enabled ? "Đã bật cùng Windows" : "Khởi động cùng Windows";
     return <button type="button" className={`pwa-action pwa-action--startup ${enabled && !startupSettingsError ? "pwa-action--notifications-enabled" : ""}`.trim()} aria-pressed={enabled} title={startupSettingsError || (enabled ? "GM Manager tự chạy nền khi đăng nhập Windows. Nhấn để tắt." : "Tự chạy GM Manager ở khay hệ thống khi đăng nhập Windows.")} onClick={() => void toggleWindowsStartup()} disabled={changingStartup || !startupSettings || startupSettings.canChange === false || Boolean(startupSettingsError)}>⊞ {label}</button>;
   };
-  const renderUpdateAction = () => updateAvailable ? <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button> : null;
+  const downloadDesktopUpdate = async () => {
+    if (!desktopUpdate || desktopUpdateOpening.current || isCustomerPortal) return;
+    desktopUpdateOpening.current = true;
+    setOpeningDesktopUpdate(true);
+    try {
+      const desktop = desktopBridge();
+      if (!desktop?.isWindows || !desktop.isDesktop) return;
+      if (desktop.downloadUpdate) {
+        const result = await desktop.downloadUpdate();
+        if (!result?.ok) throw new Error(result?.error || "Chưa mở được bộ cài PC. Hãy thử lại.");
+      } else window.open(desktopUpdate.installerUrl, "_blank", "noopener,noreferrer");
+      setNotice("Đã mở bộ cài PC. Sau khi tải xong, thoát GM Manager rồi cài đè và mở lại để dùng phiên bản mới.");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "Không thể tải bộ cài PC."); }
+    finally { desktopUpdateOpening.current = false; setOpeningDesktopUpdate(false); }
+  };
+  const dismissDesktopUpdate = () => {
+    if (!desktopUpdate) return;
+    setDesktopUpdateDismissed(true);
+    try { window.localStorage.setItem("gm-manager-desktop-update-dismissed-v1", desktopUpdate.version); } catch { /* The header action remains available. */ }
+  };
+  const renderDesktopUpdateBanner = () => desktopUpdate && !desktopUpdateDismissed && !isCustomerPortal ? <section className="desktop-update-banner" role="status" aria-label="Có bản cập nhật PC">
+    <div><b>GM Manager PC {desktopUpdate.version} đã sẵn sàng</b><p>{desktopUpdate.currentVersion ? `Máy này đang dùng bản ${desktopUpdate.currentVersion}. ` : "Bản PC trên máy này cần cập nhật. "}Tải bộ cài, thoát ứng dụng rồi cài đè để dùng tính năng mới. Nút tải lại giao diện không cập nhật bản cài PC.</p></div>
+    <div className="desktop-update-banner__actions"><button type="button" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `Tải bản PC ${desktopUpdate.version}`}</button><button type="button" className="desktop-update-banner__dismiss" onClick={dismissDesktopUpdate}>Để sau</button></div>
+  </section> : null;
+  const renderUpdateAction = () => <>
+    {desktopUpdate && !isCustomerPortal && <button type="button" className="pwa-action pwa-action--update pwa-action--desktop-update" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `⇩ Cập nhật PC ${desktopUpdate.version}`}</button>}
+    {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật giao diện</button>}
+  </>;
   const renderMobileAppActions = (includeInstall = true) => <>
     {includeInstall && renderUpdateAction()}
     {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
@@ -5411,6 +5527,7 @@ export default function Home() {
             </div>
           </header>
 
+          {renderDesktopUpdateBanner()}
           {personnelView ? (
             <div className="personnel-layout">
               <aside className="personnel-sidebar">
@@ -5524,6 +5641,7 @@ export default function Home() {
           <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}</div>
         </header>
 
+        {renderDesktopUpdateBanner()}
         {!hasActiveFolderAccess ? (
           <section className="coming-soon"><span>⌑</span><p className="eyebrow">GM Manager</p><h1>Chưa được cấp quyền</h1><p>Tài khoản <b>{loggedInEmployee?.email}</b> không có quyền truy cập mục <b>{activeFolder}</b>.</p></section>
         ) : activeFolder === "Ghi chú" ? (

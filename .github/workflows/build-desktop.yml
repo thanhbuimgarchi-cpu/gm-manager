@@ -4,9 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "app/**"
       - "desktop/**"
-      - "public/**"
+      - "public/gm-logo*.png"
       - ".github/workflows/build-desktop.yml"
   workflow_dispatch:
 
@@ -41,8 +40,53 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath desktop/package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw 'The desktop release requires a stable three-part version.'
+          }
+          $versionedName = "GM-CRM-Setup-$version.exe"
+          $versionedInstaller = Join-Path 'desktop/release' $versionedName
+          $compatibilityInstaller = 'desktop/release/GM-CRM-Setup.exe'
           gh release view desktop-latest --repo $env:REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create desktop-latest --repo $env:REPOSITORY --title "GM Manager Desktop" --notes "Bộ cài GM Manager mới nhất cho Windows và macOS."
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot create the desktop release.' }
           }
-          gh release upload desktop-latest "desktop/release/GM-CRM-Setup.exe#GM-CRM-Setup.exe" --repo $env:REPOSITORY --clobber
+          $releaseJson = gh api "repos/$env:REPOSITORY/releases/tags/desktop-latest"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the desktop release.' }
+          $release = $releaseJson | ConvertFrom-Json
+          $existing = @($release.assets | Where-Object { $_.name -ceq $versionedName })
+          if ($existing.Count -gt 1) { throw 'Duplicate versioned installer assets.' }
+          if ($existing.Count -eq 0) {
+            Copy-Item -LiteralPath $compatibilityInstaller -Destination $versionedInstaller
+            # Versioned assets are immutable. A failed publish may be retried;
+            # a new native change must increase desktop/package.json.version.
+            gh release upload desktop-latest "$versionedInstaller#$versionedName" --repo $env:REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot publish the versioned desktop installer.' }
+          } else {
+            if ($existing[0].state -ne 'uploaded' -or $existing[0].size -le 0 -or $existing[0].digest -notmatch '^sha256:[a-fA-F0-9]{64}$') {
+              throw 'The existing versioned installer is incomplete; no compatibility asset was changed.'
+            }
+            Write-Host "Preserving immutable installer $versionedName. Increase the desktop version for native changes."
+            gh release download desktop-latest --pattern $versionedName --dir desktop/release --repo $env:REPOSITORY
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot retrieve the immutable desktop installer.' }
+          }
+          $releaseJson = gh api "repos/$env:REPOSITORY/releases/tags/desktop-latest"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify the published desktop release.' }
+          $release = $releaseJson | ConvertFrom-Json
+          $published = @($release.assets | Where-Object { $_.name -ceq $versionedName -and $_.state -eq 'uploaded' })
+          $checksum = 'sha256:' + (Get-FileHash -LiteralPath $versionedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($published.Count -ne 1 -or $published[0].digest -cne $checksum -or $published[0].size -ne (Get-Item -LiteralPath $versionedInstaller).Length) {
+            throw 'The published installer does not match the verified local bytes.'
+          }
+          $newerVersions = @($release.assets | Where-Object {
+            $_.state -eq 'uploaded' -and $_.name -cmatch '^GM-CRM-Setup-((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))\.exe$' -and [version]$Matches[1] -gt [version]$version
+          })
+          if ($newerVersions.Count -eq 0) {
+            Copy-Item -LiteralPath $versionedInstaller -Destination $compatibilityInstaller -Force
+            gh release upload desktop-latest "$compatibilityInstaller#GM-CRM-Setup.exe" --repo $env:REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot publish the compatibility installer.' }
+          } else {
+            Write-Host 'A newer native version exists; keeping its compatibility installer.'
+          }

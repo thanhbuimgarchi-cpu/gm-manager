@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder } = require("./path-utils.cjs");
 const { createBackgroundController } = require(path.join(__dirname, "background.cjs"));
+const { createDesktopUpdateController } = require(path.join(__dirname, "update.cjs"));
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -19,6 +20,7 @@ const activeNotifications = new Set();
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 const backgroundController = createBackgroundController({ app, Tray, Menu, nativeImage, platform: process.platform, execPath: process.execPath, argv: process.argv, iconPath: APP_ICON, getWindow: () => mainWindow, createWindow: () => createWindow() });
+const desktopUpdateController = createDesktopUpdateController({ getVersion: () => app.getVersion(), platform: process.platform, isPackaged: app.isPackaged, fetcher: (...args) => fetch(...args), openExternal: (url) => shell.openExternal(url) });
 app.on("before-quit", backgroundController.beginQuit);
 app.on("will-quit", backgroundController.dispose);
 
@@ -276,6 +278,10 @@ if (singleInstance) app.whenReady().then(() => {
   const deniedStartupSettings = () => ({ supported: false, canChange: false, openAtLogin: false, ok: false, error: "Nguồn yêu cầu không hợp lệ." });
   ipcMain.handle("gmcrm:get-startup-settings", (event) => trustedStartupIpcSender(event) ? backgroundController.getStartupSettings() : deniedStartupSettings());
   ipcMain.handle("gmcrm:set-startup-settings", (event, payload) => trustedStartupIpcSender(event) ? backgroundController.setStartupSettings(payload) : deniedStartupSettings());
+  const deniedUpdate = () => ({ supported: false, updateAvailable: false, ok: false, error: "Nguồn yêu cầu không hợp lệ." });
+  ipcMain.handle("gmcrm:get-app-info", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.getAppInfo() : deniedUpdate());
+  ipcMain.handle("gmcrm:check-for-updates", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.checkForUpdates() : deniedUpdate());
+  ipcMain.handle("gmcrm:download-update", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.downloadUpdate() : deniedUpdate());
   ipcMain.handle("gmcrm:notify", async (event, payload = {}) => {
     if (!trustedIpcSender(event)) return false;
     if (!Notification.isSupported()) return false;

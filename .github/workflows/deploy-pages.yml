@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  workflow_run:
+    workflows: [Build Windows installer]
+    types: [completed]
+    branches: [main]
 
 permissions:
   contents: read
@@ -16,20 +20,30 @@ concurrency:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Use the checked-out application version
+        id: source
+        run: echo "version=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - run: node scripts/write-app-version.mjs
         env:
-          VITE_APP_VERSION: ${{ github.sha }}
+          VITE_APP_VERSION: ${{ steps.source.outputs.version }}
+      - name: Discover the ready Windows installer
+        run: node scripts/write-desktop-version.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm run build:github-pages
         env:
-          VITE_APP_VERSION: ${{ github.sha }}
+          VITE_APP_VERSION: ${{ steps.source.outputs.version }}
       - run: cp public/.nojekyll github-pages/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:
