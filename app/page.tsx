@@ -444,7 +444,8 @@ type DriveSyncConfig = {
 type DesktopStartupSettings = { supported: boolean; openAtLogin: boolean; canChange?: boolean; error?: string };
 type DesktopUpdateManifest = { version: string; installerUrl: string; sha256: string; size: number };
 type DesktopUpdate = DesktopUpdateManifest & { currentVersion: string | null };
-type DesktopUpdateCheckResult = { status: "available" | "current" | "unavailable" | "unsupported" | "offline" | "error"; version?: string };
+type DesktopUpdateCheckResult = { status: "available" | "current" | "unavailable" | "unsupported" | "offline" | "error"; version?: string; update?: DesktopUpdate };
+type DesktopUpdateProgress = { phase: "idle" | "checking" | "downloading" | "verifying" | "ready" | "installing" | "error"; version?: string; received?: number; total?: number; percent?: number; error?: string };
 
 type DesktopNotificationBridge = {
   isWindows: boolean;
@@ -459,8 +460,12 @@ type DesktopNotificationBridge = {
   getStartupSettings?: () => Promise<DesktopStartupSettings>;
   setStartupSettings?: (payload: { openAtLogin: boolean }) => Promise<DesktopStartupSettings>;
   onStartupChanged?: (listener: (settings: DesktopStartupSettings) => void) => () => void;
-  getAppInfo?: () => Promise<{ version: string; platform: string; isPackaged: boolean }>;
+  getAppInfo?: () => Promise<{ version: string; platform: string; isPackaged: boolean; integratedUpdates?: boolean }>;
   downloadUpdate?: () => Promise<{ ok: boolean; error?: string }>;
+  installUpdate?: () => Promise<{ ok: boolean; error?: string; current?: boolean; version?: string }>;
+  getUpdateState?: () => Promise<DesktopUpdateProgress>;
+  onUpdateProgress?: (listener: (progress: DesktopUpdateProgress) => void) => () => void;
+  onBeforeUpdate?: (listener: () => Promise<void>) => () => void;
 };
 
 type LocalDirectoryHandle = FileSystemDirectoryHandle & {
@@ -2006,9 +2011,9 @@ export default function Home() {
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
   const [desktopUpdateDismissed, setDesktopUpdateDismissed] = useState(false);
   const [desktopUpdatesSupported, setDesktopUpdatesSupported] = useState(false);
-  const [checkingDesktopUpdate, setCheckingDesktopUpdate] = useState(false);
+  const [desktopIntegratedUpdates, setDesktopIntegratedUpdates] = useState(false);
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<DesktopUpdateProgress>({ phase: "idle" });
   const desktopUpdateCheck = useRef<(() => Promise<DesktopUpdateCheckResult>) | null>(null);
-  const desktopUpdateManualCheckInFlight = useRef(false);
   const [openingDesktopUpdate, setOpeningDesktopUpdate] = useState(false);
   const desktopUpdateOpening = useRef(false);
   const desktopUpdateNotificationInFlight = useRef(new Set<string>());
@@ -2102,6 +2107,7 @@ export default function Home() {
   const driveRefreshRequested = useRef(false);
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const workflowClient = useRef<WorkflowClient | null>(null);
+  const desktopUpdatePreparation = useRef<() => Promise<void>>(async () => { throw new Error("Dữ liệu chưa sẵn sàng để cập nhật."); });
   const workflowResultHandler = useRef<(entry: WorkflowOutboxEntry, result: WorkflowServerResult) => void>(() => {});
   const workflowReadRevisions = useRef(new Map<string, number>());
   const assignedDesignTasksRef = useRef<AssignedDesignTask[]>([]);
@@ -2262,6 +2268,11 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (isCustomerPortal) return;
+    return desktopBridge()?.onBeforeUpdate?.(() => desktopUpdatePreparation.current());
+  }, [isCustomerPortal]);
+
+  useEffect(() => {
     const token = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token
       : loggedInEmployeeEmail === builtInAdminAccount && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
     workflowClient.current?.resumeForAccount(token ? { account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl.trim(), token } : null);
@@ -2319,6 +2330,7 @@ export default function Home() {
             return { status: "unsupported" };
           }
           currentVersion = installed.version;
+          if (!disposed) setDesktopIntegratedUpdates(installed.integratedUpdates === true && typeof desktop.installUpdate === "function");
         }
         if (disposed) return { status: "unsupported" };
         setDesktopUpdatesSupported(true);
@@ -2340,9 +2352,10 @@ export default function Home() {
         }
         let dismissed = false;
         try { dismissed = window.localStorage.getItem("gm-manager-desktop-update-dismissed-v1") === manifest.version; } catch { /* The banner still works without optional local preferences. */ }
-        setDesktopUpdate((prior) => prior?.version === manifest.version && prior.installerUrl === manifest.installerUrl && prior.sha256 === manifest.sha256 && prior.currentVersion === currentVersion ? prior : { ...manifest, currentVersion });
+        const update = { ...manifest, currentVersion };
+        setDesktopUpdate((prior) => prior?.version === manifest.version && prior.installerUrl === manifest.installerUrl && prior.sha256 === manifest.sha256 && prior.currentVersion === currentVersion ? prior : update);
         setDesktopUpdateDismissed(dismissed);
-        return { status: "available", version: manifest.version };
+        return { status: "available", version: manifest.version, update };
       } catch {
         if (!disposed) setDesktopUpdate(null);
         return { status: navigator.onLine === false ? "offline" : "error" };
@@ -2363,12 +2376,36 @@ export default function Home() {
 
   useEffect(() => {
     const desktop = desktopBridge();
+    if (isCustomerPortal || !desktop?.isWindows || !desktop.installUpdate) return;
+    let disposed = false;
+    let revision = 0;
+    const applyProgress = (progress: DesktopUpdateProgress) => {
+      if (disposed || !progress || !["idle", "checking", "downloading", "verifying", "ready", "installing", "error"].includes(progress.phase)) return;
+      setDesktopUpdateProgress(progress);
+    };
+    const unsubscribe = desktop.onUpdateProgress?.((progress) => { revision += 1; applyProgress(progress); });
+    const initialRevision = revision;
+    void desktop.getUpdateState?.().then((progress) => { if (revision === initialRevision) applyProgress(progress); }).catch(() => {});
+    return () => { disposed = true; unsubscribe?.(); };
+  }, [isCustomerPortal]);
+
+  useEffect(() => {
+    if (isCustomerPortal || desktopUpdateProgress.phase !== "installing") return;
+    const shell = document.querySelector<HTMLElement>(".crm-shell");
+    if (!shell) return;
+    const wasInert = shell.inert;
+    shell.inert = true;
+    return () => { shell.inert = wasInert; };
+  }, [isCustomerPortal, desktopUpdateProgress.phase]);
+
+  useEffect(() => {
+    const desktop = desktopBridge();
     if (isCustomerPortal || !desktopUpdate || !notificationsEnabled || !desktop?.isWindows || !desktop.showNotification) return;
     const version = desktopUpdate.version;
     try { if (window.localStorage.getItem("gm-manager-desktop-update-alerted-v1") === version) return; } catch { /* The in-memory guard also prevents repeated alerts. */ }
     if (desktopUpdateNotificationInFlight.current.has(version)) return;
     desktopUpdateNotificationInFlight.current.add(version);
-    void desktop.showNotification({ title: "GM Manager có bản PC mới", body: `Phiên bản ${version} đã sẵn sàng. Mở ứng dụng và chọn Cập nhật PC để tải bộ cài mới.`, url: window.location.href }).then((shown) => {
+    void desktop.showNotification({ title: "GM Manager có bản PC mới", body: `Phiên bản ${version} đã sẵn sàng. Mở ứng dụng và chọn Cập nhật.`, url: window.location.href }).then((shown) => {
       if (shown) try { window.localStorage.setItem("gm-manager-desktop-update-alerted-v1", version); } catch { /* Keep the completed in-memory guard. */ }
       else desktopUpdateNotificationInFlight.current.delete(version);
     }).catch(() => { desktopUpdateNotificationInFlight.current.delete(version); });
@@ -2807,35 +2844,55 @@ export default function Home() {
     const label = changingStartup ? "Đang lưu khởi động…" : startupSettingsError ? "Khởi động Windows: chưa xác nhận" : !startupSettings ? "Đang kiểm tra Windows…" : enabled ? "Đã bật cùng Windows" : "Khởi động cùng Windows";
     return <button type="button" className={`pwa-action pwa-action--startup ${enabled && !startupSettingsError ? "pwa-action--notifications-enabled" : ""}`.trim()} aria-pressed={enabled} title={startupSettingsError || (enabled ? "GM Manager tự chạy nền khi đăng nhập Windows. Nhấn để tắt." : "Tự chạy GM Manager ở khay hệ thống khi đăng nhập Windows.")} onClick={() => void toggleWindowsStartup()} disabled={changingStartup || !startupSettings || startupSettings.canChange === false || Boolean(startupSettingsError)}>⊞ {label}</button>;
   };
-  const checkDesktopUpdateManually = async () => {
-    if (isCustomerPortal || !desktopUpdateCheck.current || desktopUpdateManualCheckInFlight.current) return;
-    desktopUpdateManualCheckInFlight.current = true;
-    setCheckingDesktopUpdate(true);
-    try {
-      const result = await desktopUpdateCheck.current();
-      if (result.status === "available") {
-        setDesktopUpdateDismissed(false);
-        try { window.localStorage.removeItem("gm-manager-desktop-update-dismissed-v1"); } catch { /* Optional banner preference. */ }
-        setNotice(`Bản PC ${result.version} đã sẵn sàng. Chọn Cập nhật PC để tải bộ cài.`);
-      } else if (result.status === "current") setNotice(`GM Manager PC ${result.version} đang là bản mới nhất.`);
-      else if (result.status === "unavailable") setNotice("Chưa có bộ cài PC mới sẵn sàng. Hãy kiểm tra lại sau.");
-      else if (result.status === "offline") setNotice("Máy đang ngoại tuyến. Hãy kết nối Internet rồi kiểm tra cập nhật PC lại.");
-      else if (result.status === "error") setNotice("Chưa kiểm tra được cập nhật PC. Hãy kiểm tra kết nối Internet rồi thử lại.");
-    } finally { desktopUpdateManualCheckInFlight.current = false; setCheckingDesktopUpdate(false); }
-  };
-  const downloadDesktopUpdate = async () => {
-    if (!desktopUpdate || desktopUpdateOpening.current || isCustomerPortal) return;
+  const updateDesktopApplication = async () => {
+    if (!desktopUpdateCheck.current || desktopUpdateOpening.current || isCustomerPortal) return;
     desktopUpdateOpening.current = true;
     setOpeningDesktopUpdate(true);
+    setDesktopUpdateProgress({ phase: "checking" });
     try {
       const desktop = desktopBridge();
       if (!desktop?.isWindows || (!desktop.isDesktop && typeof desktop.showNotification !== "function")) return;
-      if (desktop.downloadUpdate) {
-        const result = await desktop.downloadUpdate();
-        if (!result?.ok) throw new Error(result?.error || "Chưa mở được bộ cài PC. Hãy thử lại.");
-      } else window.open(desktopUpdate.installerUrl, "_blank", "noopener,noreferrer");
-      setNotice("Đã mở bộ cài PC. Sau khi tải xong, thoát GM Manager rồi cài đè và mở lại để dùng phiên bản mới.");
-    } catch (error) { setNotice(error instanceof Error ? error.message : "Không thể tải bộ cài PC."); }
+      const checked = await desktopUpdateCheck.current();
+      if (checked.status === "available" && checked.update) {
+        setDesktopUpdateDismissed(false);
+        try { window.localStorage.removeItem("gm-manager-desktop-update-dismissed-v1"); } catch { /* Optional banner preference. */ }
+        if (desktopIntegratedUpdates && desktop.installUpdate) {
+          await prepareForDesktopUpdate();
+          const result = await desktop.installUpdate();
+          if (!result?.ok) throw new Error(result?.error || "Không thể cập nhật ứng dụng. Hãy thử lại.");
+          if (result.current) {
+            setDesktopUpdate(null);
+            setDesktopUpdateProgress({ phase: "idle" });
+            setNotice(`GM Manager PC ${result.version || checked.update.currentVersion || ""} đang là bản mới nhất.`);
+          } else {
+            setDesktopUpdateProgress({ phase: "installing", version: checked.version });
+            setNotice("Đang cài bản mới. GM Manager sẽ tự mở lại sau khi hoàn tất.");
+          }
+        } else {
+          // Existing 1.0–1.2 native executables cannot gain an installer API
+          // from a web refresh. This one-time migration remains explicit.
+          if (desktop.downloadUpdate) {
+            const result = await desktop.downloadUpdate();
+            if (!result?.ok) throw new Error(result?.error || "Chưa mở được bộ cài PC. Hãy thử lại.");
+          } else window.open(checked.update.installerUrl, "_blank", "noopener,noreferrer");
+          setDesktopUpdateProgress({ phase: "idle" });
+          setNotice("Bản PC hiện tại cần cài nâng cấp một lần để hỗ trợ cập nhật tự động. Bộ cài đã mở; cài đè rồi các lần sau chỉ cần bấm Cập nhật trong ứng dụng.");
+        }
+      } else if ((checked.status === "current" || checked.status === "unavailable") && updateAvailable) {
+        await prepareForDesktopUpdate();
+        updateGMCRM();
+      } else {
+        setDesktopUpdateProgress({ phase: "idle" });
+        if (checked.status === "current") setNotice(`GM Manager PC ${checked.version} đang là bản mới nhất.`);
+        else if (checked.status === "unavailable") setNotice("Chưa có bản cập nhật mới sẵn sàng. Hãy kiểm tra lại sau.");
+        else if (checked.status === "offline") setNotice("Máy đang ngoại tuyến. Hãy kết nối Internet rồi bấm Cập nhật lại.");
+        else if (checked.status === "error") setNotice("Chưa kiểm tra được cập nhật. Hãy kiểm tra kết nối Internet rồi thử lại.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể cập nhật ứng dụng. Hãy thử lại.";
+      setDesktopUpdateProgress({ phase: "error", error: message });
+      setNotice(message);
+    }
     finally { desktopUpdateOpening.current = false; setOpeningDesktopUpdate(false); }
   };
   const dismissDesktopUpdate = () => {
@@ -2844,14 +2901,14 @@ export default function Home() {
     try { window.localStorage.setItem("gm-manager-desktop-update-dismissed-v1", desktopUpdate.version); } catch { /* The header action remains available. */ }
   };
   const renderDesktopUpdateBanner = () => desktopUpdate && !desktopUpdateDismissed && !isCustomerPortal ? <section className="desktop-update-banner" role="status" aria-label="Có bản cập nhật PC">
-    <div><b>GM Manager PC {desktopUpdate.version} đã sẵn sàng</b><p>{desktopUpdate.currentVersion ? `Máy này đang dùng bản ${desktopUpdate.currentVersion}. ` : "Bản PC trên máy này cần cập nhật. "}Tải bộ cài, thoát ứng dụng rồi cài đè để dùng tính năng mới. Nút tải lại giao diện không cập nhật bản cài PC.</p></div>
-    <div className="desktop-update-banner__actions"><button type="button" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `Tải bản PC ${desktopUpdate.version}`}</button><button type="button" className="desktop-update-banner__dismiss" onClick={dismissDesktopUpdate}>Để sau</button></div>
+    <div><b>GM Manager PC {desktopUpdate.version} đã sẵn sàng</b><p>{desktopUpdate.currentVersion ? `Máy này đang dùng bản ${desktopUpdate.currentVersion}. ` : ""}{desktopIntegratedUpdates ? "Bấm Cập nhật ở góc trên để ứng dụng tự tải, cài đặt và mở lại." : "Bản PC này cần cài nâng cấp một lần. Sau đó, bấm Cập nhật sẽ tự tải, cài đặt và mở lại ứng dụng."}</p></div>
+    <div className="desktop-update-banner__actions"><button type="button" className="desktop-update-banner__dismiss" onClick={dismissDesktopUpdate}>Để sau</button></div>
   </section> : null;
-  const renderUpdateAction = () => <>
-    {desktopUpdatesSupported && !isCustomerPortal && <button type="button" className="pwa-action pwa-action--check-desktop-update" onClick={() => void checkDesktopUpdateManually()} disabled={checkingDesktopUpdate}>{checkingDesktopUpdate ? "Đang kiểm tra cập nhật PC…" : "↻ Kiểm tra cập nhật PC"}</button>}
-    {desktopUpdate && !isCustomerPortal && <button type="button" className="pwa-action pwa-action--update pwa-action--desktop-update" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `⇩ Cập nhật PC ${desktopUpdate.version}`}</button>}
-    {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật giao diện</button>}
-  </>;
+  const desktopUpdateBusy = openingDesktopUpdate || ["downloading", "verifying", "ready", "installing"].includes(desktopUpdateProgress.phase);
+  const desktopUpdateLabel = desktopUpdateProgress.phase === "downloading" ? `Đang tải ${Math.max(0, Math.min(100, Math.floor(desktopUpdateProgress.percent || 0)))}%` : desktopUpdateProgress.phase === "verifying" ? "Đang kiểm tra bản cập nhật…" : desktopUpdateProgress.phase === "ready" ? "Đang lưu dữ liệu…" : desktopUpdateProgress.phase === "installing" ? "Đang khởi động lại…" : openingDesktopUpdate ? "Đang kiểm tra cập nhật…" : "Cập nhật";
+  const renderUpdateAction = () => desktopUpdatesSupported && !isCustomerPortal
+    ? <button type="button" className={`pwa-action pwa-action--desktop-update ${desktopUpdate ? "pwa-action--update" : ""}`.trim()} onClick={() => void updateDesktopApplication()} disabled={desktopUpdateBusy} title={desktopUpdate ? `Cập nhật lên PC ${desktopUpdate.version}` : "Kiểm tra và cập nhật GM Manager"} aria-live="polite">{desktopUpdateLabel}</button>
+    : updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button>;
   const renderMobileAppActions = (includeInstall = true) => <>
     {includeInstall && renderUpdateAction()}
     {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
@@ -2859,6 +2916,28 @@ export default function Home() {
     <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
     {renderWindowsStartupAction()}
   </>;
+
+  const prepareForDesktopUpdate = async () => {
+    if (!workspaceStorageReady) throw new Error("Dữ liệu đang mở. Hãy chờ một chút rồi cập nhật.");
+    if (creatingCustomer || customerMutationBusy || uploadingWorkflowFiles || savingWorkNotes || customerMessageTaskBusy || customerMessageStatusBusyId || audioProcessingId || syncingRecordId || syncingDesignId || syncingWarrantyId || exportingPersonnel || savingPancakeConfig || employeeAuthBusy || documentSnapshotActionId || workflowRequestInFlight.current.size) {
+      throw new Error("Hãy chờ thao tác đang chạy hoàn tất rồi cập nhật.");
+    }
+    if (addOpen || personnelAddOpen || driveConfigOpen || protectedAction || customerMessageTaskDraft || loginOpen) {
+      throw new Error("Hãy lưu hoặc đóng biểu mẫu đang nhập trước khi cập nhật.");
+    }
+    try {
+      window.localStorage.setItem("gm-manager-consulting", JSON.stringify(yearsRef.current));
+      if (Object.keys(personnelByCategory).length) window.localStorage.setItem(personnelStorageKey, JSON.stringify(personnelByCategory));
+      if (newWorkNote || editingWorkNote) {
+        const key = workNoteEditorKey();
+        if (!key || workNoteDraftScope.current !== key) throw new Error("Bản nháp thuộc hồ sơ khác.");
+        window.localStorage.setItem(`${driveCachePrefix}${key}`, JSON.stringify({ savedAt: Date.now(), value: { newNote: newWorkNote, editingNote: editingWorkNote } }));
+      }
+    } catch {
+      throw new Error("Không lưu được dữ liệu trên máy. Ứng dụng sẽ giữ nguyên để bạn lưu công việc trước khi cập nhật.");
+    }
+  };
+  desktopUpdatePreparation.current = prepareForDesktopUpdate;
 
   const flushWorkspaceCacheSync = async () => {
     if (workspaceSyncInFlight.current || !workspaceSyncPending.current || !driveScriptUrl.trim()) return;

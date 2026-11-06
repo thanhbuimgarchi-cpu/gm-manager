@@ -2,9 +2,12 @@ const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog, Tray,
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
+const { spawn } = require("node:child_process");
 const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder } = require("./path-utils.cjs");
 const { createBackgroundController } = require(path.join(__dirname, "background.cjs"));
 const { createDesktopUpdateController } = require(path.join(__dirname, "update.cjs"));
+const { createInstallerHandoff } = require(path.join(__dirname, "install-update.cjs"));
+const { createUpdatePreparation } = require(path.join(__dirname, "update-preparation.cjs"));
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
@@ -20,7 +23,23 @@ const activeNotifications = new Set();
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) app.quit();
 const backgroundController = createBackgroundController({ app, Tray, Menu, nativeImage, platform: process.platform, execPath: process.execPath, argv: process.argv, iconPath: APP_ICON, getWindow: () => mainWindow, createWindow: () => createWindow() });
-const desktopUpdateController = createDesktopUpdateController({ getVersion: () => app.getVersion(), platform: process.platform, isPackaged: app.isPackaged, fetcher: (...args) => fetch(...args), openExternal: (url) => shell.openExternal(url) });
+const updateDirectory = () => path.join(app.getPath("userData"), "desktop-updates");
+const updatePreparation = createUpdatePreparation({ getWindow: () => mainWindow });
+const installerHandoff = createInstallerHandoff({ app, spawn, updateDirectory, platform: process.platform });
+const desktopUpdateController = createDesktopUpdateController({
+  getVersion: () => app.getVersion(), platform: process.platform, isPackaged: app.isPackaged,
+  fetcher: (...args) => fetch(...args), openExternal: (url) => shell.openExternal(url),
+  updateDirectory,
+  onProgress: (state) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed?.()) {
+      try { mainWindow.webContents.send("gmcrm:update-progress", state); } catch { /* Renderer may be reloading. */ }
+    }
+  },
+  installVerifiedUpdate: async (update) => {
+    await updatePreparation.prepare();
+    return installerHandoff.installVerifiedUpdate(update);
+  },
+});
 app.on("before-quit", backgroundController.beginQuit);
 app.on("will-quit", backgroundController.dispose);
 
@@ -282,6 +301,9 @@ if (singleInstance) app.whenReady().then(() => {
   ipcMain.handle("gmcrm:get-app-info", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.getAppInfo() : deniedUpdate());
   ipcMain.handle("gmcrm:check-for-updates", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.checkForUpdates() : deniedUpdate());
   ipcMain.handle("gmcrm:download-update", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.downloadUpdate() : deniedUpdate());
+  ipcMain.handle("gmcrm:install-update", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.installUpdate() : deniedUpdate());
+  ipcMain.handle("gmcrm:get-update-state", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.getUpdateState() : deniedUpdate());
+  ipcMain.handle("gmcrm:update-prepared", (event, payload) => trustedStartupIpcSender(event) && updatePreparation.acknowledge(event.sender, payload));
   ipcMain.handle("gmcrm:notify", async (event, payload = {}) => {
     if (!trustedIpcSender(event)) return false;
     if (!Notification.isSupported()) return false;

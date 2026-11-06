@@ -16,14 +16,16 @@ IPC thay đổi thiết lập chỉ nhận giá trị boolean từ khung chính 
 
 ## Thông báo phiên bản PC mới
 
-Giao diện kiểm tra bản PC khi mở ứng dụng, khi quay lại cửa sổ, khi có mạng trở lại và mỗi 60 giây, kể cả lúc chạy nền. “Cập nhật giao diện” tải lại phần web; “Cập nhật PC” tải bộ cài Windows theo số phiên bản. Bộ cài không tự chạy hoặc đóng công việc đang làm. Sau khi tải xong, người dùng thoát GM Manager, cài đè rồi mở lại.
+Giao diện kiểm tra bản PC khi mở ứng dụng, khi quay lại cửa sổ, khi có mạng trở lại và mỗi 60 giây, kể cả lúc chạy nền. Bản Windows chỉ có một nút “Cập nhật”: bấm nút kiểm tra và áp dụng bản mới, hoặc báo đang dùng bản mới nhất. Bản web/PWA vẫn tải lại phần giao diện khi có phiên bản web mới.
 
-Khi chưa có bản mới, nút “Kiểm tra cập nhật PC” vẫn xuất hiện trên đầu trang của bản Windows. Nút cho biết đã dùng bản mới nhất, chưa có bộ cài hoặc không kiểm tra được do kết nối. Khi tìm được bản mới, xuất hiện thêm nút “Cập nhật PC x.y.z”.
+Từ PC 1.3.0, bấm “Cập nhật” tải bộ cài ngay trong ứng dụng, hiện phần trăm, kiểm tra kích thước và SHA256 rồi cài đặt và mở lại. Không tự tải hoặc cài khi chỉ kiểm tra định kỳ. Tệp tải chỉ nhận từ release GitHub của kho này và CDN HTTPS được cho phép. Mỗi lượt tải có thư mục riêng, tệp chưa hoàn chỉnh không được chạy; lỗi tải hoặc sai checksum giữ nguyên ứng dụng để thử lại.
 
-Bản 1.2.0 đọc số phiên bản đã cài qua IPC. Bản 1.0/1.1 chưa có API này vẫn nhận bảng nhắc nâng cấp từ giao diện web; cần tải lại giao diện một lần nếu ứng dụng vẫn đang mở giao diện cũ. “Để sau” ẩn bảng nhắc cho phiên bản đó, còn nút tải trên đầu trang vẫn giữ. Thông báo Windows chỉ gửi khi người dùng đã bật thông báo, mỗi phiên bản một lần; bấm thông báo mở lại cửa sổ hiện tại.
+Trước khi tải và ngay trước khi cài, giao diện phải xác nhận lưu cache/bản nháp. Biểu mẫu chưa lưu hoặc tác vụ đang chạy sẽ chặn khởi động lại với thông báo rõ ràng. Native kiểm tra lại tệp sau xác nhận, chạy NSIS với `--updated /S --force-run`, rồi thoát sau khi tiến trình cài khởi chạy. NSIS dùng GUID cũ để giữ thư mục và phạm vi cài; bản cài toàn máy có thể hiện yêu cầu UAC thông thường của Windows. Không dùng `/D` để tránh lỗi đường dẫn có khoảng trắng trong electron-builder 26.15.3.
+
+Bản 1.0–1.2.1 chưa có API cài đặt nội bộ nên phải cài PC 1.3.0 một lần. Nút “Cập nhật” trên các bản này mở bộ cài và giải thích bước chuyển đổi; từ bản hỗ trợ trở đi cập nhật được thực hiện trong ứng dụng. Nếu còn giữ giao diện cũ, cần tải lại giao diện một lần. “Để sau” ẩn bảng nhắc, còn nút “Cập nhật” vẫn giữ. Thông báo Windows chỉ gửi khi đã bật thông báo, mỗi phiên bản một lần; bấm thông báo mở lại cửa sổ hiện tại.
 
 Windows CI xuất bộ cài bất biến `GM-CRM-Setup-x.y.z.exe` và giữ tên `GM-CRM-Setup.exe` cho liên kết cũ. Mọi thay đổi native phải tăng `desktop/package.json.version`; chạy lại pipeline cùng phiên bản giữ nguyên bộ cài đã phát hành. Pipeline kiểm tra checksum và kích thước trước khi cập nhật liên kết cũ, không hạ liên kết về phiên bản thấp hơn.
 
 Pages tạo `desktop-version.json` từ bộ cài đã tải lên hoàn chỉnh, có SHA256 và kích thước xác nhận trong release GitHub. Khi Windows CI thành công, Pages được triển khai lại để công bố bộ cài mới. PC chỉ đọc manifest tĩnh này, không dùng API GitHub theo từng máy; đường dẫn tải luôn bị giới hạn trong đúng kho GM Manager.
 
-`npm run test:desktop-updates-ui` kiểm tra bảng nhắc cho bản PC cũ, so sánh phiên bản, nhắc lại sau trì hoãn, tải theo thao tác và thông báo bằng bridge giả lập, không cài phần mềm thật.
+`npm run test:desktop-updates-ui` kiểm tra nút duy nhất, tiến độ, bản PC cũ, so sánh phiên bản, chặn lỗi lưu và tải theo thao tác bằng bridge giả lập. Unit test kiểm tra tải theo luồng, checksum, handoff và xác nhận bản nháp. Các kiểm thử không chạy bộ cài hoặc sửa thiết lập Windows thật.
