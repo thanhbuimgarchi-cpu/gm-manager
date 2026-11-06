@@ -444,6 +444,7 @@ type DriveSyncConfig = {
 type DesktopStartupSettings = { supported: boolean; openAtLogin: boolean; canChange?: boolean; error?: string };
 type DesktopUpdateManifest = { version: string; installerUrl: string; sha256: string; size: number };
 type DesktopUpdate = DesktopUpdateManifest & { currentVersion: string | null };
+type DesktopUpdateCheckResult = { status: "available" | "current" | "unavailable" | "unsupported" | "offline" | "error"; version?: string };
 
 type DesktopNotificationBridge = {
   isWindows: boolean;
@@ -2004,6 +2005,10 @@ export default function Home() {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
   const [desktopUpdateDismissed, setDesktopUpdateDismissed] = useState(false);
+  const [desktopUpdatesSupported, setDesktopUpdatesSupported] = useState(false);
+  const [checkingDesktopUpdate, setCheckingDesktopUpdate] = useState(false);
+  const desktopUpdateCheck = useRef<(() => Promise<DesktopUpdateCheckResult>) | null>(null);
+  const desktopUpdateManualCheckInFlight = useRef(false);
   const [openingDesktopUpdate, setOpeningDesktopUpdate] = useState(false);
   const desktopUpdateOpening = useRef(false);
   const desktopUpdateNotificationInFlight = useRef(new Set<string>());
@@ -2300,46 +2305,60 @@ export default function Home() {
     const desktop = desktopBridge();
     if (isCustomerPortal || !desktop?.isWindows || (!desktop.isDesktop && typeof desktop.showNotification !== "function")) return;
     let disposed = false;
-    let running = false;
-    const check = async () => {
-      if (disposed || running || navigator.onLine === false) return;
-      running = true;
+    let pending: Promise<DesktopUpdateCheckResult> | null = null;
+    const performCheck = async (): Promise<DesktopUpdateCheckResult> => {
+      if (disposed) return { status: "unsupported" };
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 12_000);
       try {
         let currentVersion: string | null = null;
         if (desktop.getAppInfo) {
           const installed = await desktop.getAppInfo();
-          if (!installed?.isPackaged || installed.platform !== "win32" || !desktopVersionParts(installed.version)) return;
+          if (!installed?.isPackaged || installed.platform !== "win32" || !desktopVersionParts(installed.version)) {
+            if (!disposed) { setDesktopUpdatesSupported(false); setDesktopUpdate(null); }
+            return { status: "unsupported" };
+          }
           currentVersion = installed.version;
         }
-        if (disposed) return;
+        if (disposed) return { status: "unsupported" };
+        setDesktopUpdatesSupported(true);
+        if (navigator.onLine === false) {
+          setDesktopUpdate(null);
+          return { status: "offline" };
+        }
         const response = await fetch(`${import.meta.env.BASE_URL}desktop-version.json?time=${Date.now()}`, { cache: "no-store", redirect: "error", signal: controller.signal });
-        if (!response.ok) return;
+        if (!response.ok) throw new Error("Desktop update channel is unavailable.");
         const value = await response.json();
         const manifest = parseDesktopUpdateManifest(value);
-        if (disposed) return;
+        if (disposed) return { status: "unsupported" };
         if (!manifest) {
-          // An explicitly unavailable channel contains no installer to offer.
-          if (value?.available === false) { setDesktopUpdate(null); setDesktopUpdateDismissed(false); }
-          return;
+          setDesktopUpdate(null); setDesktopUpdateDismissed(false);
+          return { status: value?.available === false ? "unavailable" : "error" };
         }
         if (currentVersion && compareDesktopVersions(manifest.version, currentVersion) !== 1) {
-          setDesktopUpdate(null); setDesktopUpdateDismissed(false); return;
+          setDesktopUpdate(null); setDesktopUpdateDismissed(false); return { status: "current", version: currentVersion };
         }
         let dismissed = false;
         try { dismissed = window.localStorage.getItem("gm-manager-desktop-update-dismissed-v1") === manifest.version; } catch { /* The banner still works without optional local preferences. */ }
         setDesktopUpdate((prior) => prior?.version === manifest.version && prior.installerUrl === manifest.installerUrl && prior.sha256 === manifest.sha256 && prior.currentVersion === currentVersion ? prior : { ...manifest, currentVersion });
         setDesktopUpdateDismissed(dismissed);
-      } catch { /* Retain the last verified offer while temporarily offline. */ }
-      finally { window.clearTimeout(timeout); running = false; }
+        return { status: "available", version: manifest.version };
+      } catch {
+        if (!disposed) setDesktopUpdate(null);
+        return { status: navigator.onLine === false ? "offline" : "error" };
+      } finally { window.clearTimeout(timeout); }
     };
+    const check = () => {
+      if (!pending) pending = performCheck().finally(() => { pending = null; });
+      return pending;
+    };
+    desktopUpdateCheck.current = check;
     const refresh = () => { void check(); };
     void check();
     const timer = window.setInterval(refresh, 60_000);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
-    return () => { disposed = true; window.clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    return () => { disposed = true; if (desktopUpdateCheck.current === check) desktopUpdateCheck.current = null; window.clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [isCustomerPortal]);
 
   useEffect(() => {
@@ -2788,6 +2807,22 @@ export default function Home() {
     const label = changingStartup ? "Đang lưu khởi động…" : startupSettingsError ? "Khởi động Windows: chưa xác nhận" : !startupSettings ? "Đang kiểm tra Windows…" : enabled ? "Đã bật cùng Windows" : "Khởi động cùng Windows";
     return <button type="button" className={`pwa-action pwa-action--startup ${enabled && !startupSettingsError ? "pwa-action--notifications-enabled" : ""}`.trim()} aria-pressed={enabled} title={startupSettingsError || (enabled ? "GM Manager tự chạy nền khi đăng nhập Windows. Nhấn để tắt." : "Tự chạy GM Manager ở khay hệ thống khi đăng nhập Windows.")} onClick={() => void toggleWindowsStartup()} disabled={changingStartup || !startupSettings || startupSettings.canChange === false || Boolean(startupSettingsError)}>⊞ {label}</button>;
   };
+  const checkDesktopUpdateManually = async () => {
+    if (isCustomerPortal || !desktopUpdateCheck.current || desktopUpdateManualCheckInFlight.current) return;
+    desktopUpdateManualCheckInFlight.current = true;
+    setCheckingDesktopUpdate(true);
+    try {
+      const result = await desktopUpdateCheck.current();
+      if (result.status === "available") {
+        setDesktopUpdateDismissed(false);
+        try { window.localStorage.removeItem("gm-manager-desktop-update-dismissed-v1"); } catch { /* Optional banner preference. */ }
+        setNotice(`Bản PC ${result.version} đã sẵn sàng. Chọn Cập nhật PC để tải bộ cài.`);
+      } else if (result.status === "current") setNotice(`GM Manager PC ${result.version} đang là bản mới nhất.`);
+      else if (result.status === "unavailable") setNotice("Chưa có bộ cài PC mới sẵn sàng. Hãy kiểm tra lại sau.");
+      else if (result.status === "offline") setNotice("Máy đang ngoại tuyến. Hãy kết nối Internet rồi kiểm tra cập nhật PC lại.");
+      else if (result.status === "error") setNotice("Chưa kiểm tra được cập nhật PC. Hãy kiểm tra kết nối Internet rồi thử lại.");
+    } finally { desktopUpdateManualCheckInFlight.current = false; setCheckingDesktopUpdate(false); }
+  };
   const downloadDesktopUpdate = async () => {
     if (!desktopUpdate || desktopUpdateOpening.current || isCustomerPortal) return;
     desktopUpdateOpening.current = true;
@@ -2813,6 +2848,7 @@ export default function Home() {
     <div className="desktop-update-banner__actions"><button type="button" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `Tải bản PC ${desktopUpdate.version}`}</button><button type="button" className="desktop-update-banner__dismiss" onClick={dismissDesktopUpdate}>Để sau</button></div>
   </section> : null;
   const renderUpdateAction = () => <>
+    {desktopUpdatesSupported && !isCustomerPortal && <button type="button" className="pwa-action pwa-action--check-desktop-update" onClick={() => void checkDesktopUpdateManually()} disabled={checkingDesktopUpdate}>{checkingDesktopUpdate ? "Đang kiểm tra cập nhật PC…" : "↻ Kiểm tra cập nhật PC"}</button>}
     {desktopUpdate && !isCustomerPortal && <button type="button" className="pwa-action pwa-action--update pwa-action--desktop-update" onClick={() => void downloadDesktopUpdate()} disabled={openingDesktopUpdate}>{openingDesktopUpdate ? "Đang mở bộ cài…" : `⇩ Cập nhật PC ${desktopUpdate.version}`}</button>}
     {updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật giao diện</button>}
   </>;

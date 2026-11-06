@@ -10,7 +10,11 @@ function createBackgroundController({ app, Tray, Menu, nativeImage, platform, ex
   let quitting = false;
   const isWindows = platform === "win32";
   const canChange = isWindows && Boolean(app.isPackaged) && typeof execPath === "string" && !!execPath;
-  const startupOptions = () => ({ path: execPath, args: [...STARTUP_ARGUMENTS] });
+  // Electron 44 parses this path as a command line when looking up Windows
+  // StartupApproved entries. Without quotes, Program Files (or a user name
+  // with spaces) is truncated even though the Run entry was saved correctly.
+  // The native setter strips these quotes before formatting the Run command.
+  const startupOptions = () => ({ path: `"${execPath}"`, args: [...STARTUP_ARGUMENTS] });
   const baseState = () => ({ supported: isWindows, canChange, openAtLogin: false });
 
   function getStartupSettings() {
@@ -20,7 +24,12 @@ function createBackgroundController({ app, Tray, Menu, nativeImage, platform, ex
       const current = app.getLoginItemSettings(startupOptions());
       const launchItems = Array.isArray(current.launchItems) ? current.launchItems.filter((item) => {
         const itemPath = String(item.path || "").trim().replace(/^"|"$/g, "").toLowerCase();
-        return itemPath === execPath.toLowerCase() && Array.isArray(item.args) && item.args.length === STARTUP_ARGUMENTS.length && item.args.every((value, index) => value === STARTUP_ARGUMENTS[index]);
+        if (itemPath !== execPath.toLowerCase()) return false;
+        // Native launchItems.args omits switches such as --background. The
+        // own user Run entry is identified by name/scope; openAtLogin already
+        // verifies its complete command including the background argument.
+        if (typeof item.name === "string") return item.name === STARTUP_NAME && item.scope === "user";
+        return item.scope !== "machine" && Array.isArray(item.args) && item.args.length === STARTUP_ARGUMENTS.length && item.args.every((value, index) => value === STARTUP_ARGUMENTS[index]);
       }) : [];
       const startupApproved = !launchItems.length || launchItems.some((item) => item.enabled !== false);
       return { ...baseState(), openAtLogin: Boolean(current.openAtLogin && current.executableWillLaunchAtLogin !== false && startupApproved) };

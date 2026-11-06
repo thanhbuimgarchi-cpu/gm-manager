@@ -4,6 +4,8 @@ Bản cài Windows 1.1.0 có nút “Khởi động cùng Windows” cạnh nút
 
 Nút đọc trực tiếp thiết lập Windows khi mở ứng dụng, khi quay lại cửa sổ và khi thay đổi từ menu khay hệ thống. Chỉ hiện đã bật sau khi Windows xác nhận. Ứng dụng không tự bật tùy chọn khi cài hoặc khi chạy lần đầu. Khi đã bật, Windows mở ứng dụng với `--background` sau lần đăng nhập Windows tiếp theo.
 
+Bản PC 1.2.1 sửa việc đọc nhầm trạng thái khởi động khi cài trong `C:\Program Files` hoặc tài khoản Windows có khoảng trắng. Đường dẫn executable được đặt trong dấu ngoặc kép cho cả lệnh đọc và ghi của Electron. Bản sửa vẫn tôn trọng mục bị tắt trong Ứng dụng khởi động; không tự bật lại thiết lập của người dùng.
+
 Biểu tượng GM nằm ở khay hệ thống, có menu mở, ẩn, bật/tắt khởi động và thoát. Dấu X chỉ ẩn cửa sổ nếu biểu tượng khay đã tạo thành công; nếu khay lỗi, cửa sổ vẫn đóng bình thường. Chọn “Thoát GM Manager” đóng hẳn ứng dụng. Đăng xuất hoặc tắt Windows không bị cơ chế thu xuống khay chặn lại.
 
 Cửa sổ ẩn vẫn giữ phiên đăng nhập và các lượt kiểm tra giao việc/thông báo. Nhấp biểu tượng, mở lại ứng dụng hoặc bấm thông báo sẽ hiện cửa sổ. Việc khởi động cùng Windows không thay thế lựa chọn bật thông báo của người dùng.
@@ -15,6 +17,8 @@ IPC thay đổi thiết lập chỉ nhận giá trị boolean từ khung chính 
 ## Thông báo phiên bản PC mới
 
 Giao diện kiểm tra bản PC khi mở ứng dụng, khi quay lại cửa sổ, khi có mạng trở lại và mỗi 60 giây, kể cả lúc chạy nền. “Cập nhật giao diện” tải lại phần web; “Cập nhật PC” tải bộ cài Windows theo số phiên bản. Bộ cài không tự chạy hoặc đóng công việc đang làm. Sau khi tải xong, người dùng thoát GM Manager, cài đè rồi mở lại.
+
+Khi chưa có bản mới, nút “Kiểm tra cập nhật PC” vẫn xuất hiện trên đầu trang của bản Windows. Nút cho biết đã dùng bản mới nhất, chưa có bộ cài hoặc không kiểm tra được do kết nối. Khi tìm được bản mới, xuất hiện thêm nút “Cập nhật PC x.y.z”.
 
 Bản 1.2.0 đọc số phiên bản đã cài qua IPC. Bản 1.0/1.1 chưa có API này vẫn nhận bảng nhắc nâng cấp từ giao diện web; cần tải lại giao diện một lần nếu ứng dụng vẫn đang mở giao diện cũ. “Để sau” ẩn bảng nhắc cho phiên bản đó, còn nút tải trên đầu trang vẫn giữ. Thông báo Windows chỉ gửi khi người dùng đã bật thông báo, mỗi phiên bản một lần; bấm thông báo mở lại cửa sổ hiện tại.
 

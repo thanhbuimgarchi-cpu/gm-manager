@@ -64,7 +64,7 @@ event.source.postMessage({channel:'gm-manager-apps-script-response',id,result},'
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(`${baseUrl}${query}`);
   await page.locator('.crm-shell, .customer-portal').first().waitFor();
-  return Object.assign(fixture, { context, page, banner: page.getByRole('status', { name: 'Có bản cập nhật PC', exact: true }), button: page.locator('.pwa-action--desktop-update') });
+  return Object.assign(fixture, { context, page, banner: page.getByRole('status', { name: 'Có bản cập nhật PC', exact: true }), button: page.locator('.pwa-action--desktop-update'), manualButton: page.locator('.pwa-action--check-desktop-update') });
 }
 
 try {
@@ -88,13 +88,19 @@ try {
   await old.button.waitFor();
   assert.equal(await old.banner.count(), 0, 'dismissal persists for the same version');
   assert.equal(await old.page.evaluate(() => qaUpdates.notifications.length), 0, 'reload does not repeat the acknowledged update alert');
+  await old.manualButton.click();
+  await old.banner.waitFor();
+  await old.page.locator('.toast').filter({ hasText: 'Bản PC 1.2.0 đã sẵn sàng.' }).waitFor();
+  assert.equal(await old.page.evaluate(() => qaUpdates.downloads.length), 0, 'manual checks only expose the offer; they never open an installer');
   old.manifest = release('1.3.0');
   await old.page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await old.banner.getByRole('button', { name: 'Tải bản PC 1.3.0', exact: true }).waitFor();
   await old.page.waitForFunction(() => qaUpdates.notifications.length === 1);
   old.offline = true;
-  await old.page.evaluate(() => window.dispatchEvent(new Event('focus')));
-  assert.equal(await old.button.count(), 1, 'offline checks retain the last verified offer');
+  await old.manualButton.click();
+  await old.page.locator('.toast').filter({ hasText: 'Chưa kiểm tra được cập nhật PC.' }).waitFor();
+  assert.equal(await old.button.count(), 0, 'failed checks do not offer a stale installer as the current release');
+  assert.equal(await old.manualButton.isEnabled(), true, 'failed checks can be retried immediately');
   await old.page.screenshot({ path: 'outputs/interface-qa/desktop-update-next.png', fullPage: true });
   await old.context.close();
 
@@ -115,7 +121,31 @@ try {
   await current.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(await current.button.count(), 0, 'the installed current native release has no persistent update banner');
   assert.equal(await current.page.evaluate(() => qaUpdates.notifications.length), 0);
+  await current.manualButton.click();
+  await current.page.locator('.toast').filter({ hasText: 'GM Manager PC 1.2.0 đang là bản mới nhất.' }).waitFor();
+  assert.equal(await current.manualButton.isEnabled(), true, 'the current native build keeps a permanent manual check');
+  const infoBefore = await current.page.evaluate(() => { qaUpdates.holdInfo = true; return qaUpdates.infoCalls; });
+  await current.page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await current.page.waitForFunction(() => qaUpdates.pendingInfo !== null);
+  await current.manualButton.click();
+  await current.page.getByRole('button', { name: 'Đang kiểm tra cập nhật PC…', exact: true }).waitFor();
+  assert.equal(await current.page.evaluate(() => qaUpdates.infoCalls), infoBefore + 1, 'manual and automatic checks share the same in-flight request');
+  await current.page.evaluate(() => { qaUpdates.holdInfo = false; qaUpdates.pendingInfo(); qaUpdates.pendingInfo = null; });
+  await current.page.getByRole('button', { name: '↻ Kiểm tra cập nhật PC', exact: true }).waitFor();
+  await current.context.setOffline(true);
+  const requestsBeforeOffline = current.manifestRequests;
+  await current.manualButton.click();
+  await current.page.locator('.toast').filter({ hasText: 'Máy đang ngoại tuyến.' }).waitFor();
+  assert.equal(current.manifestRequests, requestsBeforeOffline, 'offline checks do not attempt a network request');
+  assert.equal(await current.button.count(), 0);
+  await current.context.setOffline(false);
   await current.context.close();
+
+  const unavailable = await fixture({ mode: 'current', manifest: { available: false } });
+  await unavailable.manualButton.click();
+  await unavailable.page.locator('.toast').filter({ hasText: 'Chưa có bộ cài PC mới sẵn sàng.' }).waitFor();
+  assert.equal(await unavailable.button.count(), 0);
+  await unavailable.context.close();
 
   const native = await fixture({ mode: 'current', version: '1.2.0', manifest: release('1.3.0') });
   await native.banner.waitFor();
@@ -147,10 +177,12 @@ try {
     assert.equal(await other.button.count(), 0, `no unsafe or unnecessary offer ${JSON.stringify(configuration)}`);
     assert.equal(await other.page.evaluate(() => qaUpdates.downloads.length + qaUpdates.nativeDownloads), 0);
     if (configuration.mode === 'web' || configuration.mode === 'mac') assert.equal(other.manifestRequests, 0);
+    if (['web', 'mac', 'dev'].includes(configuration.mode)) assert.equal(await other.manualButton.count(), 0, 'manual PC checks are limited to installed Windows builds');
     await other.context.close();
   }
   const portal = await fixture({ query: '?view=customer&share=qa-update' });
   assert.equal(await portal.button.count(), 0);
+  assert.equal(await portal.manualButton.count(), 0);
   assert.equal(portal.manifestRequests, 0, 'customer pages do not request or display employee PC updates');
   await portal.context.close();
   assert.deepEqual(errors, []);

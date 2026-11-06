@@ -14,12 +14,20 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 
 function fixture(options = {}) {
   const reads = [], writes = [], notifications = [], windows = [], trays = [];
+  const installedPath = options.execPath || exePath;
   let settings = { openAtLogin: Boolean(options.enabled), executableWillLaunchAtLogin: options.approved !== false };
   let readFails = false, writeFails = false, writeIgnored = false;
   const app = new EventEmitter();
   Object.assign(app, { isPackaged: options.packaged !== false, quitCount: 0, getLoginItemSettings(payload) {
     reads.push(plain(payload));
     if (readFails) throw new Error("synthetic read failure");
+    if (options.commandLineLookup) {
+      // Electron's native lookup treats options.path as a full command line,
+      // while the setter quotes the executable before writing the Run key.
+      const lookupPath = payload.path.match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean);
+      const matches = lookupPath?.toLowerCase() === installedPath.toLowerCase();
+      return { ...settings, executableWillLaunchAtLogin: Boolean(matches && settings.openAtLogin && settings.executableWillLaunchAtLogin), launchItems: matches && settings.openAtLogin ? [{ path: installedPath, args: ["--background"], enabled: settings.executableWillLaunchAtLogin, scope: "user" }] : [] };
+    }
     return settings;
   }, setLoginItemSettings(payload) {
     writes.push(plain(payload));
@@ -67,7 +75,7 @@ function fixture(options = {}) {
   const nativeImage = { createFromPath: (iconPath) => ({ isEmpty: () => options.iconMissing === true, resize: (size) => ({ iconPath, size }) }) };
   const Menu = { buildFromTemplate: (items) => items };
   let currentWindow;
-  const configuration = { app, Tray, Menu, nativeImage, platform: options.platform || "win32", execPath: exePath, argv: options.argv || [exePath], iconPath: "gm-logo-512.png", getWindow: () => currentWindow, createWindow: () => attachNewWindow() };
+  const configuration = { app, Tray, Menu, nativeImage, platform: options.platform || "win32", execPath: installedPath, argv: options.argv || [installedPath], iconPath: "gm-logo-512.png", getWindow: () => currentWindow, createWindow: () => attachNewWindow() };
   const controller = createBackgroundController(configuration);
   app.on("before-quit", controller.beginQuit);
   app.on("will-quit", controller.dispose);
@@ -81,12 +89,26 @@ test("startup is never enabled on load; writes use the same installed executable
   assert.equal(f.controller.getStartupSettings().openAtLogin, false);
   assert.equal(f.writes.length, 0);
   assert.equal(f.controller.setStartupSettings({ openAtLogin: true }).ok, true);
-  assert.deepEqual(f.writes[0], { path: exePath, args: ["--background"], name: "com.mgarchi.gmcrm", openAtLogin: true, enabled: true });
-  assert.ok(f.reads.every((value) => value.path === exePath && value.args[0] === "--background"));
+  assert.deepEqual(f.writes[0], { path: `"${exePath}"`, args: ["--background"], name: "com.mgarchi.gmcrm", openAtLogin: true, enabled: true });
+  assert.ok(f.reads.every((value) => value.path === `"${exePath}"` && value.args[0] === "--background"));
   const restarted = createBackgroundController(f.configuration);
   assert.equal(restarted.getStartupSettings().openAtLogin, true, "a restarted controller reads Windows, not browser memory");
   assert.equal(restarted.setStartupSettings({ openAtLogin: false }).openAtLogin, false);
   assert.equal(f.writes.at(-1).openAtLogin, false);
+});
+
+test("Windows command-line lookup preserves Program Files and user names with spaces", () => {
+  for (const installedPath of [exePath, "C:\\Users\\Bùi Đức Thành\\AppData\\Local\\Programs\\GM-CRM\\GM-CRM.exe", "D:\\GM-CRM\\GM-CRM.exe"]) {
+    const f = fixture({ execPath: installedPath, commandLineLookup: true, enabled: true });
+    assert.equal(f.controller.getStartupSettings().openAtLogin, true, installedPath);
+    assert.equal(f.writes.length, 0, "reading an existing enabled entry must not change Windows settings");
+    assert.equal(f.controller.setStartupSettings({ openAtLogin: false }).ok, true);
+    assert.equal(f.controller.setStartupSettings({ openAtLogin: true }).ok, true);
+    assert.equal(f.controller.getStartupSettings().openAtLogin, true);
+    assert.ok(f.reads.every(value => value.path === `"${installedPath}"`));
+    f.setSettings({ openAtLogin: true, executableWillLaunchAtLogin: false });
+    assert.equal(f.controller.getStartupSettings().openAtLogin, false, "quotes must still respect a disabled StartupApproved entry");
+  }
 });
 
 test("Task Manager disabled entries are shown off and can be explicitly enabled again", () => {
@@ -99,6 +121,18 @@ test("Task Manager disabled entries are shown off and can be explicitly enabled 
   assert.equal(f.controller.getStartupSettings().openAtLogin, false, "an unrelated enabled argument list must not mask the disabled startup entry");
   assert.equal(f.controller.setStartupSettings({ openAtLogin: true }).openAtLogin, true);
   assert.equal(f.writes[0].enabled, true);
+});
+
+test("the own user StartupApproved entry wins when native launchItems omits switches", () => {
+  const f = fixture({ enabled: true });
+  const own = { name: "com.mgarchi.gmcrm", path: exePath, args: [], enabled: false, scope: "user" };
+  const other = { name: "another-launch-mode", path: exePath, args: [], enabled: true, scope: "user" };
+  const machine = { ...own, scope: "machine", enabled: true };
+  f.setSettings({ openAtLogin: true, executableWillLaunchAtLogin: true, launchItems: [own, other, machine] });
+  assert.equal(f.controller.getStartupSettings().openAtLogin, false, "another enabled entry must not mask our disabled user entry");
+  f.setSettings({ openAtLogin: true, executableWillLaunchAtLogin: true, launchItems: [{ ...own, enabled: true }, { ...other, enabled: false }] });
+  assert.equal(f.controller.getStartupSettings().openAtLogin, true);
+  assert.equal(f.writes.length, 0);
 });
 
 test("invalid startup values cannot touch Windows settings", () => {
