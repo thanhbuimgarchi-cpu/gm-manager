@@ -198,7 +198,7 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .record-detail__name-input { min-height: 36px; margin-top: 8px; padding: 6px 9px; color: #607086; font-size: 13px; }
 .record-detail__zalo-group { max-width: 480px; gap: 5px; margin-top: 12px; color: #758297; font-size: 11px; }
 .record-detail__zalo-group > span { color: #758297; font-size: 11px; }
-.record-detail__zalo-group input { min-height: 36px; padding: 7px 10px; border-color: #e0e5ee; border-radius: 7px; background: #fcfdff; color: #3b4a60; font-size: 12px; }
+.record-detail__zalo-group .growing-textarea { min-height: 36px; padding: 7px 10px; border-color: #e0e5ee; border-radius: 7px; background: #fcfdff; color: #3b4a60; font-size: 12px; }
 .consulting-profile-actions { gap: 12px; }
 .detail-scroll { min-width: 0; max-width: 100%; padding: 0 24px 24px; }
 .information-table, .functional-table { color: #48556b; }
@@ -638,6 +638,21 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .sidebar-customer-group__items .sidebar-note { width: 100%; margin: 0; padding: 9px 7px; }
 .sidebar-customer-group__items .sidebar-note b { font-size: 11px; line-height: 1.55; }
 .workflow-item-status { margin: 8px 0 0; color: #65758d; font-size: 12px; line-height: 1.5; }
+.completion-review { border-color: #e6cc9b; }
+.completion-review__item { display: grid; gap: 5px; padding: 10px 8px; border-top: 1px solid #e9edf3; overflow-wrap: anywhere; }
+.completion-review__item b { color: #334760; font-size: 13px; }
+.completion-review__item small { color: #65758d; font-size: 11px; }
+.completion-review__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.completion-review__actions button { min-height: 32px; padding: 5px 8px; border: 1px solid #c9d5e5; border-radius: 7px; color: #334760; background: #fff; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+.completion-review__actions button:hover:not(:disabled) { border-color: #3c638a; }
+.completion-review__actions button:disabled { opacity: .55; cursor: default; }
+.completion-review__actions .completion-review__approve { color: #fff; border-color: #315981; background: #315981; }
+.completion-review__pending { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; color: #80581c; font-size: 12px; }
+.completion-review__comment { margin-top: 8px; padding: 7px 9px; border-left: 2px solid #d6e0ec; background: #f4f7fb; color: #40526d; font-size: 12px; }
+.completion-review__comment p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.design-progress-table .completion-review__actions { margin-top: 6px; }
+.completion-review-dialog .growing-textarea { min-height: 80px; width: 100%; padding: 9px 10px; border: 1px solid #dfe5ee; border-radius: 8px; }
+@media (max-width: 760px) { .completion-review__actions button { min-height: 40px; } }
 .work-note-pending { padding: 16px 18px; border: 1px dashed #c9d7e8; border-radius: 12px; color: #425c7e; background: #f5f8fd; line-height: 1.6; }
 .work-note-pending p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .work-note-pending small { color: #6b7f99; }
@@ -671,6 +686,28 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .desktop-update-banner button:disabled { opacity: .6; cursor: wait; }
 .desktop-update-banner .desktop-update-banner__dismiss { background: #fff; border-color: #e1c5ca; color: #8c5360; }
 .workspace > .desktop-update-banner { margin: 18px 30px 0; }
+.vietnam-date-picker { display: grid; min-width: 0; gap: 6px; }
+.vietnam-date-picker > label { display: block; margin: 0; }
+.personnel-add-form > .vietnam-date-picker { display: grid; grid-column: auto; }
+.vietnam-date-picker__input { position: relative; display: flex; align-items: center; }
+.vietnam-date-picker__input > input { width: 100%; min-width: 0; }
+.vietnam-date-picker__input:has(.vietnam-date-picker__trigger) > input { padding-right: 33px; }
+.vietnam-date-picker__trigger { position: absolute; right: 2px; display: grid; width: 30px; height: 30px; padding: 0; place-items: center; border: 0; border-radius: 6px; background: transparent; color: #586b86; cursor: pointer; }
+.vietnam-date-picker__trigger:hover, .vietnam-date-picker__trigger[aria-expanded="true"] { background: #e9eff8; color: #253a59; }
+.vietnam-date-picker__calendar { width: min(18rem, max(100%, 15rem)); max-width: calc(100vw - 54px); padding: 9px; border: 1px solid #d9e2ef; border-radius: 10px; background: #fff; color: #26374f; box-shadow: 0 5px 15px #23355317; touch-action: pan-y; }
+.vietnam-date-picker__heading { display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; align-items: center; margin-bottom: 5px; text-align: center; font-size: 12px; }
+.vietnam-date-picker__days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; text-align: center; font-size: 11px; }
+.vietnam-date-picker__days > span { padding: 5px 0; color: #6a7890; }
+.vietnam-date-picker__calendar button { min-height: 29px; min-width: 0; padding: 0; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.vietnam-date-picker__heading > button { font-size: 20px; line-height: 1; }
+.vietnam-date-picker__calendar button:hover:enabled { background: #edf2f9; }
+.vietnam-date-picker__calendar button[aria-current="date"] { border-color: #a2b2ca; }
+.vietnam-date-picker__calendar button[aria-pressed="true"] { border-color: #385b93; background: #385b93; color: #fff; }
+.vietnam-date-picker__calendar button[aria-pressed="true"]:hover { background: #2c4b7c; }
+.vietnam-date-picker__calendar button:disabled { opacity: .35; cursor: default; }
+.vietnam-date-picker__calendar button:focus-visible, .vietnam-date-picker__trigger:focus-visible { outline: 2px solid #385b93; outline-offset: 1px; }
+.work-note__line--schedule:has(.vietnam-date-picker__calendar) { align-items: start; }
+@media (pointer: coarse) { .vietnam-date-picker__calendar button { min-height: 34px; } }
 @media (max-width: 850px) { .desktop-update-banner { align-items: flex-start; flex-direction: column; gap: 10px; } .desktop-update-banner__actions { flex-wrap: wrap; } }
 @media (max-width: 760px) {
   .sidebar-customer-group__trigger { min-height: 56px; }

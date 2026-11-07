@@ -21,7 +21,7 @@ const fixtureWorkflowToken = account => fixtureAdminToken({version:2,purpose:'wo
 const workflowTokens = Object.fromEntries(['admin','anh@example.com','manager@example.com'].map(account=>[account,fixtureWorkflowToken(account)]));
 const personnel = { office: [{id:'p1',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',loginCode:'00123',birthDate:'20/09/1995',phone:'0912345678',role:'Nhân viên thiết kế',permissions,address:'Hà Nội'},{id:'p2',status:'Có',name:'Quản lý kiểm thử',email:'manager@example.com',loginCode:'manager-code',birthDate:'',phone:'',role:'Quản lý chung',permissions,address:''}] };
 const records = [
-  {id:'c1',name:'Chị Quỳnh',houseId:'DV-75',projectId:'GM28102026CQ',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Nguyễn Thị Quỳnh',SDT:'0912345678','NCT-KT':'Có','NCT-NT':'Có'},designProgress:[{id:'d1',isCustom:false,content:'Triển khai hồ sơ kiến trúc',plannedDate:'10/11/2026',actualDate:'',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',note:'Kiểm tra phương án mặt bằng',publishedAt:'2026-10-28T00:00:00Z'}]},
+  {id:'c1',name:'Chị Quỳnh',houseId:'DV-75',projectId:'GM28102026CQ',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Nguyễn Thị Quỳnh',SDT:'0912345678','NCT-KT':'Có','NCT-NT':'Có',ZALO_GROUP_NAME:'Nhóm Zalo DV-75'},designProgress:[{id:'d1',isCustom:false,content:'Triển khai hồ sơ kiến trúc',plannedDate:'10/11/2026',actualDate:'',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',note:'Kiểm tra phương án mặt bằng',publishedAt:'2026-10-28T00:00:00Z'}]},
   {id:'c2',name:'Anh Minh',houseId:'NT5-38',projectId:'GM28102026AM',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Trần Văn Minh',SDT:'0987654321'}},
 ];
 const years = [{year:2026,months:Array.from({length:12},(_,i)=>({label:`T${i+1}`,records:i===9?records:[]}))}];
@@ -39,7 +39,7 @@ await context.addInitScript(({years,personnel,notes,fixtureScriptUrl,adminSessio
 }, {years,personnel,notes,fixtureScriptUrl,adminSessionToken,workflowToken:workflowTokens.admin});
 await context.route('https://script.google.com/**', route => route.fulfill({ contentType:'text/html; charset=utf-8', body:`<meta charset="utf-8"><script>
 const years=${JSON.stringify(years)}, personnel=${JSON.stringify(personnel)}, notes=${JSON.stringify(notes)}, messages=${JSON.stringify(messages)}, workflowTokens=${JSON.stringify(workflowTokens)};
-window.qaMutationFail=false;window.qaMutationLog=[];window.qaAdminLoginCalls=[];window.qaCreateLog=[];
+window.qaMutationFail=false;window.qaMutationLog=[];window.qaAdminLoginCalls=[];window.qaCreateLog=[];window.qaMessageTargets=[];
 addEventListener('message',event=>{if(event.data?.channel!=='gm-manager-apps-script')return; const {id,payload:p}=event.data; let r={ok:true};
 if(p.action==='verify-employee-login'){
   window.qaAdminLoginCalls.push(p);
@@ -75,7 +75,7 @@ if(p.action==='load-work-notes')r.notes=p.projectId==='GM28102026CQ'?notes:[];
 if(p.action==='sync-work-notes'){notes.splice(0,notes.length,...p.notes);r.notes=notes;}
 if(p.action==='load-assigned-work-notes')r.notes=notes.map(n=>({...n,year:2026,month:10,projectId:'GM28102026CQ',houseId:'DV-75'}));
 if(p.action==='load-assigned-design-tasks')r.tasks=[];
-if(p.action==='load-customer-messages'){r.messages=messages;r.configured=true;}
+if(p.action==='load-customer-messages'){window.qaMessageTargets=p.customerTargets;r.messages=messages;r.configured=true;}
 if(p.action==='list-documents'){r.snapshots=[{id:'s1',name:'28-10-2026-DV-75',date:'28/10/2026'}];r.activeSnapshotId='s1';r.files=[{id:'f1',name:'Phương án kiến trúc.pdf',updatedAt:'28/10/2026 09:30',work:'Thiết kế',mimeType:'application/pdf',viewUrl:'https://drive.google.com/file/d/test/view',downloadUrl:'https://drive.google.com/file/d/test/view'}];}
 if(p.action==='list-3d-library')r.folders=[];
 setTimeout(()=>event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*'),p.action==='rename-customer-folder'||p.action==='delete-customer-folder'?250:0);});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
@@ -154,6 +154,19 @@ assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').firs
 await page.getByRole('button',{name:'Mở danh sách Tin nhắn khách'}).click();
 await page.locator('.customer-result').filter({hasText:'DV-75'}).click();
 await page.locator('.record-detail--inline').waitFor();
+const zaloEditor = page.getByRole('group', {name:'Tên nhóm Zalo', exact:true});
+assert.equal(await zaloEditor.getByRole('textbox').first().inputValue(),'Nhóm Zalo DV-75','the previous single name is preserved');
+await zaloEditor.getByRole('button',{name:'Thêm dòng sau dòng 1 của Tên nhóm Zalo',exact:true}).click();
+await zaloEditor.getByRole('textbox').nth(1).fill('Nhóm công trường');
+await zaloEditor.getByRole('button',{name:'Thêm dòng sau dòng 2 của Tên nhóm Zalo',exact:true}).click();
+await zaloEditor.getByRole('textbox').nth(2).fill('Nhóm bỏ đi');
+await zaloEditor.getByRole('button',{name:'Bớt dòng 3 của Tên nhóm Zalo',exact:true}).click();
+assert.equal(await zaloEditor.getByRole('textbox').count(),2);
+await page.getByRole('button',{name:'Tin nhắn',exact:true}).click();
+await page.getByRole('button',{name:'↻ Nạp lại',exact:true}).click();
+await bridgeFrame.waitForFunction(() => window.qaMessageTargets.some(target => target.houseId === 'DV-75' && JSON.stringify(target.zaloGroupNames) === JSON.stringify(['Nhóm Zalo DV-75','Nhóm công trường'])));
+await page.getByRole('button',{name:'Tư vấn',exact:true}).click();
+assert.equal(await zaloEditor.getByRole('textbox').nth(1).inputValue(),'Nhóm công trường');
 await page.screenshot({path:'outputs/interface-qa/desktop-consulting.png',fullPage:true});
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 await page.locator('.work-note').first().waitFor();
@@ -162,6 +175,13 @@ const composer = page.getByLabel('Ghi chú mới',{exact:true});
 assert.ok(await composer.getByRole('button',{name:'Phát hành',exact:true}).isDisabled(),'requires assignee and date');
 await composer.getByLabel('Người phụ trách',{exact:true}).selectOption('anh@example.com');
 assert.ok(await composer.getByRole('button',{name:'Phát hành',exact:true}).isDisabled(),'requires due date');
+await composer.getByRole('button',{name:'Mở lịch Hoàn thành dự kiến',exact:true}).click();
+const dueCalendar = composer.getByRole('group',{name:'Lịch chọn ngày'});
+assert.ok(await dueCalendar.getByRole('button',{name:'27/10/2026',exact:true}).isDisabled(),'new deadlines cannot be picked in the past');
+await dueCalendar.getByRole('button',{name:'Tháng sau',exact:true}).click();
+await dueCalendar.getByRole('button',{name:'03/11/2026',exact:true}).click();
+assert.equal(await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).inputValue(),'03/11/2026');
+assert.equal(await dueCalendar.count(),0,'picking a date closes the calendar');
 await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).fill('30102026');
 assert.equal(await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).inputValue(),'30/10/2026');
 await composer.getByLabel('Nội dung công việc',{exact:true}).fill('Kiểm tra điều kiện phát hành ghi chú.');
@@ -199,6 +219,19 @@ await page.locator('.customer-result').first().click();
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 await page.screenshot({path:'outputs/interface-qa/mobile-notes.png',fullPage:true});
 const projectMobile = await overflow(); assert.ok(projectMobile.body<=390,JSON.stringify(projectMobile));
+await page.locator('.work-notes__actions button').click();
+await composer.getByRole('button',{name:'Mở lịch Hoàn thành dự kiến',exact:true}).click();
+await dueCalendar.evaluate((panel) => {
+  const start = new Touch({ identifier: 1, target: panel, clientX: 180, clientY: 100 });
+  const end = new Touch({ identifier: 1, target: panel, clientX: 65, clientY: 110 });
+  panel.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, touches: [start] }));
+  panel.dispatchEvent(new TouchEvent('touchend', { bubbles: true, changedTouches: [end] }));
+});
+await dueCalendar.getByText('Tháng 11/2026',{exact:true}).waitFor();
+assert.ok((await overflow()).body<=390,'the open calendar stays inside the phone layout');
+await page.keyboard.press('Escape');
+assert.equal(await dueCalendar.count(),0);
+await composer.getByRole('button',{name:'Hủy',exact:true}).click();
 for (const width of [360,768,1366]) {
   await page.setViewportSize({width,height:900});
   for(const folder of ['Tư vấn','Thiết kế','Tài liệu']) {
@@ -298,7 +331,9 @@ for (const [sessionLabel,token] of [['expired',fixtureAdminToken({...adminSessio
   },{token,fixtureScriptUrl});
   await page.reload();
   await page.locator('.customer-result').first().waitFor();
-  const cacheBefore=await page.evaluate(()=>localStorage.getItem('gm-manager-consulting'));
+  const cachedProjects = () => page.evaluate(() => JSON.parse(localStorage.getItem('gm-manager-consulting') || '[]')
+    .flatMap(year => year.months.flatMap(month => month.records.map(record => record.projectId))).sort());
+  const cacheBefore=await cachedProjects();
   await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).click();
   await page.getByRole('dialog',{name:'Đăng nhập',exact:true}).waitFor();
   assert.equal(await page.getByRole('dialog',{name:'Thêm khách hàng',exact:true}).count(),0,`${sessionLabel} admin authorization cannot open creation`);
@@ -310,7 +345,7 @@ for (const [sessionLabel,token] of [['expired',fixtureAdminToken({...adminSessio
   const staleSessionBridge=page.frames().find(frame=>frame.url().startsWith('https://script.google.com/'));
   assert.equal((await staleSessionBridge.evaluate(()=>window.qaCreateLog)).length,0,`${sessionLabel} admin authorization cannot send create`);
   assert.equal((await staleSessionBridge.evaluate(()=>window.qaMutationLog)).length,0,`${sessionLabel} admin authorization cannot send delete`);
-  assert.equal(await page.evaluate(()=>localStorage.getItem('gm-manager-consulting')),cacheBefore,`${sessionLabel} authorization cannot create phantom cached customers`);
+  assert.deepEqual(await cachedProjects(),cacheBefore,`${sessionLabel} authorization cannot create phantom cached customers`);
   await page.keyboard.press('Escape');
 }
 await page.evaluate(()=>{localStorage.removeItem('gm-manager-personnel-session-email');localStorage.removeItem('gm-manager-admin-session-v1');});

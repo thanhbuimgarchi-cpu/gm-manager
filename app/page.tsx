@@ -3,7 +3,8 @@
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
-import { createWorkflowClient, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
+import VietnamDatePicker from "./VietnamDatePicker";
+import { createWorkflowClient, formatDateInput as formatDesignDateInput, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
 
 function WorkspaceIcon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, string> = {
@@ -90,11 +91,14 @@ type LineListEditorProps = {
   onChange: (value: string) => void;
   ariaLabel: string;
   placeholder?: string;
+  maxLines?: number;
+  maxLineLength?: number;
 };
 
-function LineListEditor({ value, onChange, ariaLabel, placeholder }: LineListEditorProps) {
+function LineListEditor({ value, onChange, ariaLabel, placeholder, maxLines, maxLineLength }: LineListEditorProps) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const canAddLine = maxLines === undefined || lines.length < maxLines;
   const focusLine = (index: number) => {
     window.requestAnimationFrame(() => {
       const editors = editorRef.current?.querySelectorAll("textarea");
@@ -103,10 +107,12 @@ function LineListEditor({ value, onChange, ariaLabel, placeholder }: LineListEdi
   };
   const commitLines = (nextLines: string[]) => onChange(nextLines.join("\n"));
   const replaceLine = (index: number, nextValue: string) => {
-    const replacementLines = nextValue.replace(/\r\n?/g, "\n").split("\n");
+    const remainingLines = maxLines === undefined ? undefined : Math.max(1, maxLines - lines.length + 1);
+    const replacementLines = nextValue.replace(/\r\n?/g, "\n").split("\n").slice(0, remainingLines).map((line) => line.slice(0, maxLineLength));
     commitLines([...lines.slice(0, index), ...replacementLines, ...lines.slice(index + 1)]);
   };
   const addLine = (index: number) => {
+    if (!canAddLine) return;
     commitLines([...lines.slice(0, index + 1), "", ...lines.slice(index + 1)]);
     focusLine(index + 1);
   };
@@ -134,7 +140,7 @@ function LineListEditor({ value, onChange, ariaLabel, placeholder }: LineListEdi
         placeholder={placeholder}
       />
       <div className="line-list-editor__actions">
-        <button type="button" onClick={() => addLine(index)} aria-label={`Thêm dòng sau dòng ${index + 1} của ${ariaLabel}`}>＋</button>
+        <button type="button" onClick={() => addLine(index)} disabled={!canAddLine} aria-label={`Thêm dòng sau dòng ${index + 1} của ${ariaLabel}`}>＋</button>
         <button type="button" onClick={() => removeLine(index)} disabled={lines.length === 1 && !line} aria-label={`Bớt dòng ${index + 1} của ${ariaLabel}`}>−</button>
       </div>
     </div>)}
@@ -175,7 +181,15 @@ function customerDisplayName(record: Pick<WorkRecord, "houseId">) {
   return houseId || "Chưa có mã nhà";
 }
 
-type DesignProgressRow = {
+type CompletionReviewFields = {
+  completionRequestedAt?: string;
+  completionRequestedBy?: string;
+  completionRequestedByName?: string;
+  reassignedAt?: string;
+  reviewComment?: string;
+};
+
+type DesignProgressRow = CompletionReviewFields & {
   id: string;
   isCustom: boolean;
   content: string;
@@ -316,7 +330,7 @@ type PersonnelStatus = "Có" | "Không" | "Ngưng";
 type WorkNotePriority = "Gấp" | "Cần lập tức" | "Bình thường";
 type WorkNoteStatus = "Đỏ" | "Cam" | "Xanh" | "Đen" | "Tím";
 
-type WorkNote = {
+type WorkNote = CompletionReviewFields & {
   id: string;
   priority: WorkNotePriority;
   workType: string;
@@ -357,6 +371,16 @@ type AssignedDesignTask = DesignProgressRow & {
   customerName?: string;
   houseId?: string;
 };
+
+type CompletionReviewTarget = {
+  location: CustomerLocation;
+  item: WorkNote | DesignProgressRow;
+  kind?: DesignProgressKind;
+};
+
+function isAwaitingCompletionReview(item: CompletionReviewFields & { actualDate: string }) {
+  return Boolean(item.completionRequestedAt && !item.actualDate);
+}
 
 type CustomerMessageStatus = "new" | "processing" | "resolved";
 
@@ -1178,13 +1202,6 @@ const normalizeWarrantyProgress = (record?: WorkRecord | null): WarrantyProgress
   });
   const existingFixed = new Set(normalized.filter((row) => !row.isCustom).map((row) => row.content));
   return [...normalized, ...warrantyProgressContents.map(createFixedWarrantyRow).filter((row) => !existingFixed.has(row.content))];
-};
-
-const formatDesignDateInput = (value: string) => {
-  const digits = value.replace(/\D/g, "").slice(0, 8);
-  if (digits.length <= 2) return digits;
-  if (digits.length <= 4) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-  return `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
 };
 
 const normalizeImportedDate = (value: string) => {
@@ -2076,6 +2093,8 @@ export default function Home() {
   const [savingWorkNotes, setSavingWorkNotes] = useState(false);
   const [pendingWorkNoteCompletionId, setPendingWorkNoteCompletionId] = useState<string | null>(null);
   const [pendingDesignTaskCompletion, setPendingDesignTaskCompletion] = useState<{ kind: DesignProgressKind; rowId: string } | null>(null);
+  const [completionFeedback, setCompletionFeedback] = useState<{ target: CompletionReviewTarget; dueDate: string; comment: string } | null>(null);
+  const [completionReviewOpen, setCompletionReviewOpen] = useState(true);
   const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
   const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
   const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
@@ -2115,6 +2134,7 @@ export default function Home() {
   const workflowDeletedNotes = useRef(new Map<string, Set<string>>());
   const workNoteDraftScope = useRef("");
   const workflowRequestInFlight = useRef(new Set<string>());
+  const reviewNotificationInFlight = useRef(new Set<string>());
   const workflowAuthorization = useRef({ workflowSessionToken: "", adminSessionToken: "" });
   const currentWorkflowToken = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token : loggedInEmployeeEmail === builtInAdminAccount && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
   workflowAuthorization.current = { workflowSessionToken: currentWorkflowToken, adminSessionToken: currentWorkflowToken };
@@ -2128,7 +2148,7 @@ export default function Home() {
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
-  const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
     if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
@@ -2140,6 +2160,7 @@ export default function Home() {
     else if (notificationSetupOpen) setNotificationSetupOpen(false);
     else if (pendingWorkNoteCompletionId) setPendingWorkNoteCompletionId(null);
     else if (pendingDesignTaskCompletion) setPendingDesignTaskCompletion(null);
+    else if (completionFeedback) setCompletionFeedback(null);
     else if (protectedAction) setProtectedAction(null);
     else if (selectedRecordId) setSelectedRecordId(null);
   };
@@ -2505,6 +2526,8 @@ export default function Home() {
   const customerLocations = useMemo<CustomerLocation[]>(() => years.flatMap((yearFolder) => yearFolder.months.flatMap((monthFolder, monthIndex) => (
     dedupeMonthRecords(monthFolder.records).map((record) => ({ record, year: yearFolder.year, month: monthIndex + 1 }))
   ))).sort((a, b) => b.year - a.year || b.month - a.month || customerDisplayName(a.record).localeCompare(customerDisplayName(b.record), "vi")), [years]);
+  const customerMessageLocations = useRef(customerLocations);
+  customerMessageLocations.current = customerLocations;
   const customerSearchResults = useMemo(() => {
     const term = normalizeSearchText(search.trim());
     const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
@@ -2922,7 +2945,7 @@ export default function Home() {
     if (creatingCustomer || customerMutationBusy || uploadingWorkflowFiles || savingWorkNotes || customerMessageTaskBusy || customerMessageStatusBusyId || audioProcessingId || syncingRecordId || syncingDesignId || syncingWarrantyId || exportingPersonnel || savingPancakeConfig || employeeAuthBusy || documentSnapshotActionId || workflowRequestInFlight.current.size) {
       throw new Error("Hãy chờ thao tác đang chạy hoàn tất rồi cập nhật.");
     }
-    if (addOpen || personnelAddOpen || driveConfigOpen || protectedAction || customerMessageTaskDraft || loginOpen) {
+    if (addOpen || personnelAddOpen || driveConfigOpen || protectedAction || customerMessageTaskDraft || completionFeedback || loginOpen) {
       throw new Error("Hãy lưu hoặc đóng biểu mẫu đang nhập trước khi cập nhật.");
     }
     try {
@@ -3212,7 +3235,8 @@ export default function Home() {
   workflowResultHandler.current = (entry, result) => {
     const payload = entry.payload;
     const location = { year: Number(payload.year), month: Number(payload.month), record: { projectId: String(payload.projectId || ""), houseId: String(payload.houseId || ""), name: String(payload.customerName || "") } } as CustomerLocation;
-    if (!isVirtualPancakeLocation(location) && !yearsRef.current.some((year) => year.year === location.year && year.months?.[location.month - 1]?.records.some((record) => record.projectId === location.record.projectId))) return;
+    const reviewOperation = /^(?:note|design)\.(?:approve|return)$/.test(String(payload.operation));
+    if (!reviewOperation && !isVirtualPancakeLocation(location) && !yearsRef.current.some((year) => year.year === location.year && year.months?.[location.month - 1]?.records.some((record) => record.projectId === location.record.projectId))) return;
     if (result.notes) applyWorkflowNotes(location, result);
     if (result.rows && ["architecture", "interior", "acceptance"].includes(String(payload.kind))) applyWorkflowDesign(location, payload.kind as DesignProgressKind, result.rows);
     if (payload.operation === "archive.retry" && result.design) for (const kind of ["architecture", "interior", "acceptance"] as const) {
@@ -3221,7 +3245,13 @@ export default function Home() {
     if (result.message) applyWorkflowMessage(result.message);
     if (entry.payload.operation === "note.publish") setNewWorkNote((draft) => draft?.id === (payload.note as WorkNote)?.id ? null : draft);
     if (entry.payload.operation === "note.edit") setEditingWorkNote((draft) => draft?.id === (payload.note as WorkNote)?.id ? null : draft);
-    const labels: Record<string, string> = { "note.publish": "Đã phát hành ghi chú.", "note.edit": "Đã lưu sửa đổi.", "note.delete": "Đã xóa ghi chú.", "note.accept": "Đã xác nhận nhận việc.", "note.complete": "Đã ghi nhận hoàn thành.", "design.publish": "Đã phát hành thiết kế.", "design.accept": "Đã xác nhận nhận việc thiết kế.", "design.complete": "Đã ghi nhận hoàn thành hạng mục.", "message.assign": "Đã giao việc từ tin nhắn.", "message.status": "Đã cập nhật trạng thái tin nhắn.", "archive.retry": "Đã kiểm tra lưu trữ công việc." };
+    const labels: Record<string, string> = {
+      "note.publish": "Đã phát hành ghi chú.", "note.edit": "Đã lưu sửa đổi.", "note.delete": "Đã xóa ghi chú.", "note.accept": "Đã xác nhận nhận việc.",
+      "note.complete": "Đã gửi công việc để quản lý xác nhận.", "note.approve": "Đã xác nhận và đóng công việc.", "note.return": "Đã giao lại công việc kèm nhận xét.",
+      "design.publish": "Đã phát hành thiết kế.", "design.accept": "Đã xác nhận nhận việc thiết kế.", "design.complete": "Đã gửi hạng mục để quản lý xác nhận.",
+      "design.approve": "Đã xác nhận và đóng hạng mục.", "design.return": "Đã giao lại hạng mục kèm nhận xét.",
+      "message.assign": "Đã giao việc từ tin nhắn.", "message.status": "Đã cập nhật trạng thái tin nhắn.", "archive.retry": "Đã kiểm tra lưu trữ công việc.",
+    };
     setNotice(result.archivePending ? "Đã ghi nhận thay đổi. Chưa lưu được Drive; dữ liệu được giữ lại để thử lại." : labels[String(payload.operation)] || "Đã đồng bộ công việc.");
   };
   const hasWorkflowPending = (operation: string, id: string, location = selectedCustomerLocation) => Boolean(location && workflowOutbox.some((entry) => entry.account === loggedInEmployeeEmail && entry.scriptUrl === driveScriptUrl.trim() && entry.scope === projectWorkflowScope(location) && entry.logicalKey === `${operation}:${id}`));
@@ -3255,6 +3285,26 @@ export default function Home() {
       return null;
     } finally { workflowRequestInFlight.current.delete(requestKey); }
   };
+
+  const completionReviewBusy = ({ location, item, kind }: CompletionReviewTarget) => {
+    const prefix = kind ? "design" : "note";
+    return hasWorkflowPending(`${prefix}.approve`, item.id, location) || hasWorkflowPending(`${prefix}.return`, item.id, location);
+  };
+  const decideCompletionReview = async (target: CompletionReviewTarget, feedback?: { dueDate: string; comment: string }) => {
+    const { location, item, kind } = target;
+    if (!canManageCustomerWorkflows || !isAwaitingCompletionReview(item) || completionReviewBusy(target)) return;
+    if (feedback && (!feedback.comment.trim() || !parseDesignDate(feedback.dueDate) || isPastVietnamDate(feedback.dueDate))) {
+      setNotice("Hãy nhập nhận xét và ngày hoàn thành dự kiến từ hôm nay trở đi.");
+      return;
+    }
+    const operation = `${kind ? "design" : "note"}.${feedback ? "return" : "approve"}`;
+    const identity = kind ? { kind, rowId: item.id } : { noteId: item.id };
+    await runWorkflowCommand(operation, {
+      ...identity,
+      expectedRevision: Number(item.revision || 0),
+      ...(feedback ? { dueDate: feedback.dueDate, reviewComment: feedback.comment.trim() } : {}),
+    }, location, feedback ? () => setCompletionFeedback(null) : undefined);
+  };
   const loadWorkNotes = async () => {
     const location = selectedCustomerLocation;
     if (!location) return;
@@ -3281,10 +3331,11 @@ export default function Home() {
       if (response.ok && result.ok && result.notes) applyWorkflowNotes(location, result);
     } catch { /* The confirmed local snapshot remains available offline. */ }
   };
-  const saveCompletedWorkNoteToDrive = async (note: WorkNote, location = selectedCustomerLocation) => {
+  const submitWorkNoteCompletion = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!note.acceptedAt) { setNotice("Hãy xác nhận nhận việc trước khi hoàn thành."); return; }
+    if (note.actualDate || isAwaitingCompletionReview(note)) return;
     setSavingWorkNotes(true);
-    try { await runWorkflowCommand("note.complete", { noteId: note.id }, location); }
+    try { await runWorkflowCommand("note.complete", { noteId: note.id, expectedRevision: Number(note.revision || 0) }, location); }
     finally { setSavingWorkNotes(false); }
   };
   const persistWorkNotes = (nextNotes: WorkNote[], location = selectedCustomerLocation) => {
@@ -3304,7 +3355,8 @@ export default function Home() {
     return next;
   };
   const loadCustomerMessages = async (location?: CustomerLocation | null, refresh = false) => {
-    const cacheKey = customerMessagesCacheKey(location);
+    const virtualLocation = location && isVirtualPancakeLocation(location) ? location : null;
+    const cacheKey = customerMessagesCacheKey(virtualLocation);
     const requestKey = `customer-messages:${cacheKey}`;
     if (driveRequestsInFlight.current.has(requestKey)) return;
     const cached = readDriveCache<CustomerMessageGroup[]>(cacheKey, 10 * 60 * 1000);
@@ -3319,15 +3371,19 @@ export default function Home() {
     // The Bùi Đức Thành test conversation has no customer folder. Do not
     // send the synthetic location as a real Pancake target; Apps Script will
     // keep that conversation on its dedicated virtual target instead.
-    const targetLocations = location && isVirtualPancakeLocation(location) ? [] : (location ? [location] : customerLocations);
-    const targets = targetLocations.filter((item) => item.record.houseId?.trim()).map((item) => ({
-      houseId: item.record.houseId,
-      projectId: item.record.projectId,
-      customerName: item.record.name,
-      zaloGroupName: item.record.details?.ZALO_GROUP_NAME?.trim() || "",
-      year: item.year,
-      month: item.month,
-    }));
+    const targetLocations = virtualLocation ? [] : customerMessageLocations.current;
+    const targets = targetLocations.filter((item) => item.record.houseId?.trim()).map((item) => {
+      const zaloGroupNames = (item.record.details?.ZALO_GROUP_NAME ?? "").split(/\r\n?|\n/).map((name) => name.trim()).filter(Boolean);
+      return {
+        houseId: item.record.houseId,
+        projectId: item.record.projectId,
+        customerName: item.record.name,
+        zaloGroupName: zaloGroupNames[0] ?? "",
+        zaloGroupNames,
+        year: item.year,
+        month: item.month,
+      };
+    });
     try {
       const { response, result } = await postToAppsScript<{ ok?: boolean; configured?: boolean; error?: string; messages?: CustomerMessageGroup[] }>({ scriptUrl: driveScriptUrl.trim() }, {
         action: "load-customer-messages",
@@ -3451,6 +3507,7 @@ export default function Home() {
     if (note.creatorEmail !== loggedInEmployeeEmail || note.actualDate) { setNotice("Chỉ người tạo có thể sửa công việc chưa hoàn thành."); return; }
     if (hasWorkflowPending("note.edit", note.id)) { setNotice("Sửa đổi của công việc này đang chờ đồng bộ."); return; }
     setWorkNoteMenuId(null);
+    if (isAwaitingCompletionReview(note)) { setNotice("Công việc đang chờ quản lý xác nhận."); return; }
     setEditingWorkNote({ ...note });
   };
   const saveEditingWorkNote = async () => {
@@ -3472,13 +3529,15 @@ export default function Home() {
     const id = pendingWorkNoteCompletionId;
     if (!id) return;
     setPendingWorkNoteCompletionId(null);
-    const note = workNotes.find((item) => item.id === id);
+    const location = selectedCustomerLocation;
+    const assigned = location ? assignedWorkNotes.filter((item) => item.year === location.year && item.month === location.month && item.projectId === location.record.projectId) : [];
+    const note = newestWorkflowItems([...assigned, ...workNotes]).find((item) => item.id === id);
     if (!note || !isAssignedToLoggedInEmployee(note.assigneeEmail)) { setNotice("Chỉ Người phụ trách mới được hoàn thành công việc."); return; }
-    void saveCompletedWorkNoteToDrive(note);
+    void submitWorkNoteCompletion(note);
   };
   const acceptAssignedWorkNote = async (note: WorkNote, location = selectedCustomerLocation) => {
     if (!location || !isAssignedToLoggedInEmployee(note.assigneeEmail)) return;
-    await runWorkflowCommand("note.accept", { noteId: note.id }, location);
+    await runWorkflowCommand("note.accept", { noteId: note.id, expectedRevision: Number(note.revision || 0) }, location);
   };
   const loadWorkflowFiles = async (folder = activeFolder, quietly = true, refresh = false) => {
     if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
@@ -4076,9 +4135,16 @@ export default function Home() {
 
   const activeCustomerRecord = selectedCustomerLocation?.record ?? null;
   const selectedRecord = activeCustomerRecord;
-  const architectureDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "architecture");
-  const interiorDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "interior");
-  const acceptanceDesignProgressRows = normalizeDesignProgress(activeCustomerRecord, "acceptance");
+  const currentDesignRows = (kind: DesignProgressKind) => {
+    const rows = normalizeDesignProgress(activeCustomerRecord, kind);
+    if (!selectedCustomerLocation) return rows;
+    const { year, month, record } = selectedCustomerLocation;
+    const assigned = assignedDesignTasks.filter((task) => task.kind === kind && task.year === year && task.month === month && task.projectId === record.projectId);
+    return mergeWorkflowDesignRows(rows, assigned) ?? rows;
+  };
+  const architectureDesignProgressRows = currentDesignRows("architecture");
+  const interiorDesignProgressRows = currentDesignRows("interior");
+  const acceptanceDesignProgressRows = currentDesignRows("acceptance");
   const warrantyProgressRows = normalizeWarrantyProgress(activeCustomerRecord);
   const designScheduleAnalysis = analyzeDesignProgress(architectureDesignProgressRows);
   const interiorDesignScheduleAnalysis = analyzeDesignProgress(interiorDesignProgressRows);
@@ -4101,7 +4167,7 @@ export default function Home() {
     persistRecord(updatedRecord, selectedCustomerLocation.year, selectedCustomerLocation.month);
   };
 
-  const canModifyDesignRow = (row: DesignProgressRow, kind: DesignProgressKind) => Boolean(canManageCustomerWorkflows && !row.actualDate && !hasWorkflowPending("design.publish", kind) && !hasWorkflowPending("design.accept", row.id) && !hasWorkflowPending("design.complete", row.id));
+  const canModifyDesignRow = (row: DesignProgressRow, kind: DesignProgressKind) => Boolean(canManageCustomerWorkflows && !row.actualDate && !isAwaitingCompletionReview(row) && !hasWorkflowPending("design.publish", kind) && !hasWorkflowPending("design.accept", row.id) && !hasWorkflowPending("design.complete", row.id));
   const updateDesignProgress = (kind: DesignProgressKind, rowIndex: number, key: "content" | DesignDateKey | "assignee" | "note", value: string) => {
     const currentRows = progressRowsFor(kind);
     if (!currentRows[rowIndex] || !canModifyDesignRow(currentRows[rowIndex], kind)) return;
@@ -4138,7 +4204,7 @@ export default function Home() {
     if (!requireCustomerWorkflowManager()) return;
     if (hasWorkflowPending("design.publish", kind)) return;
     const rows = progressRowsFor(kind);
-    const candidates = rows.filter((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt));
+    const candidates = rows.filter((row) => row.content.trim() && !row.actualDate && !isAwaitingCompletionReview(row) && (row.assigneeEmail || row.plannedDate || row.publishedAt));
     if (!candidates.length) { setNotice("Hãy chọn Người phụ trách và ngày dự kiến cho hạng mục cần phát hành."); return; }
     if (candidates.some((row) => !row.assigneeEmail || !parseDesignDate(row.plannedDate) || (!row.publishedAt && isPastVietnamDate(row.plannedDate)))) {
       setNotice("Hạng mục được giao phải có Người phụ trách và ngày dự kiến hợp lệ; ngày mới phải là hôm nay hoặc tương lai.");
@@ -4147,16 +4213,15 @@ export default function Home() {
     await runWorkflowCommand("design.publish", { kind, title: designProgressDefinitions[kind].title, rows });
   };
   const acceptDesignTask = async (kind: DesignProgressKind, rowId: string) => {
-    if (!requireCustomerWorkflowManager()) return;
     const row = progressRowsFor(kind).find((item) => item.id === rowId);
-    if (!row || !row.publishedAt) return;
-    await runWorkflowCommand("design.accept", { kind, rowId });
+    if (!row || !row.publishedAt || row.actualDate || isAwaitingCompletionReview(row) || !canRespondToDesignTask(row)) return;
+    await runWorkflowCommand("design.accept", { kind, rowId, expectedRevision: Number(row.revision || 0) });
   };
   const completeDesignTask = async (kind: DesignProgressKind, rowId: string) => {
-    if (!requireCustomerWorkflowManager()) return;
     const row = progressRowsFor(kind).find((item) => item.id === rowId);
     if (!row || !row.acceptedAt) { setNotice("Cần xác nhận nhận việc trước khi hoàn thành."); return; }
-    await runWorkflowCommand("design.complete", { kind, rowId });
+    if (row.actualDate || isAwaitingCompletionReview(row) || !canRespondToDesignTask(row)) return;
+    await runWorkflowCommand("design.complete", { kind, rowId, expectedRevision: Number(row.revision || 0) });
   };
 
   const confirmDesignTaskCompletion = () => {
@@ -4739,6 +4804,54 @@ export default function Home() {
   const canManagePersonnel = !loggedInEmployee || isPersonnelManager(loggedInEmployee);
   const canViewNotesSummary = Boolean(loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(loggedInEmployee && employeePermissions.includes("Thiết kế"));
+  const canRespondToDesignTask = (row: DesignProgressRow) => canManageCustomerWorkflows || (canViewDesignSummary && isAssignedToLoggedInEmployee(row.assigneeEmail || ""));
+  const pendingCompletionReviews = useMemo<CompletionReviewTarget[]>(() => {
+    if (!canManageCustomerWorkflows) return [];
+    const locationFor = (item: AssignedWorkNote | AssignedDesignTask): CustomerLocation => ({
+      year: item.year, month: item.month,
+      record: { id: item.projectId, projectId: item.projectId, name: item.customerName || "", houseId: item.houseId, createdAt: "", details: {} },
+    });
+    return [
+      ...assignedWorkNotes.filter(isAwaitingCompletionReview).map((item) => ({ item, location: locationFor(item) })),
+      ...assignedDesignTasks.filter(isAwaitingCompletionReview).map((item) => ({ item, kind: item.kind, location: locationFor(item) })),
+    ].sort((left, right) => (left.item.completionRequestedAt || "").localeCompare(right.item.completionRequestedAt || ""));
+  }, [assignedWorkNotes, assignedDesignTasks, canManageCustomerWorkflows]);
+  useEffect(() => {
+    if (!notificationsEnabled || !loggedInEmployeeEmail || isCustomerPortal || !pendingCompletionReviews.length) return;
+    let cancelled = false;
+    const notify = async () => {
+      for (const { location, item, kind } of pendingCompletionReviews) {
+        if (cancelled) return;
+        const { record, year, month } = location;
+        const scope = `${year}-${month}-${record.projectId}`;
+        const key = `gm-manager-review-alert:${loggedInEmployeeEmail}:${scope}:${kind || "note"}:${item.id}`;
+        const requestedAt = item.completionRequestedAt!;
+        const notificationKey = `${key}:${requestedAt}`;
+        if (reviewNotificationInFlight.current.has(notificationKey)) continue;
+        try { if (window.localStorage.getItem(key) === requestedAt) continue; } catch { /* The in-memory guard still deduplicates alerts. */ }
+        reviewNotificationInFlight.current.add(notificationKey);
+        let shown = false;
+        try {
+          const title = "GM Manager · Công việc chờ xác nhận";
+          const body = [record.houseId || record.name || "Khách hàng", item.content.trim(), `${item.completionRequestedByName || item.assignee || "Nhân lực"} đã gửi hoàn thành.`].filter(Boolean).join("\n");
+          const project = { year, month, projectId: record.projectId, houseId: record.houseId, customerName: record.name };
+          const url = kind
+            ? designTaskNotificationUrl({ ...item as DesignProgressRow, ...project, kind, title: designProgressDefinitions[kind].title })
+            : workNoteNotificationUrl({ ...item as WorkNote, ...project });
+          const desktop = desktopBridge();
+          if (desktop?.isDesktop) shown = await desktop.showNotification({ title, body, url });
+          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
+            await serviceWorkerRegistration.current.showNotification(title, { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: key, data: { url } });
+            shown = true;
+          }
+          if (shown) try { window.localStorage.setItem(key, requestedAt); } catch { /* The current session already remembers it. */ }
+        } catch { /* Retry on a later poll. The review remains available in the app. */ }
+        finally { if (!shown) reviewNotificationInFlight.current.delete(notificationKey); }
+      }
+    };
+    void notify();
+    return () => { cancelled = true; };
+  }, [isCustomerPortal, loggedInEmployeeEmail, notificationsEnabled, pendingCompletionReviews]);
   // Tin nhắn khách là luồng thông tin chung: mọi nhân viên đã đăng nhập đều
   // được xem. Quyền giao việc từ một tin nhắn vẫn tách riêng bên dưới và chỉ
   // dành cho Admin / Quản lý chung.
@@ -4769,10 +4882,10 @@ export default function Home() {
           const forOpenedProject = notes.filter((note) => note.year === selectedCustomerLocation.year && note.month === selectedCustomerLocation.month && note.projectId === selectedCustomerLocation.record.projectId);
           if (forOpenedProject.length) setWorkNotes((current) => newestWorkflowItems([...current, ...forOpenedProject]));
         }
-        const pending = notes.filter((note) => !note.acceptedAt);
+        const pending = notes.filter((note) => isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt && !isAwaitingCompletionReview(note));
         const now = Date.now();
         for (const note of pending) {
-          const key = `gm-manager-assignment-alert:${loggedInEmployeeEmail}:${note.id}`;
+          const key = `gm-manager-assignment-alert:${loggedInEmployeeEmail}:${note.id}${note.reassignedAt ? `:${note.reassignedAt}` : ""}`;
           const previous = Number(window.localStorage.getItem(key) ?? 0);
           if (now - previous < 15 * 60 * 1000) continue;
           const body = [
@@ -4780,6 +4893,7 @@ export default function Home() {
             `Công việc: ${note.workType} · Ưu tiên: ${note.priority}`,
             note.dueDate ? `Hoàn thành dự kiến: ${note.dueDate}` : "Hoàn thành dự kiến: Chưa có",
             `Nội dung: ${note.content.trim() || "(Chưa có nội dung)"}`,
+            note.reviewComment ? `Nhận xét của quản lý: ${note.reviewComment}` : "",
             note.messageContext ? `Tin nhắn khách đã chọn:\n${note.messageContext}` : "",
           ].filter(Boolean).join("\n");
           const url = workNoteNotificationUrl(note);
@@ -4869,12 +4983,12 @@ export default function Home() {
           return latest;
         }).filter((task) => !task.actualDate);
         setAssignedDesignTasks(tasks);
-        const pending = tasks.filter((task) => isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt);
+        const pending = tasks.filter((task) => isAssignedToLoggedInEmployee(task.assigneeEmail) && !task.acceptedAt && !isAwaitingCompletionReview(task));
         const now = Date.now();
         for (const task of pending) {
-          const key = `gm-manager-design-assignment-alert:${loggedInEmployeeEmail}:${task.kind}:${task.id}`;
+          const key = `gm-manager-design-assignment-alert:${loggedInEmployeeEmail}:${task.kind}:${task.id}${task.reassignedAt ? `:${task.reassignedAt}` : ""}`;
           if (now - Number(window.localStorage.getItem(key) ?? 0) < 15 * 60 * 1000) continue;
-          const body = [`Khách hàng: ${task.customerName || task.houseId || "Khách hàng"}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`].join("\n");
+          const body = [`Khách hàng: ${task.customerName || task.houseId || "Khách hàng"}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`, task.reviewComment ? `Nhận xét của quản lý: ${task.reviewComment}` : ""].filter(Boolean).join("\n");
           const url = designTaskNotificationUrl(task);
           const desktop = desktopBridge();
           let shown = false;
@@ -5089,6 +5203,7 @@ export default function Home() {
     setNewWorkNote(null);
     setEditingWorkNote(null);
     setCustomerMessageTaskDraft(null);
+    setCompletionFeedback(null);
     setEmployeeLoginPassword("");
     setEmployeeLoginError("");
     setLoginOpen(false);
@@ -5277,6 +5392,15 @@ export default function Home() {
       </div>
     </section>
   );
+  const renderCompletionReviewActions = (target: CompletionReviewTarget) => {
+    if (!canManageCustomerWorkflows) return null;
+    const busy = completionReviewBusy(target);
+    return <div className="completion-review__actions">
+      <button type="button" className="completion-review__approve" disabled={busy} onClick={() => void decideCompletionReview(target)}>Xác nhận</button>
+      <button type="button" disabled={busy} onClick={() => setCompletionFeedback({ target, dueDate: "", comment: "" })}>Nhận xét</button>
+    </div>;
+  };
+
   const renderWorkNotes = () => {
     // Assignment polling and the project note request can finish in either
     // order. Merge both sources so a newly assigned employee always gets the
@@ -5291,8 +5415,9 @@ export default function Home() {
       const statusClass = ({ "Đen": "work-note__status--black", "Đỏ": "work-note__status--red", "Cam": "work-note__status--orange", "Xanh": "work-note__status--green", "Tím": "work-note__status--purple" } as Record<WorkNoteStatus, string>)[selectedStatus];
       const isCreator = Boolean(loggedInEmployeeEmail && note.creatorEmail === loggedInEmployeeEmail);
       const isAssignee = isAssignedToLoggedInEmployee(note.assigneeEmail);
-      const noteBusy = ["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "archive.retry"].some((operation) => hasWorkflowPending(operation, note.id));
-      const canEdit = !noteBusy && (isNew || (isEditing && isCreator && !note.actualDate));
+      const awaitingReview = isAwaitingCompletionReview(note);
+      const noteBusy = ["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "note.approve", "note.return", "archive.retry"].some((operation) => hasWorkflowPending(operation, note.id));
+      const canEdit = !noteBusy && !awaitingReview && (isNew || (isEditing && isCreator && !note.actualDate));
       const update = isNew ? updateNewWorkNote : isEditing ? updateEditingWorkNote : (_field: Exclude<keyof WorkNote, "id">, _value: string) => undefined;
       const chooseAssignee = (email: string) => {
         const member = assignablePersonnel.find((personnel) => personnelAssignmentKey(personnel) === email);
@@ -5306,23 +5431,28 @@ export default function Home() {
           <label>Người phụ trách<select value={note.assigneeEmail} onChange={(event) => chooseAssignee(event.target.value)} aria-label="Người phụ trách" disabled={!canEdit}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></label>
         </div>
         <div className="work-note__line work-note__line--schedule">
-          <label>Hoàn thành dự kiến<input value={note.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } update("dueDate", value); }} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label="Hoàn thành dự kiến" readOnly={!canEdit} /></label>
-          <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder="Chưa hoàn thành" aria-label="Hoàn thành thực tế" /></label>
+          <VietnamDatePicker label="Hoàn thành dự kiến" value={note.dueDate} minDate={formatWorkNoteDate()} disabled={!canEdit} onChange={(value) => {
+            if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; }
+            update("dueDate", value);
+          }} />
+          <label>Hoàn thành thực tế<input value={note.actualDate} readOnly placeholder={awaitingReview ? "Chờ quản lý xác nhận" : "Chưa hoàn thành"} aria-label="Hoàn thành thực tế" /></label>
           {isNew ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setNewWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={publishNewWorkNote} disabled={noteBusy || !note.content.trim() || !note.assigneeEmail || !parseDesignDate(note.dueDate) || isPastVietnamDate(note.dueDate)}>Phát hành</button></div>
             : isEditing ? <div className="work-note__publish-actions"><button type="button" className="work-note__cancel" onClick={() => setEditingWorkNote(null)}>Hủy</button><button type="button" className="work-note__publish" onClick={saveEditingWorkNote} disabled={noteBusy || !note.content.trim()}>Lưu thay đổi</button></div>
-              : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)} disabled={noteBusy}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={noteBusy || Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
+              : awaitingReview ? null : isAssignee && !note.acceptedAt ? <button type="button" className="work-note__accept" onClick={() => void acceptAssignedWorkNote(note)} disabled={noteBusy}>Xác nhận nhận việc</button> : <label className="work-note__complete-checkbox" title={note.actualDate ? `Đã hoàn thành ${note.actualDate}` : "Đánh dấu hoàn thành"}><input type="checkbox" checked={Boolean(note.actualDate)} disabled={noteBusy || Boolean(note.actualDate) || !isAssignee || !note.acceptedAt} onChange={() => setPendingWorkNoteCompletionId(note.id)} aria-label={note.actualDate ? `Đã hoàn thành ngày ${note.actualDate}` : "Đánh dấu hoàn thành"} /></label>}
           <span className={`work-note__status ${statusClass}`} title={`Trạng thái ${selectedStatus}`} aria-label={`Trạng thái ${selectedStatus}`}>●</span>
-          {!isNew && !isEditing && isCreator && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} disabled={noteBusy} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)} disabled={noteBusy || Boolean(note.actualDate)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)} disabled={noteBusy}>Xóa</button></div>}</div>}
+          {!isNew && !isEditing && isCreator && !awaitingReview && <div className="work-note__menu"><button type="button" className="work-note__more" onClick={() => setWorkNoteMenuId((current) => current === note.id ? null : note.id)} disabled={noteBusy} aria-label="Tùy chọn ghi chú" aria-expanded={workNoteMenuId === note.id}>…</button>{workNoteMenuId === note.id && <div className="work-note__menu-panel"><button type="button" onClick={() => startEditingWorkNote(note)} disabled={noteBusy || Boolean(note.actualDate)}>Sửa đổi</button><button type="button" className="work-note__menu-delete" onClick={() => removeWorkNote(note.id)} disabled={noteBusy}>Xóa</button></div>}</div>}
         </div>
         <label className="work-note__content">Nội dung<GrowingTextarea value={note.content} onChange={(event) => update("content", event.target.value)} placeholder="Nhập nội dung công việc" aria-label="Nội dung công việc" readOnly={!canEdit} /></label>
         {note.messageContext && <div className="work-note__message-context"><b>Tin nhắn khách đã chọn</b><p>{note.messageContext}</p></div>}
+        {note.reviewComment && <div className="completion-review__comment"><b>Nhận xét của quản lý</b><p>{note.reviewComment}</p></div>}
+        {awaitingReview && <div className="completion-review__pending"><span>Chờ quản lý xác nhận</span>{selectedCustomerLocation && renderCompletionReviewActions({ location: selectedCustomerLocation, item: note })}</div>}
         {noteBusy && <p className="workflow-item-status" role="status">Đang chờ đồng bộ thay đổi…</p>}
         {note.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Drive</span><button type="button" disabled={noteBusy} onClick={() => void runWorkflowCommand("archive.retry", { noteId: note.id })}>Thử lưu Drive</button></div>}
       </article>;
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
           <header className="work-notes__heading">
-        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Giao việc, theo dõi thời hạn và cập nhật kết quả hoàn thành của dự án." : "Công việc được giao cho bạn. Xác nhận nhận việc trước khi cập nhật hoàn thành thực tế."}</p></div>
+        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Giao việc, theo dõi thời hạn và xác nhận kết quả hoàn thành của dự án." : "Nhận việc và gửi kết quả hoàn thành để quản lý xác nhận."}</p></div>
         {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
@@ -5330,7 +5460,10 @@ export default function Home() {
         {selectedCustomerLocation && legacyImportScopes[projectWorkflowScope(selectedCustomerLocation)] && <div className="workflow-item-status workflow-item-status--warning"><span>Chưa kiểm tra được ghi chú cũ trên Drive. Công việc mới vẫn được lưu.</span><button type="button" onClick={() => void runWorkflowCommand("archive.retry", {})}>Thử nạp dữ liệu cũ</button></div>}
         {newWorkNote && <section className="work-note-composer" aria-label="Ghi chú mới"><p>Ghi chú mới · chưa phát hành</p>{renderWorkNote(newWorkNote, true)}</section>}
         {loadingWorkNotes ? <p className="work-notes__empty">Đang nạp ghi chú…</p>
-          : visibleWorkNotes.length ? [...visibleWorkNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => renderWorkNote(editingWorkNote?.id === note.id ? editingWorkNote : note, false, editingWorkNote?.id === note.id)) : !newWorkNote && <p className="work-notes__empty">{canViewAllNotesAndMessages ? <>Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</> : "Chưa có công việc nào được giao cho tài khoản này."}</p>}
+          : visibleWorkNotes.length ? [...visibleWorkNotes].sort((left, right) => Number(Boolean(left.actualDate)) - Number(Boolean(right.actualDate)) || ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[left.priority] - ({ "Cần lập tức": 0, "Gấp": 1, "Bình thường": 2 } as Record<WorkNotePriority, number>)[right.priority]).map((note) => {
+            const draft = editingWorkNote?.id === note.id && editingWorkNote.reassignedAt === note.reassignedAt && !isAwaitingCompletionReview(note) && !note.actualDate ? editingWorkNote : null;
+            return renderWorkNote(draft || note, false, Boolean(draft));
+          }) : !newWorkNote && <p className="work-notes__empty">{canViewAllNotesAndMessages ? <>Chưa có ghi chú. Nhấn <b>＋ Ghi chú</b> để thêm công việc đầu tiên.</> : "Chưa có công việc nào được giao cho tài khoản này."}</p>}
       </div>
     </section>;
   };
@@ -5430,36 +5563,39 @@ export default function Home() {
       <span>Chưa kích hoạt</span>
     </section>;
 
-    return <section className="design-schedule"><fieldset className="workflow-edit-scope" disabled={!canManageCustomerWorkflows}>
-      {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý cập nhật tiến độ thiết kế</p>}
+    return <section className="design-schedule"><fieldset className="workflow-edit-scope">
+      {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Bạn có thể nhận và gửi hoàn thành hạng mục được giao.</p>}
       <header className="design-schedule__heading">
         <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
-        <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={hasWorkflowPending("design.publish", kind) || !rows.some((row) => row.content.trim() && !row.actualDate && (row.assigneeEmail || row.plannedDate || row.publishedAt))}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
+        {canManageCustomerWorkflows && <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={hasWorkflowPending("design.publish", kind) || !rows.some((row) => row.content.trim() && !row.actualDate && !isAwaitingCompletionReview(row) && (row.assigneeEmail || row.plannedDate || row.publishedAt))}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>}
       </header>
       <div className="design-progress-table-wrap">
         <table className="design-progress-table">
           <thead><tr><th>Nội dung</th><th>Ngày dự kiến</th><th>Hoàn thành</th><th>Người phụ trách</th><th>Trạng thái</th><th>Ghi chú</th></tr></thead>
-          <tbody>{rows.map((row, index) => (
+          <tbody>{rows.map((row, index) => {
+            const awaitingReview = isAwaitingCompletionReview(row);
+            return (
             <tr key={row.id}>
               <td><div className="design-progress-content">
                 {row.isCustom
                   ? <GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.content} onChange={(event) => updateDesignProgress(kind, index, "content", event.target.value)} placeholder="Nhập nội dung mới" aria-label={`Nội dung dòng ${index + 1}`} />
                   : <b>{row.content}</b>}{row.assignmentDirty && <small className="workflow-item-status">Sửa đổi chưa phát hành</small>}
-                <span className="design-progress-content__actions">
+                {canManageCustomerWorkflows && <span className="design-progress-content__actions">
                   <button type="button" onClick={() => moveDesignProgressRow(kind, index, -1)} disabled={index === 0} title="Lên một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} lên`}>↑</button>
                   <button type="button" onClick={() => moveDesignProgressRow(kind, index, 1)} disabled={index === rows.length - 1} title="Xuống một dòng" aria-label={`Đưa ${row.content || `dòng ${index + 1}`} xuống`}>↓</button>
                   {row.isCustom && !row.publishedAt && <button type="button" className="is-delete" onClick={() => deleteDesignProgressRow(kind, index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
-                </span>
+                </span>}
               </div></td>
-              <td><input readOnly={!canModifyDesignRow(row, kind)} value={row.plannedDate} maxLength={10} onChange={(event) => updateDesignProgress(kind, index, "plannedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày dự kiến ${row.content}`} /></td>
-              <td><div className="design-task-completion"><small>{row.actualDate || "Chưa hoàn thành"}</small>{row.archivePending && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}<label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !canManageCustomerWorkflows || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label></div></td>
+              <td><VietnamDatePicker disabled={!canModifyDesignRow(row, kind)} value={row.plannedDate} minDate={row.publishedAt ? undefined : formatWorkNoteDate()} onChange={(value) => updateDesignProgress(kind, index, "plannedDate", value)} aria-label={`Ngày dự kiến ${row.content}`} /></td>
+              <td><div className="design-task-completion"><small>{row.actualDate || (awaitingReview ? "Chờ quản lý xác nhận" : "Chưa hoàn thành")}</small>{row.archivePending && canManageCustomerWorkflows && <button type="button" className="workflow-archive-retry" onClick={() => void runWorkflowCommand("archive.retry", { kind, rowId: row.id })} disabled={hasWorkflowPending("archive.retry", row.id)}>Chờ lưu Drive · Thử lại</button>}{!awaitingReview && <label className="design-task-complete-checkbox" title={row.actualDate ? `Đã hoàn thành ${row.actualDate}` : row.acceptedAt ? "Đánh dấu hoàn thành" : "Hãy xác nhận nhận việc trước"}><input type="checkbox" checked={Boolean(row.actualDate)} disabled={row.assignmentDirty || hasWorkflowPending("design.complete", row.id) || Boolean(row.actualDate) || !row.publishedAt || !canRespondToDesignTask(row) || !row.acceptedAt} onChange={() => setPendingDesignTaskCompletion({ kind, rowId: row.id })} aria-label={row.actualDate ? `Đã hoàn thành ngày ${row.actualDate}` : `Đánh dấu hoàn thành ${row.content}`} /></label>}</div>
+                {awaitingReview && selectedCustomerLocation && renderCompletionReviewActions({ location: selectedCustomerLocation, item: row, kind })}</td>
               <td><select disabled={!canModifyDesignRow(row, kind)} className="personnel-assignee" value={row.assigneeEmail ?? ""} onChange={(event) => updateDesignAssignee(kind, index, event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn Người phụ trách</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></td>
-              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && canManageCustomerWorkflows && !row.acceptedAt && !row.actualDate && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
-              <td><GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
+              <td><span className={`work-note__status work-note__status--${({ "Đen": "black", "Đỏ": "red", "Cam": "orange", "Xanh": "green", "Tím": "purple" } as Record<WorkNoteStatus, string>)[designTaskStatus(row)]}`} title={`Trạng thái ${designTaskStatus(row)}`} aria-label={`Trạng thái ${designTaskStatus(row)}`}>●</span>{row.publishedAt && canRespondToDesignTask(row) && !row.acceptedAt && !row.actualDate && !awaitingReview && <button type="button" className="work-note__accept" onClick={() => void acceptDesignTask(kind, row.id)} disabled={row.assignmentDirty || hasWorkflowPending("design.accept", row.id)}>Xác nhận nhận việc</button>}</td>
+              <td><GrowingTextarea readOnly={!canModifyDesignRow(row, kind)} value={row.note} onChange={(event) => updateDesignProgress(kind, index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} />{row.reviewComment && <div className="completion-review__comment"><b>Nhận xét của quản lý</b><p>{row.reviewComment}</p></div>}</td>
             </tr>
-          ))}</tbody>
+          ); })}</tbody>
         </table>
-        <button type="button" className="design-progress-add-row" onClick={() => addDesignProgressRow(kind)}><span>＋</span> Thêm dòng tiến độ</button>
+        {canManageCustomerWorkflows && <button type="button" className="design-progress-add-row" onClick={() => addDesignProgressRow(kind)}><span>＋</span> Thêm dòng tiến độ</button>}
       </div>
       <section className="design-progress-insights">
         <div className="design-progress-insights__heading"><div><p className="eyebrow">So sánh lịch</p><h2>Đồ thị kế hoạch và thực tế</h2></div><div className="schedule-legend"><span><i className="is-late" /> Chậm</span><span><i className="is-early" /> Sớm</span><span><i className="is-on-time" /> Bằng kế hoạch</span></div></div>
@@ -5496,8 +5632,8 @@ export default function Home() {
                 {row.isCustom && <button type="button" className="is-delete" onClick={() => deleteWarrantyProgressRow(index)} title="Xóa dòng" aria-label={`Xóa ${row.content || `dòng ${index + 1}`}`}>×</button>}
               </span>
             </div></td>
-            <td><input value={row.reportedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "reportedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày báo ${row.content}`} /></td>
-            <td><input value={row.completedDate} maxLength={10} onChange={(event) => updateWarrantyProgress(index, "completedDate", event.target.value)} placeholder="dd/mm/yyyy" inputMode="numeric" aria-label={`Ngày hoàn thành ${row.content}`} /></td>
+            <td><VietnamDatePicker value={row.reportedDate} onChange={(value) => updateWarrantyProgress(index, "reportedDate", value)} aria-label={`Ngày báo ${row.content}`} /></td>
+            <td><VietnamDatePicker value={row.completedDate} onChange={(value) => updateWarrantyProgress(index, "completedDate", value)} aria-label={`Ngày hoàn thành ${row.content}`} /></td>
             <td><select className="personnel-assignee" value={row.assignee} onChange={(event) => updateWarrantyProgress(index, "assignee", event.target.value)} aria-label={`Người phụ trách ${row.content}`}><option value="">Chọn người phụ trách</option>{personnelNames.map((name) => <option key={name} value={name}>{name}</option>)}</select></td>
             <td><GrowingTextarea value={row.note} onChange={(event) => updateWarrantyProgress(index, "note", event.target.value)} placeholder="Nhập ghi chú" aria-label={`Ghi chú ${row.content}`} /></td>
           </tr>
@@ -5556,7 +5692,7 @@ export default function Home() {
       : customerMessages;
     return <section className="customer-messages" aria-label="Tin nhắn khách">
       <header className="customer-messages__heading">
-        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Chỉ nhóm có dạng <b>Mã nhà-GM-Nội dung</b> mới được ghép với hồ sơ dự án.</p></div>
+        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Hồ sơ được ghép theo <b>Tên nhóm Zalo</b> đã gắn trong Tư vấn hoặc theo dạng <b>Mã nhà-GM-Nội dung</b>.</p></div>
         <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Tự động cập nhật"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
       </header>
       <div className="customer-messages__list">
@@ -5571,6 +5707,23 @@ export default function Home() {
       </div>
     </section>;
   };
+  const renderCompletionReviewSummary = (className = "") => pendingCompletionReviews.length > 0 && <section className={`sidebar-notes completion-review ${className} ${completionReviewOpen ? "sidebar-notes--open" : ""}`} aria-label="Công việc chờ xác nhận">
+    <button type="button" className="sidebar-notes__toggle" aria-expanded={completionReviewOpen} onClick={() => setCompletionReviewOpen((open) => !open)}>
+      <span><b>Chờ xác nhận</b><small aria-live="polite">{pendingCompletionReviews.length} công việc đã gửi hoàn thành</small></span><em aria-hidden="true">{completionReviewOpen ? "⌃" : "⌄"}</em>
+    </button>
+    <div className="sidebar-notes__list" hidden={!completionReviewOpen}>
+      {pendingCompletionReviews.map((target) => {
+        const { item, kind, location } = target;
+        return <article className="completion-review__item" key={`${projectWorkflowScope(location)}:${kind || "note"}:${item.id}`}>
+          <small>{location.record.houseId || location.record.name || "Khách hàng"} · {kind ? designProgressDefinitions[kind].shortTitle : "Ghi chú"}</small>
+          <b>{item.content}</b>
+          <small>Người gửi: {item.completionRequestedByName || item.assignee || "Nhân lực"}</small>
+          {renderCompletionReviewActions(target)}
+        </article>;
+      })}
+    </div>
+  </section>;
+
   const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
       <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
@@ -5580,7 +5733,7 @@ export default function Home() {
       {items.map(({ note, location }) => {
         const statusClass = ({ "Đen": "sidebar-notes__dot--black", "Đỏ": "sidebar-notes__dot--red", "Cam": "sidebar-notes__dot--orange", "Xanh": "sidebar-notes__dot--green", "Tím": "sidebar-notes__dot--purple" } as Record<WorkNoteStatus, string>)[workNoteStatus(note)] ?? "sidebar-notes__dot--black";
         return <button type="button" className={`sidebar-note ${isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt ? "sidebar-note--assignment-pending" : ""}`} key={`${location.year}-${location.month}-${location.record.projectId}-${note.id}`} onClick={() => selectCustomerForWorkflow(location, "Ghi chú")}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {customerDisplayName(location.record)} · {note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{note.content.trim() || note.workType}</b><small>{note.priority} · {customerDisplayName(location.record)} · {isAwaitingCompletionReview(note) ? "Chờ xác nhận" : note.dueDate ? `Dự kiến ${note.dueDate}` : "Chưa có ngày dự kiến"}</small></span>
         </button>;
       })}</SidebarCustomerGroup>) : <p className="sidebar-notes__empty">Không có công việc đang chờ.</p>}
     </div>
@@ -5605,7 +5758,7 @@ export default function Home() {
           persistRecord({ ...location.record, [field]: mergedRows, progressHydrated: true }, location.year, location.month);
           selectCustomerForWorkflow(location, "Thiết kế");
         }}>
-          <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.houseId || "Khách hàng"} · Dự kiến {task.plannedDate || "—"}</small></span>
+          <i className={statusClass} aria-hidden="true" /><span><b>{task.title}</b><small>{task.content} · {task.customerName || task.houseId || "Khách hàng"} · {isAwaitingCompletionReview(task) ? "Chờ xác nhận" : `Dự kiến ${task.plannedDate || "—"}`}</small></span>
         </button>;
       })}</SidebarCustomerGroup>) : <p className="sidebar-notes__empty">Không có hạng mục thiết kế đang chờ.</p>}
     </div>
@@ -5669,7 +5822,7 @@ export default function Home() {
                     <label>Họ và tên<input value={personnelDraft.name} onChange={(event) => setPersonnelDraft({ ...personnelDraft, name: event.target.value })} autoFocus required /></label>
                     <label>Email<input type="email" value={personnelDraft.email} onChange={(event) => setPersonnelDraft({ ...personnelDraft, email: event.target.value.trim().toLowerCase() })} placeholder="ten@congty.com" /></label>
                     <label>Mã đăng nhập<input value={personnelDraft.loginCode ?? ""} onChange={(event) => setPersonnelDraft({ ...personnelDraft, loginCode: event.target.value })} placeholder="Nhập mã do quản lý cấp" autoComplete="off" required /></label>
-                    <label>Ngày sinh<input value={personnelDraft.birthDate} maxLength={10} inputMode="numeric" placeholder="dd/mm/yyyy" onChange={(event) => setPersonnelDraft({ ...personnelDraft, birthDate: formatDesignDateInput(event.target.value) })} /></label>
+                    <VietnamDatePicker label="Ngày sinh" value={personnelDraft.birthDate} maxDate={formatWorkNoteDate()} onChange={(birthDate) => setPersonnelDraft({ ...personnelDraft, birthDate })} />
                     <label>Số điện thoại<input value={personnelDraft.phone} inputMode="tel" onChange={(event) => setPersonnelDraft({ ...personnelDraft, phone: event.target.value })} /></label>
                     <label>Chức vụ<select value={personnelDraft.role} onChange={(event) => setPersonnelDraft({ ...personnelDraft, role: event.target.value })} required={!editingPersonnelId}><option value="">Chọn chức vụ</option>{personnelRoles.map((role) => <option key={role} value={role}>{role}</option>)}</select></label>
                     <fieldset className="personnel-permissions"><legend>Quyền truy cập</legend><div>{personnelPermissionOptions.map((permission) => <label key={permission}><input type="checkbox" checked={personnelDraft.permissions.includes(permission)} onChange={(event) => setPersonnelDraft({ ...personnelDraft, permissions: event.target.checked ? [...personnelDraft.permissions, permission] : personnelDraft.permissions.filter((item) => item !== permission) })} />{permission}</label>)}</div></fieldset>
@@ -5682,8 +5835,9 @@ export default function Home() {
             </div>
           ) : (
             <div className={`customer-gateway__overview ${canViewNotesSummary || canViewCustomerMessages || canViewDesignSummary ? "" : "customer-gateway__overview--no-notes"}`}>
-              <button type="button" className="activity-toggle activity-toggle--gateway" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>Công việc & tin nhắn</span><b>{outstandingSidebarNotes.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
+              <button type="button" className="activity-toggle activity-toggle--gateway" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>{pendingCompletionReviews.length ? `${pendingCompletionReviews.length} công việc chờ xác nhận` : "Công việc & tin nhắn"}</span><b>{outstandingSidebarNotes.length + assignedDesignTasks.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
               <div className={`customer-gateway__summaries ${mobileActivityOpen ? "is-open" : ""}`}>
+                {renderCompletionReviewSummary("gateway-notes gateway-notes--side")}
                 {renderOutstandingNotesSummary("gateway-notes gateway-notes--side")}
                 {renderCustomerMessagesSummary("gateway-notes gateway-notes--side")}
                 {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
@@ -5741,8 +5895,8 @@ export default function Home() {
             </button>
           ))}
         </nav>
-        <button type="button" className="activity-toggle" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>Công việc & tin nhắn</span><b>{outstandingSidebarNotes.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
-        <div className={`sidebar-activity ${mobileActivityOpen ? "is-open" : ""}`}>{renderOutstandingNotesSummary()}
+        <button type="button" className="activity-toggle" onClick={() => setMobileActivityOpen((open) => !open)} aria-expanded={mobileActivityOpen}><WorkspaceIcon name="note" size={18} /><span>{pendingCompletionReviews.length ? `${pendingCompletionReviews.length} công việc chờ xác nhận` : "Công việc & tin nhắn"}</span><b>{outstandingSidebarNotes.length + assignedDesignTasks.length + customerMessages.filter((message) => message.status !== "resolved").length}</b><span aria-hidden="true">{mobileActivityOpen ? "⌃" : "⌄"}</span></button>
+        <div className={`sidebar-activity ${mobileActivityOpen ? "is-open" : ""}`}>{renderCompletionReviewSummary()}{renderOutstandingNotesSummary()}
         {renderCustomerMessagesSummary()}
         {renderOutstandingDesignSummary()}</div>
       </aside>
@@ -5780,7 +5934,16 @@ export default function Home() {
             {selectedRecord && <section className="record-detail record-detail--inline"><fieldset className="workflow-edit-scope" disabled={!canManageCustomerWorkflows}>
               {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý cập nhật thông tin tư vấn</p>}
               <header className="record-detail__heading">
-                <div className="record-detail__identity"><p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p><h2>{customerDisplayName(selectedRecord)}</h2><GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" /><span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span><label className="record-detail__zalo-group"><span>Tên nhóm Zalo (tuỳ chọn)</span><input value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(event) => updateRecordDetail("ZALO_GROUP_NAME", event.target.value)} placeholder="Nhập đúng tên nhóm Zalo" aria-label="Tên nhóm Zalo" /></label></div>
+                <div className="record-detail__identity">
+                  <p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p>
+                  <h2>{customerDisplayName(selectedRecord)}</h2>
+                  <GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" />
+                  <span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span>
+                  <div className="record-detail__zalo-group" role="group" aria-label="Tên nhóm Zalo">
+                    <span>Tên nhóm Zalo (tùy chọn)</span>
+                    <LineListEditor value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(value) => updateRecordDetail("ZALO_GROUP_NAME", value)} ariaLabel="Tên nhóm Zalo" placeholder="Nhập đúng tên nhóm Zalo" maxLines={50} maxLineLength={400} />
+                  </div>
+                </div>
                   <div className="consulting-profile-actions">
                   <div className="export-actions"><div className="design-progress-view__status"><i className={syncingRecordId === selectedRecord.id ? "is-syncing" : ""} />{syncingRecordId === selectedRecord.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => void syncRecordToDrive(selectedRecord, selectedYear, selectedMonth)} disabled={syncingRecordId === selectedRecord.id}>⇩ Export Excel</button></div>
                   <div className="project-actions">
@@ -5800,7 +5963,7 @@ export default function Home() {
                     <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
                     {section.fields.map((field) => <tr key={field.code}>
                       <td>{field.label} <span className="field-code">({field.code})</span></td>
-                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="dd/mm/yyyy" /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <VietnamDatePicker aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxDate={formatWorkNoteDate()} onChange={(value) => updateRecordDetail(field.code, value)} /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                         <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
                       </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
                     </tr>)}
@@ -5912,7 +6075,10 @@ export default function Home() {
               <label>Công việc<select value={customerMessageTaskDraft.workType} onChange={(event) => updateCustomerMessageTaskDraft({ workType: event.target.value })} disabled={customerMessageTaskBusy}>{workNoteTypes.map((workType) => <option key={workType} value={workType}>{workType}</option>)}</select></label>
               <label>Ưu tiên<select value={customerMessageTaskDraft.priority} onChange={(event) => updateCustomerMessageTaskDraft({ priority: event.target.value as WorkNotePriority })} disabled={customerMessageTaskBusy}>{workNotePriorities.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select></label>
               <label>Người phụ trách<select value={customerMessageTaskDraft.assigneeEmail} onChange={(event) => updateCustomerMessageTaskDraft({ assigneeEmail: event.target.value })} disabled={customerMessageTaskBusy}><option value="">Chọn nhân lực</option>{assignablePersonnel.map((member) => <option key={personnelAssignmentKey(member)} value={personnelAssignmentKey(member)}>{member.name}{member.email ? "" : " · chưa có email"}</option>)}</select></label>
-              <label>Hoàn thành dự kiến<input value={customerMessageTaskDraft.dueDate} maxLength={10} onChange={(event) => { const value = formatDesignDateInput(event.target.value); if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; } updateCustomerMessageTaskDraft({ dueDate: value }); }} placeholder="dd/mm/yyyy" inputMode="numeric" disabled={customerMessageTaskBusy} /></label>
+              <VietnamDatePicker label="Hoàn thành dự kiến" value={customerMessageTaskDraft.dueDate} minDate={formatWorkNoteDate()} disabled={customerMessageTaskBusy} onChange={(value) => {
+                if (value.length === 10 && (!parseDesignDate(value) || isPastVietnamDate(value))) { setNotice("Hoàn thành dự kiến chỉ nhận ngày hôm nay hoặc tương lai (dd/mm/yyyy)."); return; }
+                updateCustomerMessageTaskDraft({ dueDate: value });
+              }} />
             </div>
             <label>Yêu cầu giao việc<textarea className="growing-textarea" rows={3} value={customerMessageTaskDraft.request} onChange={(event) => updateCustomerMessageTaskDraft({ request: event.target.value })} placeholder="Nhập công việc và yêu cầu cần thực hiện" disabled={customerMessageTaskBusy} /></label>
             <div className="dialog-actions"><button type="button" onClick={() => setCustomerMessageTaskDraft(null)} disabled={customerMessageTaskBusy}>Hủy</button><button className="add-button" type="submit" disabled={customerMessageTaskBusy}>{customerMessageTaskBusy ? "Đang phát hành…" : "Phát hành giao việc"}</button></div>
@@ -5986,21 +6152,38 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setPendingWorkNoteCompletionId(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">Ghi chú công việc</p>
             <h2>Xác nhận hoàn thành?</h2>
-            <p>Hệ thống sẽ ghi ngày hoàn thành thực tế là <b>{formatWorkNoteDate()}</b> và đồng bộ cho các thiết bị.</p>
+            <p>Ban quản lý sẽ nhận thông báo. Công việc được đóng sau khi quản lý xác nhận.</p>
             <div className="dialog-actions"><button type="button" onClick={() => setPendingWorkNoteCompletionId(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmWorkNoteCompletion}>Có, hoàn thành</button></div>
           </section>
         </div>
       )}
 
-      {pendingDesignTaskCompletion && canManageCustomerWorkflows && (
+      {pendingDesignTaskCompletion && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setPendingDesignTaskCompletion(null)}>
           <section className="security-dialog" role="dialog" aria-modal="true" aria-label="Xác nhận hoàn thành hạng mục thiết kế" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setPendingDesignTaskCompletion(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">Tiến độ thiết kế</p>
             <h2>Xác nhận hoàn thành?</h2>
-            <p>Hệ thống sẽ ghi ngày hoàn thành thực tế là <b>{formatWorkNoteDate()}</b> và đồng bộ cho các thiết bị.</p>
+            <p>Ban quản lý sẽ nhận thông báo. Hạng mục được đóng sau khi quản lý xác nhận.</p>
             <div className="dialog-actions"><button type="button" onClick={() => setPendingDesignTaskCompletion(null)}>Hủy</button><button className="add-button" type="button" onClick={confirmDesignTaskCompletion}>Có, hoàn thành</button></div>
           </section>
+        </div>
+      )}
+
+      {completionFeedback && canManageCustomerWorkflows && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setCompletionFeedback(null)}>
+          <form className="security-dialog completion-review-dialog" role="dialog" aria-modal="true" aria-label="Nhận xét công việc" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => {
+            event.preventDefault();
+            void decideCompletionReview(completionFeedback.target, completionFeedback);
+          }}>
+            <button type="button" className="dialog-close" onClick={() => setCompletionFeedback(null)} aria-label="Đóng">×</button>
+            <p className="eyebrow">{customerDisplayName(completionFeedback.target.location.record)}</p>
+            <h2>Nhận xét công việc</h2>
+            <p>{completionFeedback.target.item.content}</p>
+            <VietnamDatePicker label="Hoàn thành dự kiến mới" value={completionFeedback.dueDate} minDate={formatWorkNoteDate()} onChange={(dueDate) => setCompletionFeedback((current) => current ? { ...current, dueDate } : null)} />
+            <label>Nội dung nhận xét<GrowingTextarea value={completionFeedback.comment} onChange={(event) => { const comment = event.target.value; setCompletionFeedback((current) => current ? { ...current, comment } : null); }} placeholder="Nhập yêu cầu cần chỉnh sửa" maxLength={4000} required /></label>
+            <div className="dialog-actions"><button type="button" onClick={() => setCompletionFeedback(null)}>Hủy</button><button className="add-button" type="submit" disabled={!completionFeedback.comment.trim() || !parseDesignDate(completionFeedback.dueDate) || isPastVietnamDate(completionFeedback.dueDate) || completionReviewBusy(completionFeedback.target)}>Giao việc</button></div>
+          </form>
         </div>
       )}
 
@@ -6048,7 +6231,7 @@ export default function Home() {
                         <tr key={field.code}>
                           <td>{field.label} <span className="field-code">({field.code})</span></td>
                           <td>{dateDetailCodes.has(field.code) ? (
-                            <input aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxLength={10} inputMode="numeric" onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="dd/mm/yyyy" />
+                            <VietnamDatePicker aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxDate={formatWorkNoteDate()} onChange={(value) => updateRecordDetail(field.code, value)} />
                           ) : field.options ? (
                             <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                               <option value="">Chọn giá trị</option>

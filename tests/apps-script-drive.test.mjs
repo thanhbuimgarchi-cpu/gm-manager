@@ -669,6 +669,55 @@ test("configured Zalo group names bypass the GM group-name rule", () => {
   assert.equal(context.pancakeTargetForGroupName_(targets, "Nhà khác"), null);
 });
 
+test("Zalo alias lists normalize old and new records and reject ambiguous projects", () => {
+  const context = loadContext();
+  const oldProject = { houseId: "HP-587", projectId: "older", year: 2026, month: 9, zaloGroupName: "Nhà cũ\r\nBàn giao" };
+  const newProject = { houseId: "HP-587", projectId: "newer", year: 2026, month: 10, zaloGroupName: "Bàn giao", zaloGroupNames: [" Thiết kế ", "thiet  ke", "Thi công", "", null] };
+  const targets = context.pancakeTargetMap_({ customerTargets: [oldProject, newProject] });
+  assert.equal(Object.keys(targets).length, 2);
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Bàn giao").projectId, "older");
+  assert.equal(context.pancakeTargetForGroupName_(targets, "thiet   ke").projectId, "newer");
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Thi công").projectId, "newer");
+  assert.equal(context.pancakeTargetForGroupName_(targets, "Thi"), null);
+  const conflicting = context.pancakeTargetMap_({ customerTargets: [oldProject, { ...newProject, zaloGroupNames: ["Ban giao"] }] });
+  assert.equal(context.pancakeTargetForGroupName_(conflicting, "Bàn giao"), null);
+  const removed = context.pancakeTargetMap_({ customerTargets: [{ ...newProject, zaloGroupNames: [] }] });
+  assert.equal(context.pancakeTargetForGroupName_(removed, "Bàn giao"), null);
+});
+
+test("Pancake reloads all configured aliases when a group is added, removed or moved", () => {
+  const context = loadContext();
+  const cache = new Map();
+  let scans = 0;
+  let includeMessages = true;
+  context.pancakeProperty_ = () => "configured";
+  context.pancakePageContext_ = () => ({ pageName: "Fixture", pageId: "page" });
+  context.readCachedJson_ = (key) => cache.get(key);
+  context.cacheJson_ = (key, value) => cache.set(key, value);
+  context.pancakeConversationPages_ = () => {
+    scans += 1;
+    return [{ id: "design", from: { name: "Nhóm thiết kế" } }, { id: "build", from: { name: "Nhóm thi công" } }];
+  };
+  context.pancakeConversationMessages_ = (_page, conversation) => includeMessages ? [{ id: conversation.id, text: "Tin nhắn", inserted_at: "2026-09-03T10:20:00.000Z" }] : [];
+  const original = { houseId: "HP-587", projectId: "original", year: 2026, month: 9, zaloGroupNames: ["Nhóm thiết kế", "Nhóm thi công"] };
+  const first = context.loadCustomerMessages_({ customerTargets: [original] });
+  assert.deepEqual(Array.from(first.messages, (group) => group.conversationId).sort(), ["build", "design"]);
+  context.loadCustomerMessages_({ customerTargets: [{ ...original, zaloGroupNames: original.zaloGroupNames.slice().reverse() }] });
+  assert.equal(scans, 1, "reordering aliases keeps the same normalized cache key");
+  const removed = context.loadCustomerMessages_({ customerTargets: [{ ...original, zaloGroupNames: ["Nhóm thi công"] }] });
+  assert.equal(scans, 2, "changing only aliases invalidates the previous cache");
+  assert.deepEqual(Array.from(removed.messages, (group) => group.conversationId), ["build"]);
+
+  includeMessages = false;
+  const moved = { houseId: "HP-588", projectId: "new", year: 2026, month: 10, zaloGroupNames: ["Nhóm thi công"] };
+  const latest = context.loadCustomerMessages_({ customerTargets: [moved] });
+  assert.equal(scans, 3);
+  assert.equal(latest.messages.length, 1);
+  assert.equal(latest.messages[0].conversationId, "build");
+  assert.equal(latest.messages[0].projectId, "new");
+  assert.equal(context.workflowMessageSource_(latest.messages[0].id).projectId, "new");
+});
+
 test("only conversations containing Bùi Đức Thành are allowed as a Pancake test exception", () => {
   const context = loadContext();
   assert.equal(context.pancakeIsSpecialTestConversation_("Bùi Đức Thành"), true);

@@ -107,7 +107,7 @@ test("request replay is idempotent and rejects the same id with different conten
   assert.throws(() => f.command("creator", "note.publish", { ...payload, note: { ...payload.note, content: "khác" } }), code("CONFLICT"));
 });
 
-test("consecutive assignee acknowledgements preserve colleagues' notes and server completion time", () => {
+test("assignee completion reaches manager review without closing, archiving or exposing colleagues' work", () => {
   const f = fixture();
   f.command("creator", "note.publish", { note: f.note("alice-task") });
   f.command("creator", "note.publish", { note: f.note("bob-task", { assigneeEmail: "bob@example.com" }) });
@@ -115,13 +115,34 @@ test("consecutive assignee acknowledgements preserve colleagues' notes and serve
   assert.throws(() => f.command("alice", "note.complete", { noteId: "alice-task" }), code("VALIDATION"));
   f.command("alice", "note.accept", { noteId: "alice-task" });
   f.command("bob", "note.accept", { noteId: "bob-task" });
-  f.context.workflowArchiveItem_ = () => { throw new Error("Drive read-only"); };
+  let archives = 0;
+  let visibleWhenArchiving;
+  f.context.workflowArchiveItem_ = () => {
+    archives += 1;
+    visibleWhenArchiving = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.map(note => note.id);
+    throw new Error("Drive read-only");
+  };
   const result = f.command("alice", "note.complete", { noteId: "alice-task", note: { actualDate: "01/01/1900" } });
-  assert.equal(result.note.actualDate, "28/10/2026");
-  assert.equal(result.note.completedAt, "2026-10-28T16:30:00.000Z");
-  assert.equal(result.note.archivePending, true);
+  assert.equal(result.note.actualDate, "");
+  assert.equal(result.note.completedAt, "");
+  assert.equal(result.note.completionRequestedAt, "2026-10-28T16:30:00.000Z");
+  assert.equal(result.note.completionRequestedBy, "alice@example.com");
+  assert.equal(archives, 0, "submission never tries to archive before approval");
   assert.equal(result.notes.some(note => note.id === "bob-task"), false, "mutation response does not expose colleagues' assignments");
   assert.ok(f.loadNotes().notes.find(note => note.id === "bob-task").acceptedAt);
+  const review = { noteId: result.note.id, expectedRevision: result.note.revision };
+  assert.throws(() => f.command("alice", "note.approve", { ...review, manager: true }), code("FORBIDDEN"));
+  assert.throws(() => f.command("creator", "note.delete", review), code("CONFLICT"));
+  assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.find(note => note.id === "alice-task").completionRequestedAt, result.note.completionRequestedAt);
+  assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice }).notes.length, 1);
+  f.clock.now += 86400000;
+  const approved = f.command("manager", "note.approve", review);
+  assert.equal(approved.note.actualDate, "28/10/2026", "review latency is not included in the employee's completion date");
+  assert.equal(approved.note.completedAt, "2026-10-29T16:30:00.000Z");
+  assert.equal(approved.note.reviewedBy, "manager@example.com");
+  assert.equal(approved.note.archivePending, true, "approval closes the work even when Drive is unavailable");
+  assert.equal(archives, 1);
+  assert.deepEqual(plain(visibleWhenArchiving), ["bob-task"], "review leaves the active queue before Drive I/O begins");
   assert.equal(f.context.loadAssignedWorkNotes_({ email: "alice@example.com", workflowSessionToken: f.tokens.alice }).notes.length, 0);
   assert.equal(f.context.loadAssignedWorkNotes_({ email: "manager@example.com", workflowSessionToken: f.tokens.manager }).notes.length, 1);
 });
@@ -132,18 +153,20 @@ test("unarchived completion survives retention and retries safely without changi
   f.command("alice", "note.accept", { noteId: "archive" });
   let archives = 0;
   f.context.workflowArchiveItem_ = () => { archives += 1; throw new Error("Drive unavailable"); };
-  const completed = f.command("alice", "note.complete", { noteId: "archive", requestId: "complete-stable" });
+  const submitted = f.command("alice", "note.complete", { noteId: "archive", requestId: "complete-stable" });
+  const approval = { noteId: "archive", expectedRevision: submitted.note.revision, requestId: "approve-stable" };
+  const completed = f.command("manager", "note.approve", approval);
   assert.equal(completed.archivePending, true);
   f.clock.now += 3 * 86400000;
   assert.equal(f.loadNotes().notes.length, 1, "two-day cleanup never drops unarchived work");
   f.context.workflowArchiveItem_ = () => { archives += 1; return {}; };
-  const retried = f.command("alice", "note.complete", { noteId: "archive", requestId: "complete-stable" });
+  const retried = f.command("manager", "note.approve", approval);
   assert.equal(retried.repeated, true);
   assert.equal(retried.note.actualDate, completed.note.actualDate);
   assert.equal(retried.note.archivePending, false);
   assert.ok(retried.note.archivedAt);
   assert.equal(retried.notes.length, 0, "archived work expires only after its two-day retention");
-  f.command("alice", "note.complete", { noteId: "archive", requestId: "complete-stable" });
+  f.command("manager", "note.approve", approval);
   assert.equal(archives, 2, "a delivered archive is not exported twice");
 });
 
@@ -174,7 +197,7 @@ test("deletion tombstones persist across server instances and reject legacy resu
   assert.throws(() => later.command("creator", "note.publish", { note }), code("CONFLICT"));
 });
 
-test("managers acknowledge and complete design while staff only view and stale saves cannot undo it", () => {
+test("assigned staff submit design for review, managers approve and stale workspace saves cannot undo it", () => {
   const f = fixture();
   const rows = [
     { id: "design-a", content: "Mặt bằng", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" },
@@ -185,15 +208,25 @@ test("managers acknowledge and complete design while staff only view and stale s
   assert.equal(publish.tasks.length, 2);
   const before = plain([...f.values]);
   for (const actor of ["creator", "alice", "bob", "viewer"]) {
-    for (const operation of ["design.publish", "design.accept", "design.complete"]) {
-      assert.throws(() => f.command(actor, operation, { kind: "architecture", rowId: "design-a", rows, role: "Quản lý chung", manager: true }), code("FORBIDDEN"));
-    }
+    for (const operation of ["design.publish", "design.approve", "design.return"]) assert.throws(() => f.command(actor, operation, { kind: "architecture", rowId: "design-a", rows, role: "Quản lý chung", manager: true }), code("FORBIDDEN"));
+  }
+  for (const actor of ["creator", "bob", "viewer"]) {
+    for (const operation of ["design.accept", "design.complete"]) assert.throws(() => f.command(actor, operation, { kind: "architecture", rowId: "design-a" }), code("FORBIDDEN"));
   }
   assert.deepEqual(plain([...f.values]), before, "rejected employee actions cannot modify canonical data");
-  assert.throws(() => f.command("creator", "design.accept", { kind: "architecture", rowId: "design-a" }), code("FORBIDDEN"));
-  f.command("manager", "design.accept", { kind: "architecture", rowId: "design-a" });
-  f.context.workflowArchiveItem_ = () => ({});
-  const complete = f.command("manager", "design.complete", { kind: "architecture", rowId: "design-a" });
+  f.command("alice", "design.accept", { kind: "architecture", rowId: "design-a" });
+  let archives = 0;
+  f.context.workflowArchiveItem_ = () => { archives += 1; return {}; };
+  const submitted = f.command("alice", "design.complete", { kind: "architecture", rowId: "design-a" }).rows[0];
+  assert.equal(submitted.actualDate, "");
+  assert.equal(submitted.completionRequestedBy, "alice@example.com");
+  assert.equal(archives, 0);
+  assert.equal(f.context.loadAssignedDesignTasks_({ workflowSessionToken: f.tokens.manager }).tasks[0].completionRequestedAt, submitted.completionRequestedAt);
+  assert.throws(() => f.command("manager", "design.publish", { kind: "architecture", rows: [{ ...submitted, content: "Changed during review" }] }), code("CONFLICT"));
+  f.clock.now += 1000;
+  const republished = f.command("manager", "design.publish", { kind: "architecture", rows: [submitted, rows[1]] });
+  assert.deepEqual(plain(republished.rows[0]), plain(submitted), "publishing another design row leaves the pending review unchanged");
+  const complete = f.command("manager", "design.approve", { kind: "architecture", rowId: "design-a", expectedRevision: submitted.revision });
   const row = complete.rows.find(row => row.id === "design-a");
   assert.equal(row.actualDate, "28/10/2026");
   assert.ok(row.archivedAt);
@@ -203,6 +236,53 @@ test("managers acknowledge and complete design while staff only view and stale s
   assert.equal(protectedRows.find(row => row.id === "design-a").actualDate, "28/10/2026");
   assert.throws(() => f.context.syncDesignTasks_({ ...scope, workflowSessionToken: f.tokens.manager, kind: "architecture", rows }), code("UPDATE_REQUIRED"));
   assert.equal(f.context.loadAssignedDesignTasks_({ email: "manager@example.com", workflowSessionToken: f.tokens.manager }).tasks.length, 1);
+});
+
+test("returning a submitted task requires valid feedback and a date, then starts a durable new assignment cycle", () => {
+  for (const domain of ["note", "design"]) {
+    const f = fixture();
+    const id = `review-${domain}`;
+    const scope = domain === "note" ? { noteId: id } : { kind: "architecture", rowId: id };
+    const item = result => domain === "note" ? result.note : result.rows[0];
+    const assigned = fixture => domain === "note"
+      ? fixture.context.loadAssignedWorkNotes_({ workflowSessionToken: fixture.tokens.alice }).notes
+      : fixture.context.loadAssignedDesignTasks_({ workflowSessionToken: fixture.tokens.alice }).tasks;
+    if (domain === "note") f.command("creator", "note.publish", { note: f.note(id) });
+    else f.command("manager", "design.publish", { kind: scope.kind, rows: [{ id, content: "Mặt bằng", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026" }] });
+    const accepted = item(f.command("alice", `${domain}.accept`, scope));
+    const submission = { ...scope, expectedRevision: accepted.revision, requestId: `submit-${domain}` };
+    const submitted = item(f.command("alice", `${domain}.complete`, submission));
+    const change = { ...scope, expectedRevision: submitted.revision, dueDate: "01/11/2026", reviewComment: "  Cập nhật số đo cửa.  ", requestId: `return-${domain}` };
+    for (const patch of [{ expectedRevision: undefined }, { dueDate: "31/11/2026" }, { dueDate: "27/10/2026" }, { reviewComment: " " }, { reviewComment: "a".repeat(4001) }]) {
+      assert.throws(() => f.command("manager", `${domain}.return`, { ...change, ...patch }), code("VALIDATION"));
+    }
+    assert.throws(() => f.command("alice", `${domain}.return`, change), code("FORBIDDEN"));
+    const returned = item(f.command("manager", `${domain}.return`, change));
+    assert.equal(returned[domain === "note" ? "dueDate" : "plannedDate"], "01/11/2026");
+    assert.equal(returned.reviewComment, "Cập nhật số đo cửa.");
+    assert.equal(returned.completionRequestedAt, "");
+    assert.equal(returned.acceptedAt, "");
+    assert.equal(returned.acceptedBy, "");
+    assert.equal(returned.assigneeEmail, submitted.assigneeEmail);
+    assert.ok(returned.reassignedAt);
+    assert.equal(f.command("manager", `${domain}.return`, change).repeated, true);
+    assert.equal(f.command("alice", `${domain}.complete`, submission).repeated, true, "replaying a prior submission cannot reopen a review");
+    assert.throws(() => f.command("admin", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision }), code("CONFLICT"));
+    assert.throws(() => f.command("alice", `${domain}.accept`, scope), code("UPDATE_REQUIRED"));
+    assert.throws(() => f.command("alice", `${domain}.complete`, { ...scope, expectedRevision: returned.revision }), code("VALIDATION"));
+    const restarted = fixture(f.values);
+    const reassigned = assigned(restarted)[0];
+    assert.equal(reassigned.revision, returned.revision);
+    assert.equal(reassigned.reviewComment, returned.reviewComment);
+    const reaccepted = item(restarted.command("alice", `${domain}.accept`, { ...scope, expectedRevision: reassigned.revision, requestId: `reaccept-${domain}` }));
+    assert.equal(reaccepted.reviewComment, returned.reviewComment);
+    const second = item(restarted.command("alice", `${domain}.complete`, { ...scope, expectedRevision: reaccepted.revision, requestId: `resubmit-${domain}` }));
+    assert.throws(() => restarted.command("admin", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision, requestId: `approve-stale-${domain}` }), code("CONFLICT"));
+    restarted.context.workflowArchiveItem_ = () => ({});
+    const approved = item(restarted.command("admin", `${domain}.approve`, { ...scope, expectedRevision: second.revision, requestId: `approve-current-${domain}` }));
+    assert.equal(approved.actualDate, "28/10/2026");
+    assert.equal(assigned(restarted).length, 0);
+  }
 });
 
 test("only a current manager may change message status or assign work, even with a forged role", () => {
@@ -320,7 +400,8 @@ test("completion dates follow Vietnam calendar across UTC midnight", () => {
   f.command("alice", "note.accept", { noteId: "timezone" });
   f.clock.now = Date.parse("2026-10-28T18:00:00Z");
   f.context.workflowArchiveItem_ = () => ({});
-  assert.equal(f.command("alice", "note.complete", { noteId: "timezone" }).note.actualDate, "29/10/2026");
+  const submitted = f.command("alice", "note.complete", { noteId: "timezone" }).note;
+  assert.equal(f.command("manager", "note.approve", { noteId: submitted.id, expectedRevision: submitted.revision }).note.actualDate, "29/10/2026");
 });
 
 test("Pancake window ids and earlier lines survive the sliding latest-message API page", () => {
@@ -346,6 +427,10 @@ test("doPost returns actionable workflow errors without accepting spoofed actor 
   const result = f.context.doPost({ postData: { contents: JSON.stringify({ ...scope, action: "workflow-command", operation: "note.publish", requestId: "denied-post", actorEmail: "admin", note: f.note("denied") }) } });
   assert.equal(result.ok, false);
   assert.equal(result.code, "AUTH_REQUIRED");
+  const legacy = f.context.doPost({ postData: { contents: JSON.stringify({ ...scope, action: "complete-work-note", actorEmail: "alice@example.com", note: f.note("legacy", { actualDate: "28/10/2026" }) }) } });
+  assert.equal(legacy.ok, false);
+  assert.equal(legacy.code, "UPDATE_REQUIRED");
+  assert.equal(f.driveCalls(), 0);
 });
 
 test("canonical reads ignore claimed admin email and expose only the signed employee's permitted notes", () => {
@@ -400,11 +485,11 @@ test("mutations ignore an old poll snapshot reinserted after cache invalidation"
   // read race; commands must not use that snapshot as mutation input.
   f.cache.set(cacheKey, oldSnapshot);
   f.context.workflowArchiveItem_ = () => ({});
-  const completed = f.command("alice", "note.complete", { noteId: "stale-cache" });
-  assert.equal(completed.note.actualDate, "28/10/2026");
-  assert.ok(completed.note.acceptedAt);
+  const submitted = f.command("alice", "note.complete", { noteId: "stale-cache" });
+  assert.ok(submitted.note.completionRequestedAt);
+  assert.ok(submitted.note.acceptedAt);
   assert.equal(f.cache.has(cacheKey), false);
-  assert.equal(f.loadNotes().notes[0].actualDate, "28/10/2026");
+  assert.equal(f.loadNotes().notes[0].completionRequestedAt, submitted.note.completionRequestedAt);
 });
 
 test("large or unavailable read caches do not block authoritative workflow reads", () => {
@@ -475,7 +560,8 @@ test("first-time notes and design assignments remain usable when legacy Drive im
   assert.equal(published.legacyImportPending, true);
   assert.equal(f.driveCalls(), 1, "first publish only attempts the read-only legacy import");
   f.command("alice", "note.accept", { noteId: "first-cache-note" });
-  const completed = f.command("alice", "note.complete", { noteId: "first-cache-note" });
+  const submitted = f.command("alice", "note.complete", { noteId: "first-cache-note" });
+  const completed = f.command("manager", "note.approve", { noteId: "first-cache-note", expectedRevision: submitted.note.revision });
   assert.equal(completed.note.actualDate, "28/10/2026");
   assert.equal(completed.note.archivePending, true);
   assert.equal(completed.legacyImportPending, true);
@@ -487,7 +573,8 @@ test("first-time notes and design assignments remain usable when legacy Drive im
   assert.equal(issued.rows[0].id, "first-cache-design");
   assert.equal(issued.legacyImportPending, true);
   design.command("manager", "design.accept", { kind: "architecture", rowId: "first-cache-design" });
-  const finished = design.command("manager", "design.complete", { kind: "architecture", rowId: "first-cache-design" });
+  const requested = design.command("manager", "design.complete", { kind: "architecture", rowId: "first-cache-design" });
+  const finished = design.command("manager", "design.approve", { kind: "architecture", rowId: "first-cache-design", expectedRevision: requested.rows[0].revision });
   assert.equal(finished.rows[0].actualDate, "28/10/2026");
   assert.equal(finished.rows[0].archivePending, true);
   assert.deepEqual(plain(design.context.readPropertyJson_("gmcrm-active-design-tasks-v2")), [], "canonical design tasks do not consume duplicate registry storage");
@@ -645,8 +732,10 @@ test("note and message-assignment hot paths do not read/write global workspace o
   const published = measure(() => f.command("creator", "note.publish", { note: f.note("hotpath-new") }));
   measure(() => f.command("creator", "note.edit", { note: { ...published.note, content: "Nội dung cập nhật" }, expectedRevision: published.note.revision }));
   measure(() => f.command("alice", "note.accept", { noteId: "hotpath-new" }));
-  measure(() => f.command("alice", "note.complete", { noteId: "hotpath-new" }));
-  assert.equal(archiveAttempts, 1, "completion still runs its explicit archival step");
+  const submitted = measure(() => f.command("alice", "note.complete", { noteId: "hotpath-new" }));
+  assert.equal(archiveAttempts, 0, "pending review does not archive");
+  measure(() => f.command("manager", "note.approve", { noteId: "hotpath-new", expectedRevision: submitted.note.revision }));
+  assert.equal(archiveAttempts, 1, "approval still runs its explicit archival step");
   measure(() => f.command("creator", "note.delete", { noteId: "hotpath-delete", expectedRevision: 1 }));
   const assigned = measure(() => f.command("manager", "message.assign", { messageId: group.id, selectedLineIds: ["line-one"], assignment: f.note("hotpath-assigned") }));
   assert.equal(assigned.note.sourceMessageId, group.id);
@@ -704,7 +793,8 @@ test("assigned feeds include removal revisions and the selected project snapshot
   completed.command("creator", "note.publish", { note: completed.note("completed-history") });
   completed.command("alice", "note.accept", { noteId: "completed-history" });
   completed.context.workflowArchiveItem_ = () => ({});
-  completed.command("alice", "note.complete", { noteId: "completed-history" });
+  const submitted = completed.command("alice", "note.complete", { noteId: "completed-history" });
+  completed.command("manager", "note.approve", { noteId: "completed-history", expectedRevision: submitted.note.revision });
   const snapshot = completed.context.loadAssignedWorkNotes_({ workflowSessionToken: completed.tokens.alice, project: scope });
   assert.deepEqual(plain(snapshot.notes), []);
   assert.equal(snapshot.projectSnapshot.notes[0].actualDate, "28/10/2026", "the same feed preserves completed history in the open project for two days");

@@ -221,6 +221,11 @@ export function createWorkflowClient(options: ClientOptions) {
   return { enqueue, execute, pending, retry, discard, flush, resumeForAccount, refresh, dispose };
 }
 
+export function formatDateInput(value: string) {
+  const digits = value.replace(/\D/g, "").slice(0, 8);
+  return [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean).join("/");
+}
+
 export function parseWorkflowDate(value: string): number | null {
   const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(value || "");
   if (!match) return null;

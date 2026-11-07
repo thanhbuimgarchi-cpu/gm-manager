@@ -48,6 +48,24 @@ function noteResult(payload,note) {
   notesRevision.set(payload.projectId,revision);
   return {ok:true,note:clone(note),notes:clone(notes.get(payload.projectId)),revision,deletedIds:clone(deletedNoteIds.get(payload.projectId)||[]),archivePending:Boolean(note?.archivePending)};
 }
+function applyAssignmentDecision(item, action, actor, payload, dateField, archivePending) {
+  if (Number(payload.expectedRevision) !== item.revision) return {ok:false,code:'CONFLICT',error:'Hãy tải lại công việc.'};
+  const isManager = actor === 'admin' || actor === manager.email;
+  if (action === 'approve' || action === 'return') {
+    if (!isManager) return {ok:false,code:'FORBIDDEN',error:'Chỉ ban quản lý được duyệt.'};
+    if (!item.completionRequestedAt || item.actualDate) return {ok:false,code:'CONFLICT',error:'Công việc không còn chờ xác nhận.'};
+  } else if (item.assigneeEmail !== actor && !(isManager && dateField === 'plannedDate')) return {ok:false,code:'FORBIDDEN',error:'Chỉ Người phụ trách mới được cập nhật.'};
+  const now = new Date(Date.parse(fixedNow) + item.revision * 1000).toISOString();
+  if (action === 'accept') Object.assign(item,{acceptedAt:now,acceptedBy:actor});
+  if (action === 'complete') {
+    if (!item.acceptedAt) return {ok:false,code:'VALIDATION',error:'Hãy nhận việc trước.'};
+    Object.assign(item,{completionRequestedAt:now,completionRequestedBy:actor,completionRequestedByName:member.name});
+  }
+  if (action === 'approve') Object.assign(item,{actualDate:'28/10/2026',completedAt:now,archivePending,archivedAt:archivePending?'':now});
+  if (action === 'return') Object.assign(item,{[dateField]:payload.dueDate,reviewComment:payload.reviewComment,reassignedAt:now,completionRequestedAt:'',completionRequestedBy:'',completionRequestedByName:'',acceptedAt:'',acceptedBy:''});
+  item.revision += 1;
+  return null;
+}
 async function dispatch(payload) {
   if(payload.action.startsWith('load-'))readLog.push({action:payload.action,project:clone(payload.project||null)});
   if(payload.action==='verify-employee-login') {
@@ -92,14 +110,11 @@ async function dispatch(payload) {
     if(collection.some(note=>note.id===draft.id))return {ok:false,code:'CONFLICT',error:'Ghi chú đã được tạo.'};
     const note={...clone(draft),revision:1,creatorEmail:actor,creatorName:actor==='admin'?'Admin':member.name,publishedAt:fixedNow,acceptedAt:'',acceptedBy:'',actualDate:'',completedAt:'',archivedAt:'',archivePending:false};
     collection.push(note);result=noteResult(payload,note);
-  } else if(operation==='note.accept'||operation==='note.complete') {
+  } else if(/^note\.(accept|complete|approve|return)$/.test(operation)) {
     const note=collection.find(note=>note.id===payload.noteId);
-    if(!note||note.assigneeEmail!==actor)return {ok:false,code:'FORBIDDEN',error:'Chỉ Người phụ trách mới được cập nhật.'};
-    if(operation==='note.accept')Object.assign(note,{acceptedAt:fixedNow,acceptedBy:actor,revision:note.revision+1});
-    else {
-      if(!note.acceptedAt)return {ok:false,code:'VALIDATION',error:'Hãy nhận việc trước.'};
-      Object.assign(note,{actualDate:'28/10/2026',completedAt:fixedNow,revision:note.revision+1,archivePending:control.noteArchivePending,archivedAt:control.noteArchivePending?'':fixedNow});
-    }
+    if(!note)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy công việc.'};
+    const failure=applyAssignmentDecision(note,operation.split('.')[1],actor,payload,'dueDate',control.noteArchivePending);
+    if(failure)return failure;
     result=noteResult(payload,note);
   } else if(operation==='design.publish') {
     const assigned=payload.rows.filter(row=>row.content?.trim()&&(row.assigneeEmail||row.plannedDate||row.publishedAt));
@@ -107,14 +122,11 @@ async function dispatch(payload) {
     const canonical=assigned.map(row=>({...clone(row),publishedAt:row.publishedAt||fixedNow,revision:(row.revision||0)+1,creatorEmail:actor,acceptedAt:row.acceptedAt||'',acceptedBy:row.acceptedBy||'',actualDate:row.actualDate||''}));
     record.designProgress=payload.rows.map(row=>canonical.find(item=>item.id===row.id)||clone(row));
     result={ok:true,rows:clone(canonical),revision:1,tasks:[]};
-  } else if(operation==='design.accept'||operation==='design.complete') {
+  } else if(/^design\.(accept|complete|approve|return)$/.test(operation)) {
     const row=(record.designProgress||[]).find(row=>row.id===payload.rowId);
-    if(!row||!['admin',manager.email].includes(actor))return {ok:false,code:'FORBIDDEN',error:'Chỉ quản lý được cập nhật thiết kế.'};
-    if(operation==='design.accept')Object.assign(row,{acceptedAt:fixedNow,acceptedBy:actor,revision:row.revision+1});
-    else {
-      if(!row.acceptedAt)return {ok:false,code:'VALIDATION',error:'Hãy nhận việc trước.'};
-      Object.assign(row,{actualDate:'28/10/2026',completedAt:fixedNow,revision:row.revision+1,archivePending:control.designArchivePending,archivedAt:control.designArchivePending?'':fixedNow});
-    }
+    if(!row)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy hạng mục.'};
+    const failure=applyAssignmentDecision(row,operation.split('.')[1],actor,payload,'plannedDate',control.designArchivePending);
+    if(failure)return failure;
     result={ok:true,rows:clone(record.designProgress.filter(row=>row.publishedAt)),revision:row.revision,row:clone(row),archivePending:Boolean(row.archivePending)};
   } else if(operation==='archive.retry') {
     if(payload.noteId){const note=collection.find(note=>note.id===payload.noteId);if(!note)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy ghi chú.'};Object.assign(note,{archivePending:control.noteArchivePending,archivedAt:control.noteArchivePending?'':fixedNow,revision:note.revision+1});result=noteResult(payload,note);}
@@ -142,7 +154,8 @@ const browser=await chromium.launch({headless:true,...(process.env.GM_TEST_BROWS
 const context=await browser.newContext({viewport:{width:1440,height:1000},serviceWorkers:'block'});
 await context.exposeBinding('qaWorkflowRequest',async(_source,payload)=>dispatch(payload));
 await context.addInitScript(({years,personnel,scriptUrl,adminToken,workflowToken})=>{
-  window.gmDesktop={isDesktop:true,isWindows:true,platform:'win32',validateWorkspaceFolder:async()=>({ok:true,path:'I:\\Shared drives\\GM Manager\\GM Manager'}),showNotification:async()=>true};
+  window.qaNotifications=[];
+  window.gmDesktop={isDesktop:true,isWindows:true,platform:'win32',validateWorkspaceFolder:async()=>({ok:true,path:'I:\\Shared drives\\GM Manager\\GM Manager'}),showNotification:async(payload)=>{window.qaNotifications.push(payload);return true;}};
   window.qaFeedSerial=0;
   addEventListener('message',event=>{if(event.data?.channel==='gm-manager-apps-script-response'&&event.data.result?.qaFeedSerial)window.qaFeedSerial=event.data.result.qaFeedSerial;});
   window.qaReadOutbox=()=>{
@@ -155,6 +168,7 @@ await context.addInitScript(({years,personnel,scriptUrl,adminToken,workflowToken
   localStorage.setItem('gm-manager-consulting',JSON.stringify(years));
   localStorage.setItem('gm-manager-personnel-v1',JSON.stringify(personnel));
   localStorage.setItem('gm-manager-personnel-session-email','admin');
+  localStorage.setItem('gm-manager-notifications-enabled-v1','enabled');
   localStorage.setItem('gm-manager-admin-session-v1',JSON.stringify({token:adminToken,scriptUrl}));
   localStorage.setItem('gm-manager-workflow-session-v1',JSON.stringify({token:workflowToken,scriptUrl,account:'admin'}));
 },{years,personnel,scriptUrl,adminToken,workflowToken:tokens.admin});
@@ -213,47 +227,88 @@ assert.equal((await cachedNotes()).find(note=>note.content==='Công việc kiể
 acceptance.release();
 await activeNote.getByRole('checkbox',{name:'Đánh dấu hoàn thành',exact:true}).waitFor({state:'visible'});
 assert.ok(await activeNote.getByLabel('Trạng thái Xanh',{exact:true}).isVisible(),'accepted assignment immediately uses the deadline color');
-control.noteArchivePending=true;
 const completion=holdNext('note.complete');
 await activeNote.getByRole('checkbox',{name:'Đánh dấu hoàn thành',exact:true}).click();
 await page.getByRole('dialog',{name:/Xác nhận hoàn thành/}).getByRole('button',{name:'Có, hoàn thành',exact:true}).click();
 await completion.entered;
 assert.equal((await cachedNotes()).find(note=>note.content==='Công việc kiểm thử nguyên tử').actualDate,'','completion is not fabricated before the server reply');
 completion.release();
-await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value?.some(note=>note.actualDate==='28/10/2026'&&note.archivePending));
-assert.ok((await cachedNotes()).some(note=>note.content==='Công việc kiểm thử nguyên tử'&&note.archivePending),'completed work survives a Drive archive failure');
-await activeNote.getByRole('button',{name:'Thử lưu Drive',exact:true}).waitFor();
-control.noteArchivePending=false;
-await activeNote.getByRole('button',{name:'Thử lưu Drive',exact:true}).click();
-await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value?.some(note=>note.actualDate==='28/10/2026'&&!note.archivePending&&note.archivedAt));
+await activeNote.getByText('Chờ quản lý xác nhận',{exact:true}).waitFor();
+assert.equal(await activeNote.getByLabel('Hoàn thành thực tế',{exact:true}).inputValue(),'');
+assert.equal(await activeNote.getByRole('button',{name:'Xác nhận',exact:true}).count(),0);
+assert.ok((await cachedNotes()).some(note=>note.completionRequestedAt&&!note.actualDate&&!note.archivePending),'a report enters review without archiving');
 
 await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
-phase='employee read-only consultation, design and messages';
+phase='employee consultation, design and messages permissions';
 await page.getByRole('button',{name:'Tư vấn',exact:true}).click();
 assert.ok(await page.locator('.record-detail--inline').getByLabel('Tên khách hàng',{exact:true}).isDisabled());
 await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
 const employeeDesign=page.locator('.design-schedule').first();
 assert.equal(await employeeDesign.getByRole('button',{name:'Phát hành',exact:true}).count(),0);
-assert.equal(await employeeDesign.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).count(),0);
-assert.ok(await employeeDesign.getByRole('checkbox',{name:'Đánh dấu hoàn thành Thiết kế kiểm thử',exact:true}).isDisabled());
+const employeeDesignRow=employeeDesign.getByRole('row').filter({hasText:'Thiết kế kiểm thử'});
+assert.ok(await employeeDesignRow.getByLabel('Người phụ trách Thiết kế kiểm thử').isDisabled());
+await employeeDesignRow.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
+await employeeDesignRow.getByLabel('Trạng thái Xanh',{exact:true}).waitFor();
+await employeeDesignRow.getByRole('checkbox',{name:'Đánh dấu hoàn thành Thiết kế kiểm thử',exact:true}).click();
+await page.getByRole('dialog',{name:/Xác nhận hoàn thành/}).getByRole('button',{name:'Có, hoàn thành',exact:true}).click();
+await employeeDesignRow.getByText('Chờ quản lý xác nhận',{exact:true}).waitFor();
+assert.equal(await employeeDesignRow.getByRole('button',{name:'Nhận xét',exact:true}).count(),0);
+assert.equal(records[0].designProgress[0].actualDate,'');
 const beforeRead=commandLog.length;
 await overview();await page.locator('.customer-message-summary .sidebar-notes__toggle').click();await page.locator('.customer-message__body').waitFor();
 assert.equal(await page.locator('.customer-message__status-actions').getByRole('button').count(),0);
 assert.equal(commandLog.length,beforeRead,'reading as an employee cannot submit workflow commands');
-await login(manager.name,manager.loginCode);await openHouse('QA-A');await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
-phase='manager design accept/complete';
-const designRow=page.locator('.design-schedule').first().getByRole('row').filter({hasText:'Thiết kế kiểm thử'});
-await designRow.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
-await designRow.getByLabel('Trạng thái Xanh',{exact:true}).waitFor();
+await login(manager.name,manager.loginCode);
+phase='manager feedback and design approval';
+const reviewPanel=page.getByLabel('Công việc chờ xác nhận',{exact:true});
+const noteReview=reviewPanel.locator('article').filter({hasText:'Công việc kiểm thử nguyên tử'});
+const designReview=reviewPanel.locator('article').filter({hasText:'Thiết kế kiểm thử'});
+await noteReview.waitFor();
+await designReview.waitFor();
+await page.waitForFunction(()=>window.qaNotifications.some(({title,body})=>title.includes('Công việc chờ xác nhận')&&body.includes('Công việc kiểm thử nguyên tử')));
+await noteReview.getByRole('button',{name:'Nhận xét',exact:true}).click();
+const feedbackDialog=page.getByRole('dialog',{name:'Nhận xét công việc',exact:true});
+const reassign=feedbackDialog.getByRole('button',{name:'Giao việc',exact:true});
+assert.ok(await reassign.isDisabled());
+await feedbackDialog.getByLabel('Hoàn thành dự kiến mới',{exact:true}).fill('14112026');
+await feedbackDialog.getByLabel('Nội dung nhận xét',{exact:true}).fill('Bổ sung ảnh kiểm tra trước khi gửi lại.');
+await reassign.click();
+await noteReview.waitFor({state:'hidden'});
+const returnedNote=notes.get(records[0].projectId).find(note=>note.content==='Công việc kiểm thử nguyên tử');
+assert.equal(returnedNote.dueDate,'14/11/2026');
+assert.equal(returnedNote.acceptedAt,'');
+assert.equal(returnedNote.actualDate,'');
 control.designArchivePending=true;
-await designRow.getByRole('checkbox',{name:'Đánh dấu hoàn thành Thiết kế kiểm thử',exact:true}).click();
-await page.getByRole('dialog',{name:/Xác nhận hoàn thành/}).getByRole('button',{name:'Có, hoàn thành',exact:true}).click();
+await designReview.getByRole('button',{name:'Xác nhận',exact:true}).click();
+await designReview.waitFor({state:'hidden'});
+await openHouse('QA-A');await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
+const designRow=page.locator('.design-schedule').first().getByRole('row').filter({hasText:'Thiết kế kiểm thử'});
 await designRow.getByText('28/10/2026',{exact:true}).waitFor();
 assert.equal(records[0].designProgress[0].actualDate,'28/10/2026');
 await designRow.getByRole('button',{name:'Chờ lưu Drive · Thử lại',exact:true}).waitFor();
 control.designArchivePending=false;
 await designRow.getByRole('button',{name:'Chờ lưu Drive · Thử lại',exact:true}).click();
 await designRow.getByRole('button',{name:'Chờ lưu Drive · Thử lại',exact:true}).waitFor({state:'hidden'});
+
+phase='employee re-submits after feedback and manager closes note';
+await login(member.name,member.loginCode);
+await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+const returnedCard=page.locator('.work-note').filter({hasText:'Bổ sung ảnh kiểm tra trước khi gửi lại.'});
+await returnedCard.waitFor();
+assert.equal(await returnedCard.getByLabel('Hoàn thành dự kiến',{exact:true}).inputValue(),'14/11/2026');
+await returnedCard.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
+await returnedCard.getByRole('checkbox',{name:'Đánh dấu hoàn thành',exact:true}).click();
+await page.getByRole('dialog',{name:/Xác nhận hoàn thành/}).getByRole('button',{name:'Có, hoàn thành',exact:true}).click();
+await returnedCard.getByText('Chờ quản lý xác nhận',{exact:true}).waitFor();
+await login(manager.name,manager.loginCode);
+await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+control.noteArchivePending=true;
+await returnedCard.getByRole('button',{name:'Xác nhận',exact:true}).click();
+await returnedCard.getByRole('button',{name:'Thử lưu Drive',exact:true}).waitFor();
+assert.ok((await cachedNotes()).some(note=>note.id===returnedNote.id&&note.actualDate==='28/10/2026'&&note.archivePending),'approved work closes even if the Drive archive fails');
+control.noteArchivePending=false;
+await returnedCard.getByRole('button',{name:'Thử lưu Drive',exact:true}).click();
+await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value?.some(note=>note.actualDate==='28/10/2026'&&!note.archivePending&&note.archivedAt));
 
 await login('admin','1');
 phase='message assignment';
@@ -359,6 +414,6 @@ assert.deepEqual(errors,[],'no browser runtime errors');
 console.log(JSON.stringify({passed:true,commands:commandLog.length,uniqueCommits:committed.size,noRuntimeErrors:true,archivePendingRetained:true,customerScopedReplies:true,offlineReplayIdStable:true,remoteCompletionReconciled:true,remoteDeletionReconciled:true,staleFeedPreservesAcknowledgedNotes:true,noExtraProjectReads:true}));
 } catch(error) {
   await page.screenshot({path:'outputs/interface-qa/workflow-failure.png',fullPage:true}).catch(()=>{});
-  console.error(JSON.stringify({phase,commands:commandLog.map(command=>({operation:command.operation,requestId:command.requestId})),pageText:(await page.locator('body').innerText().catch(()=>'' )).slice(-5000)}));
+  console.error(JSON.stringify({phase,errors,commands:commandLog.map(command=>({operation:command.operation,requestId:command.requestId})),pageText:(await page.locator('body').innerText().catch(()=>'' )).slice(-5000)}));
   throw error;
 } finally { await browser.close(); }

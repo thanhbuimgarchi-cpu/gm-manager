@@ -461,7 +461,7 @@ function doPost(event) {
       if (payload.action === "delete-customer-folder") return json_(deleteCustomerFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
       if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
-      if (payload.action === "complete-work-note") return json_(completeWorkNote_(payload));
+      if (payload.action === "complete-work-note") throw workflowError_("UPDATE_REQUIRED", "Hãy cập nhật ứng dụng để báo hoàn thành và gửi ban quản lý duyệt.");
       if (payload.action === "save-pancake-config") return json_(savePancakeConfig_(payload));
       if (payload.action === "update-customer-message-status") return json_(updateCustomerMessageStatus_(payload));
       if (payload.action === "sync-design-tasks") return json_(syncDesignTasks_(payload));
@@ -1422,6 +1422,7 @@ function writeWorkbook_(spreadsheet, record) {
     ["0. GM-CRM", ["Kh\u00f3a", "Gi\u00e1 tr\u1ecb"], null],
     ["1. Ch\u1ee7 \u0111\u1ea7u t\u01b0", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["HVT", "H\u1ecd v\u00e0 t\u00ean"], ["NS", "Ng\u00e0y th\u00e1ng n\u0103m sinh"], ["DC", "\u0110\u1ecba ch\u1ec9"], ["SDT", "S\u1ed1 \u0111i\u1ec7n tho\u1ea1i/Zalo"], ["EMA", "Email"],
+      ["ZALO_GROUP_NAME", "Tên nhóm Zalo"],
     ]],
     ["2. Nhu c\u1ea7u", ["M\u00e3", "N\u1ed9i dung", "K\u1ebft qu\u1ea3 thu th\u1eadp"], [
       ["NCT-KT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf ki\u1ebfn tr\u00fac"], ["NCT-NT", "Nhu c\u1ea7u thi\u1ebft k\u1ebf n\u1ed9i th\u1ea5t"], ["NCT-NTU", "Nhu c\u1ea7u thi\u1ebft k\u1ebf nghi\u1ec7m thu"], ["NCC-KT", "Nhu c\u1ea7u thi c\u00f4ng ki\u1ebfn tr\u00fac"], ["NCC-NT", "Nhu c\u1ea7u thi c\u00f4ng n\u1ed9i th\u1ea5t"], ["PC-KT", "Phong c\u00e1ch ki\u1ebfn tr\u00fac"], ["PC-NT", "Phong c\u00e1ch n\u1ed9i th\u1ea5t"], ["QCTC", "Quy c\u00e1ch thi c\u00f4ng"],
@@ -1477,7 +1478,8 @@ function writeWorkbook_(spreadsheet, record) {
       }
     } else {
       const rows = fieldRows.map(function(field) {
-        return [field[0], field[1], (record.details && record.details[field[0]]) || ""];
+        const value = (record.details && record.details[field[0]]) || "";
+        return [field[0], field[1], field[0] === "ZALO_GROUP_NAME" && /^\s*=/.test(value) ? "'" + value : value];
       });
       sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
     }
@@ -2152,76 +2154,6 @@ function syncWorkNotes_(payload) {
   return { ok: true, savedCount: notes.length, storage: driveSaved ? "drive" : "script-properties", driveWarning: virtualTest ? "Bùi Đức Thành đang ở chế độ khách ảo; giao việc chỉ lưu kho dùng chung, không tạo Drive." : driveSaved ? "" : "Drive hiện chỉ có quyền xem; ghi chú đã lưu vào kho dùng chung Apps Script." };
 }
 
-function completedWorkNotesFolder_(details) {
-  const root = rootFolder_();
-  const customers = getOrCreateFolder_(root, CUSTOMERS_FOLDER_NAME);
-  const yearFolder = getOrCreateFolder_(customers, String(details.year));
-  return getOrCreateFolder_(yearFolder, "T" + details.month);
-}
-
-function completeWorkNote_(payload) {
-  const details = workNotesPayload_(payload);
-  if (workflowReadProject_(details)) throw workflowError_("UPDATE_REQUIRED", "Ghi chú đã chuyển sang cơ chế giao việc mới. Hãy cập nhật ứng dụng trước khi hoàn thành.");
-  const note = normalizeWorkNotes_([payload.note || {}])[0];
-  if (!note || !note.actualDate) throw new Error("Cần xác nhận ngày hoàn thành trước khi lưu công việc vào Drive.");
-  const actorEmail = workNoteText_(payload.actorEmail, 240).toLowerCase();
-  const actorMember = /^member:/i.test(workNoteText_(note.assigneeEmail, 240)) ? employeeRosterMember_(actorEmail) : null;
-  if (!note.assigneeEmail || !assignmentMatchesEmployee_(note.assigneeEmail, actorEmail, actorMember)) throw new Error("Chỉ người được giao việc mới có thể xác nhận hoàn thành.");
-
-  // The Pancake test conversation is intentionally not backed by a customer
-  // folder. Keep completion in the shared property/cache store so the test
-  // exercises the same UI while never creating an Excel file or Drive folder.
-  if (isVirtualPancakeTestProject_(details)) {
-    const completedNote = { ...note, completedAt: workNoteText_(payload.note && payload.note.completedAt, 40) || new Date().toISOString() };
-    let projectNotes = readPropertyJson_(workNotesPropertyKey_(details));
-    projectNotes = Array.isArray(projectNotes) ? normalizeWorkNotes_(projectNotes) : [];
-    const noteIndex = projectNotes.findIndex(function(item) { return item.id === completedNote.id; });
-    if (noteIndex >= 0) projectNotes[noteIndex] = completedNote;
-    else projectNotes.push(completedNote);
-    writePropertyJson_(workNotesPropertyKey_(details), projectNotes);
-    cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
-    saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
-    return { ok: true, savedCount: 0, storage: "script-properties", virtual: true, driveWarning: "Bùi Đức Thành là khách ảo; không tạo tệp Drive." };
-  }
-
-  const folder = completedWorkNotesFolder_(details);
-  const file = findFileByName_(folder, COMPLETED_WORK_NOTES_FILE_NAME);
-  let records = [];
-  if (file) {
-    try {
-      const saved = JSON.parse(file.getBlob().getDataAsString() || "[]");
-      records = Array.isArray(saved) ? saved.slice(-1999) : [];
-    } catch (error) {
-      throw new Error("Không thể đọc kho ghi chú hoàn thành của tháng này.");
-    }
-  }
-  records = records.filter(function(record) { return String(record && record.id || "") !== note.id; });
-  records.push({
-    ...note,
-    projectId: details.projectId,
-    houseId: details.houseId,
-    savedAt: Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm"),
-  });
-  const content = JSON.stringify(records);
-  if (file) file.setContent(content);
-  else folder.createFile(COMPLETED_WORK_NOTES_FILE_NAME, content, MimeType.PLAIN_TEXT);
-  const workFolder = workNotesFolder_(details.year, details.month, details.projectId, true, details.houseId);
-  const activeFile = findFileByName_(workFolder, WORK_NOTES_FILE_NAME);
-  let projectNotes = [];
-  if (activeFile) {
-    try { projectNotes = normalizeWorkNotes_(JSON.parse(activeFile.getBlob().getDataAsString() || "[]")); } catch (error) { projectNotes = []; }
-  }
-  const completedNote = { ...note, completedAt: workNoteText_(payload.note && payload.note.completedAt, 40) || new Date().toISOString() };
-  const noteIndex = projectNotes.findIndex(function(item) { return item.id === completedNote.id; });
-  if (noteIndex >= 0) projectNotes[noteIndex] = completedNote;
-  else projectNotes.push(completedNote);
-  if (activeFile) activeFile.setContent(JSON.stringify(projectNotes));
-  else workFolder.createFile(WORK_NOTES_FILE_NAME, JSON.stringify(projectNotes), MimeType.PLAIN_TEXT);
-  saveActiveWorkNotes_(readActiveWorkNotes_().filter(function(record) { return String(record && record.id || "") !== note.id; }));
-  cacheJson_(workNotesCacheKey_(details), projectNotes, 21600);
-  return { ok: true, savedCount: records.length, folderUrl: folder.getUrl() };
-}
-
 // Pancake integration -------------------------------------------------------
 // Tokens are kept in Apps Script properties so they never ship to GitHub
 // Pages or appear in browser localStorage. Configure them once from the admin
@@ -2448,29 +2380,50 @@ function pancakeConversationPages_(context) {
 }
 
 function pancakeTargetMap_(payload) {
-  const map = {};
+  const map = Object.create(null);
   (Array.isArray(payload.customerTargets) ? payload.customerTargets : []).slice(0, 2000).forEach(function(target) {
     const houseId = workNoteText_(target && target.houseId, 160);
-    const key = normalizePancakeHouseId_(houseId);
-    if (!key) return;
-    map[key] = { houseId: houseId, projectId: workNoteText_(target.projectId, 160), customerName: workNoteText_(target.customerName, 240), zaloGroupName: workNoteText_(target.zaloGroupName, 400), year: Number(target.year) || 0, month: Number(target.month) || 0 };
+    const houseKey = normalizePancakeHouseId_(houseId);
+    if (!houseKey) return;
+    const projectId = workNoteText_(target.projectId, 160);
+    const year = Number(target.year) || 0;
+    const month = Number(target.month) || 0;
+    const key = JSON.stringify([houseKey, year, month, projectId]);
+    map[key] = {
+      houseId: houseId,
+      projectId: projectId,
+      customerName: workNoteText_(target.customerName, 240),
+      zaloGroupNames: pancakeTargetGroupNames_(target),
+      year: year,
+      month: month,
+    };
   });
   return map;
+}
+
+function pancakeTargetGroupNames_(target) {
+  const legacy = typeof target.zaloGroupName === "string" ? target.zaloGroupName : "";
+  const names = Array.isArray(target.zaloGroupNames) ? target.zaloGroupNames : legacy.split(/\r\n?|\n/);
+  return Array.from(new Set(names.slice(0, 50).filter(function(name) { return typeof name === "string"; }).map(normalizePancakeGroupName_).filter(Boolean)));
 }
 
 function pancakeTargetForGroupName_(targets, groupName) {
   const expected = normalizePancakeGroupName_(groupName);
   if (!expected) return null;
-  const keys = Object.keys(targets || {});
-  for (let index = 0; index < keys.length; index += 1) {
-    const target = targets[keys[index]];
-    if (target && target.zaloGroupName && normalizePancakeGroupName_(target.zaloGroupName) === expected) return target;
+  let match = null;
+  for (const target of Object.values(targets || {})) {
+    if (!target) continue;
+    const names = target.zaloGroupNames || pancakeTargetGroupNames_(target);
+    if (!names.includes(expected)) continue;
+    if (match) return null;
+    match = target;
   }
-  return null;
+  return match;
 }
 
 function groupPancakeMessages_(conversation, rawMessages, target, priorGroups) {
   const fallbackName = workNoteText_(conversation && conversation.page_customer && conversation.page_customer.name, 240) || workNoteText_(conversation && conversation.from && conversation.from.name, 240) || "Khách hàng";
+  const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
   const normalized = rawMessages.map(function(message, index) {
     const content = pancakeMessageText_(message);
     const sentAt = pancakeDateIso_(message && (message.inserted_at || message.created_at || message.sent_at || message.timestamp || message.time));
@@ -2483,10 +2436,10 @@ function groupPancakeMessages_(conversation, rawMessages, target, priorGroups) {
     let last = groups.find(function(group) { const first = new Date(group.firstMessageAt).getTime(); return messageTime >= first && messageTime - first < 2 * 60 * 60 * 1000; });
     if (!last) {
       const anchor = prior.find(function(group) { const first = new Date(group.firstMessageAt).getTime(); return messageTime >= first && messageTime - first < 2 * 60 * 60 * 1000; });
-      if (anchor) { last = { ...anchor, ...target, messages: (anchor.messages || []).slice(), messageCount: (anchor.messages || []).length }; groups.push(last); }
+      if (anchor) { last = { ...anchor, ...target, groupName: groupName, messages: (anchor.messages || []).slice(), messageCount: (anchor.messages || []).length }; groups.push(last); }
     }
     if (!last) {
-      groups.push({ id: "pancake-" + String(conversation.id) + "-" + message.sentAt, conversationId: String(conversation.id), groupName: workNoteText_(conversation && conversation.from && conversation.from.name, 400), houseId: target.houseId, projectId: target.projectId, customerName: target.customerName || fallbackName, year: target.year, month: target.month, messages: [message], firstMessageAt: message.sentAt, lastMessageAt: message.sentAt, messageCount: 1 });
+      groups.push({ id: "pancake-" + String(conversation.id) + "-" + message.sentAt, conversationId: String(conversation.id), groupName: groupName, houseId: target.houseId, projectId: target.projectId, customerName: target.customerName || fallbackName, year: target.year, month: target.month, messages: [message], firstMessageAt: message.sentAt, lastMessageAt: message.sentAt, messageCount: 1 });
     } else {
       const existing = last.messages.findIndex(function(line) { return line.id === message.id; });
       if (existing >= 0) last.messages[existing] = message; else last.messages.push(message);
@@ -2503,7 +2456,10 @@ function loadCustomerMessages_(payload) {
   if (!pancakeProperty_(PANCAKE_USER_TOKEN_PROPERTY) || !pancakeProperty_(PANCAKE_PAGE_TOKEN_PROPERTY)) return { ok: true, configured: false, messages: [] };
   const targets = pancakeTargetMap_(payload);
   const context = pancakePageContext_();
-  const targetFingerprint = Object.keys(targets).sort().map(function(key) { return key + ":" + normalizePancakeGroupName_(targets[key].zaloGroupName || ""); });
+  const targetFingerprint = Object.keys(targets).sort().map(function(key) {
+    const target = targets[key];
+    return [key, target.customerName, target.zaloGroupNames.slice().sort()];
+  });
   const cacheKey = "gmcrm-pancake-messages-" + workflowHash_(JSON.stringify(targetFingerprint));
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
   if (cached) {
@@ -2512,28 +2468,40 @@ function loadCustomerMessages_(payload) {
   }
   const conversations = pancakeConversationPages_(context);
   const priorStates = readPancakeMessageStates_();
-  const eligibleConversations = new Set();
+  const targetsByHouse = Object.create(null);
+  Object.values(targets).forEach(function(target) {
+    const key = normalizePancakeHouseId_(target.houseId);
+    const previous = targetsByHouse[key];
+    if (!previous || target.year > previous.year || (target.year === previous.year && target.month > previous.month)) targetsByHouse[key] = target;
+  });
+  const eligibleConversations = new Map();
   const groups = [];
   conversations.forEach(function(conversation) {
     const groupName = workNoteText_(conversation && conversation.from && conversation.from.name, 400);
     const houseKey = normalizePancakeHouseId_(pancakeHouseIdFromGroupName_(groupName));
     const isSpecialTestConversation = pancakeIsSpecialTestConversation_(groupName, conversation);
     const overrideTarget = pancakeTargetForGroupName_(targets, groupName);
+    const houseTarget = targetsByHouse[houseKey];
     // A Pancake group is useful to GM-CRM only when its name contains the
     // GM marker and the extracted house code matches a loaded customer.
     // Never surface an unassigned group in the all-customer overview.
     // The exact Bùi Đức Thành conversation is a temporary test exception. It
     // is allowed without a GM marker and is kept unassigned when no matching
     // customer record exists; every other conversation keeps the strict rule.
-    if (!isSpecialTestConversation && !overrideTarget && (!/\bGM\b/i.test(groupName) || !targets[houseKey])) return;
-    const target = isSpecialTestConversation ? (targets[houseKey] || pancakeSpecialTestTarget_(targets)) : (overrideTarget || targets[houseKey]);
-    eligibleConversations.add(String(conversation.id));
+    if (!isSpecialTestConversation && !overrideTarget && (!/\bGM\b/i.test(groupName) || !houseTarget)) return;
+    const selectedTarget = isSpecialTestConversation ? (houseTarget || pancakeSpecialTestTarget_(targets)) : (overrideTarget || houseTarget);
+    const { zaloGroupNames, ...target } = selectedTarget;
+    eligibleConversations.set(String(conversation.id), { ...target, groupName: groupName });
     let messages;
     try { messages = pancakeConversationMessages_(context, conversation); } catch (error) { return; }
     groupPancakeMessages_(conversation, messages.filter(function(message) { return isSpecialTestConversation || !pancakeIsPageMessage_(message, context.pageId); }), target, priorStates).forEach(function(group) { groups.push(group); });
   });
-  const states = workflowIngestMessages_(groups);
   const loadedIds = new Set(groups.map(function(group) { return group.id; }));
+  const remapped = priorStates.filter(function(state) { return !loadedIds.has(state.id) && eligibleConversations.has(String(state.conversationId)); }).flatMap(function(state) {
+    const next = { ...state, ...eligibleConversations.get(String(state.conversationId)) };
+    return pancakeMessageRouteChanged_(state, next) ? [next] : [];
+  });
+  const states = workflowIngestMessages_(groups.concat(remapped));
   const retained = states.filter(function(state) { return !loadedIds.has(state.id) && eligibleConversations.has(String(state.conversationId)) && (state.status !== "resolved" || state.archivePending); });
   const active = workflowMessagesView_(groups.concat(retained), states);
   const result = { ok: true, configured: true, pageName: context.pageName, messages: active };
@@ -2909,6 +2877,39 @@ function workflowCheckRevision_(payload, item) {
   if (payload.expectedRevision !== undefined && Number(payload.expectedRevision) !== Number(item.revision || 0)) throw workflowError_("CONFLICT", "Công việc đã được cập nhật trên thiết bị khác. Hãy tải lại trước khi sửa.");
 }
 
+function workflowAwaitingReview_(item) {
+  return Boolean(item.completionRequestedAt && !item.actualDate);
+}
+
+function workflowAssignmentAction_(payload, current, actor, now, accepting) {
+  if (current.reassignedAt && payload.expectedRevision === undefined) throw workflowError_("UPDATE_REQUIRED", "Công việc đã được giao lại. Hãy cập nhật ứng dụng và tải lại công việc.");
+  workflowCheckRevision_(payload, current);
+  if (current.actualDate || workflowAwaitingReview_(current)) return current;
+  const revision = Number(current.revision || 0) + 1;
+  if (accepting) {
+    if (current.acceptedAt) return current;
+    return { ...current, acceptedAt: now, acceptedBy: actor.account, revision: revision, updatedAt: now, ...(current.dueDate ? { status: workNoteStatus_(now, current.dueDate) } : {}) };
+  }
+  if (!current.acceptedAt) throw workflowError_("VALIDATION", "Hãy xác nhận nhận việc trước khi báo hoàn thành.");
+  return { ...current, completionRequestedAt: now, completionRequestedBy: actor.account, completionRequestedByName: actor.name, revision: revision, updatedAt: now };
+}
+
+function workflowReviewItem_(payload, current, actor, now, dateField, approving) {
+  if (!Number.isSafeInteger(payload.expectedRevision) || payload.expectedRevision < 1) throw workflowError_("VALIDATION", "Hãy tải lại công việc trước khi duyệt.");
+  workflowCheckRevision_(payload, current);
+  if (!workflowAwaitingReview_(current)) throw workflowError_("CONFLICT", "Công việc không còn chờ xác nhận hoàn thành.");
+  const next = { ...current, reviewedBy: actor.account, reviewedByName: actor.name, reviewedAt: now, revision: Number(current.revision || 0) + 1, updatedAt: now };
+  if (approving) {
+    const actualDate = Utilities.formatDate(new Date(current.completionRequestedAt), "Asia/Ho_Chi_Minh", "dd/MM/yyyy");
+    return { ...next, actualDate: actualDate, completedAt: now, archivePending: true };
+  }
+  const reviewComment = typeof payload.reviewComment === "string" ? payload.reviewComment.trim() : "";
+  if (!reviewComment || reviewComment.length > 4000) throw workflowError_("VALIDATION", "Hãy nhập nhận xét từ 1 đến 4.000 ký tự trước khi giao lại.");
+  return { ...next, [dateField]: workflowDueDate_(payload.dueDate, false), reviewComment: reviewComment, reassignedAt: now,
+    completionRequestedAt: "", completionRequestedBy: "", completionRequestedByName: "", acceptedAt: "", acceptedBy: "",
+    ...(dateField === "dueDate" ? { status: "Đen" } : {}) };
+}
+
 function workflowRequestSignature_(payload, actor) {
   const excluded = ["workflowSessionToken", "adminSessionToken", "token", "requestId"];
   const stable = function(value) {
@@ -2973,12 +2974,12 @@ function workflowArchiveItem_(details, item, kind) {
   return { folderUrl: month.getUrl() };
 }
 
-function workflowAttemptArchives_(state, onlyId, report, actor) {
+function workflowAttemptArchives_(state, onlyId, report, actor, onlyKind) {
   let changed = false;
   let attempted = 0;
   const archive = function(item, kind) {
     if (actor && !actor.manager && (kind !== "note" || !workflowAssigned_(actor, item))) return item;
-    if (!item.actualDate || !item.completedAt || (onlyId && item.id !== onlyId) || item.archivedAt || attempted >= 10) return item;
+    if (!item.actualDate || !item.completedAt || (onlyId && item.id !== onlyId) || (onlyKind && kind !== onlyKind) || item.archivedAt || attempted >= 10) return item;
     attempted += 1;
     let result;
     try {
@@ -3023,8 +3024,11 @@ function workflowCommand_(payload) {
   const operation = workNoteText_(payload.operation, 60);
   const requestId = workNoteText_(payload.requestId, 160);
   if (!requestId || requestId !== payload.requestId || !/^[A-Za-z0-9_.:-]{1,160}$/.test(requestId)) throw workflowError_("VALIDATION", "Thiếu mã yêu cầu cập nhật công việc hợp lệ.");
-  if (["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "design.publish", "design.accept", "design.complete", "message.status", "message.assign", "archive.retry"].indexOf(operation) < 0) throw workflowError_("VALIDATION", "Thao tác công việc không được hỗ trợ. Hãy cập nhật ứng dụng.");
-  if (/^(?:design|message)\./.test(operation) || operation === "archive.retry" && (payload.kind || payload.rowId)) workflowRequireManager_(actor);
+  if (["note.publish", "note.edit", "note.delete", "note.accept", "note.complete", "note.approve", "note.return", "design.publish", "design.accept", "design.complete", "design.approve", "design.return", "message.status", "message.assign", "archive.retry"].indexOf(operation) < 0) throw workflowError_("VALIDATION", "Thao tác công việc không được hỗ trợ. Hãy cập nhật ứng dụng.");
+  const reviewing = /\.(?:approve|return)$/.test(operation);
+  const approving = /\.approve$/.test(operation);
+  if (reviewing && !actor.manager) throw workflowError_("FORBIDDEN", "Chỉ ban quản lý được duyệt hoặc giao lại công việc.");
+  if (operation === "design.publish" || operation.indexOf("message.") === 0 || operation === "archive.retry" && (payload.kind || payload.rowId)) workflowRequireManager_(actor);
   if (operation === "message.status") return workflowMessageStatus_(payload, actor);
   let messageSource = null;
   let details;
@@ -3043,12 +3047,15 @@ function workflowCommand_(payload) {
   delete state._legacyImportChanged;
   const pruned = workflowPruneArchived_(state);
   const signature = workflowRequestSignature_(payload, actor);
+  const archiveKind = operation.indexOf("design.") === 0 ? "design:" + payload.kind : "note";
   const previousRequest = (state.requests || []).find(function(item) { return item.id === requestId; });
   if (previousRequest) {
     if (previousRequest.signature !== signature || previousRequest.actor !== actor.account) throw workflowError_("CONFLICT", "Mã yêu cầu đã được dùng cho nội dung hoặc nhân viên khác.");
     const archiveReport = {};
-    const canRetryArchive = operation === "note.complete" || operation === "design.complete" || operation === "archive.retry";
-    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport, actor);
+    // A completion accepted before reviews were introduced may still have an
+    // archive to deliver when its original request is replayed.
+    const canRetryArchive = approving || operation === "note.complete" || operation === "design.complete" || operation === "archive.retry";
+    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport, actor, operation === "archive.retry" ? undefined : archiveKind);
     if (archiveChanged) state.revision += 1;
     if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state, { kind: payload.kind, designChanged: Boolean(archiveReport.designChanged) }); }
     return workflowProjectResponse_(state, payload, previousRequest.targetId, true, actor);
@@ -3079,39 +3086,34 @@ function workflowCommand_(payload) {
       if (current.creatorEmail !== actor.account) throw workflowError_("FORBIDDEN", "Chỉ người tạo ghi chú mới có thể sửa hoặc xóa.");
       workflowCheckRevision_(payload, current);
       if (current.actualDate) throw workflowError_("FORBIDDEN", "Ghi chú đã hoàn thành được giữ nguyên để lưu lịch sử.");
+      if (workflowAwaitingReview_(current)) throw workflowError_("CONFLICT", "Ghi chú đang chờ ban quản lý xác nhận hoàn thành.");
       if (operation === "note.delete") { state.notes.splice(index, 1); state.deletedIds.push(targetId); }
       else state.notes[index] = workflowNewNote_({ ...payload.note, id: current.id }, actor, current);
+    } else if (reviewing) {
+      state.notes[index] = workflowReviewItem_(payload, current, actor, now, "dueDate", approving);
     } else {
       if (!workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách mới được nhận hoặc hoàn thành công việc này.");
-      if (!current.actualDate) {
-        if (operation === "note.accept") state.notes[index] = { ...current, acceptedAt: current.acceptedAt || now, acceptedBy: actor.account, revision: Number(current.revision || 0) + (current.acceptedAt ? 0 : 1), updatedAt: now, status: workNoteStatus_(now, current.dueDate) };
-        else {
-          if (!current.acceptedAt) throw workflowError_("VALIDATION", "Hãy xác nhận nhận việc trước khi hoàn thành.");
-          state.notes[index] = { ...current, actualDate: workflowToday_(), completedAt: now, archivePending: true, revision: Number(current.revision || 0) + 1, updatedAt: now };
-        }
-      }
+      state.notes[index] = workflowAssignmentAction_(payload, current, actor, now, operation === "note.accept");
     }
   } else if (operation.indexOf("design.") === 0) {
-    workflowDesignCommand_(state, payload, actor);
+    workflowDesignCommand_(state, { ...payload, operation: operation }, actor, now, reviewing, approving);
     targetId = String(payload.rowId || "");
   }
   state.revision += 1;
   workflowRememberRequest_(state, payload, signature, actor, targetId);
   workflowWriteProject_(state);
   const projection = { kind: payload.kind, designChanged: operation.indexOf("design.") === 0 };
-  if (operation === "note.complete" || operation === "design.complete" || operation === "archive.retry") {
-    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection, actor)) { state.revision += 1; workflowWriteProject_(state); }
+  if (approving || operation === "archive.retry") {
+    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection, actor, approving ? archiveKind : undefined)) { state.revision += 1; workflowWriteProject_(state); }
   }
   workflowProjectProjection_(state, projection);
   return workflowProjectResponse_(state, payload, targetId, false, actor);
 }
 
-function workflowDesignCommand_(state, payload, actor) {
-  workflowRequireManager_(actor);
+function workflowDesignCommand_(state, payload, actor, now, reviewing, approving) {
   const kind = String(payload.kind || "");
   if (DESIGN_TASK_KINDS.indexOf(kind) < 0) throw workflowError_("VALIDATION", "Loại thiết kế không hợp lệ.");
   const currentRows = state.design[kind] || [];
-  const now = new Date().toISOString();
   if (payload.operation === "design.publish") {
     const incoming = Array.isArray(payload.rows) ? payload.rows : [];
     if (!incoming.length || incoming.length > 300) throw workflowError_("VALIDATION", "Hãy chọn các hạng mục thiết kế cần phát hành.");
@@ -3133,6 +3135,11 @@ function workflowDesignCommand_(state, payload, actor) {
       const editingPublished = Boolean(current && current.publishedAt && (changed || dirtyAcknowledgement));
       if (editingPublished && (!actor.manager && current.creatorEmail !== actor.account)) throw workflowError_("FORBIDDEN", "Chỉ người phát hành hoặc quản lý mới được thay đổi hạng mục đã giao.");
       if (editingPublished && current.actualDate) throw workflowError_("FORBIDDEN", "Hạng mục đã hoàn thành được giữ nguyên để lưu lịch sử.");
+      if (current && workflowAwaitingReview_(current)) {
+        if (editingPublished) throw workflowError_("CONFLICT", "Hạng mục đang chờ ban quản lý xác nhận hoàn thành.");
+        published += 1;
+        return;
+      }
       if (editingPublished && Number(draft.revision || 0) !== Number(current.revision || 0)) throw workflowError_("CONFLICT", "Hạng mục thiết kế đã được cập nhật trên thiết bị khác. Hãy tải lại.");
       const reassigned = current && current.assigneeEmail !== assignee.account;
       const row = { ...current, id: id, isCustom: Boolean(draft.isCustom), content: content, plannedDate: dueDate, assigneeEmail: assignee.account, assignee: assignee.name, note: workNoteText_(draft.note, 4000),
@@ -3149,11 +3156,10 @@ function workflowDesignCommand_(state, payload, actor) {
   const index = currentRows.findIndex(function(row) { return row.id === payload.rowId; });
   const current = currentRows[index];
   if (!current || !current.publishedAt) throw workflowError_("NOT_FOUND", "Hạng mục chưa được phát hành hoặc không còn tồn tại.");
-  if (current.actualDate) return;
-  if (payload.operation === "design.accept") currentRows[index] = { ...current, acceptedAt: current.acceptedAt || now, acceptedBy: actor.account, revision: Number(current.revision || 0) + (current.acceptedAt ? 0 : 1), updatedAt: now };
+  if (reviewing) currentRows[index] = workflowReviewItem_(payload, current, actor, now, "plannedDate", approving);
   else {
-    if (!current.acceptedAt) throw workflowError_("VALIDATION", "Hãy xác nhận nhận việc trước khi hoàn thành hạng mục.");
-    currentRows[index] = { ...current, actualDate: workflowToday_(), completedAt: now, archivePending: true, revision: Number(current.revision || 0) + 1, updatedAt: now };
+    if (!actor.manager && !workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách hoặc ban quản lý được nhận hoặc báo hoàn thành hạng mục.");
+    currentRows[index] = workflowAssignmentAction_(payload, current, actor, now, payload.operation === "design.accept");
   }
   state.design[kind] = currentRows;
 }
@@ -3219,6 +3225,10 @@ function workflowMessageLineKey_(line) {
   return workflowHash_(JSON.stringify([line.id, line.sentAt, line.senderName, line.content]));
 }
 
+function pancakeMessageRouteChanged_(previous, next) {
+  return ["groupName", "houseId", "projectId", "customerName", "year", "month"].some(function(key) { return previous[key] !== next[key]; });
+}
+
 function workflowIngestMessages_(groups) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -3239,7 +3249,7 @@ function workflowIngestMessages_(groups) {
       const fresh = group.messages.some(function(line) { return archivedKeys.indexOf(workflowMessageLineKey_(line)) < 0; });
       const sourceChanged = JSON.stringify(previous.messages || []) !== JSON.stringify(group.messages);
       const reopened = previous.status === "resolved" && fresh && sourceChanged;
-      if (sourceChanged || reopened || !Array.isArray(previous.archivedLineKeys)) {
+      if (sourceChanged || reopened || pancakeMessageRouteChanged_(previous, group) || !Array.isArray(previous.archivedLineKeys)) {
         byId.set(group.id, { ...previous, ...group, archivedLineKeys: archivedKeys, archivedAt: previous.archivedAt || (previous.status === "resolved" && !previous.archivePending ? previous.resolvedAt || previous.statusUpdatedAt || "" : ""), status: reopened ? "new" : normalizePancakeMessageStatus_(previous.status), resolvedAt: reopened ? "" : previous.resolvedAt || "", revision: Number(previous.revision || 0) + 1 });
         changed = true;
       }
