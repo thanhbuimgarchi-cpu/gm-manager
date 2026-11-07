@@ -22,6 +22,7 @@ function fixture(shared) {
     { id: "bob", name: "Trần Bình", email: "bob@example.com", status: "Có", loginCode: "003", role: "Nhân viên kỹ thuật", permissions: ["Ghi chú", "Thiết kế"] },
     { id: "manager", name: "Quản lý", email: "manager@example.com", status: "Có", loginCode: "004", role: "Quản lý chung", permissions: [] },
     { id: "viewer", name: "Người xem", email: "viewer@example.com", status: "Có", loginCode: "005", role: "Marketing", permissions: [] },
+    { id: "otherManager", name: "Quản lý thứ hai", email: "other-manager@example.com", status: "Có", loginCode: "006", role: "Quản lý chung", permissions: [] },
   ];
   const properties = { getProperty: key => { propertyReads.push(key); return values.get(key) ?? null; }, setProperty: (key, value) => { propertyWrites.push(key); values.set(key, String(value)); }, deleteProperty: key => values.delete(key) };
   const context = vm.createContext({
@@ -60,7 +61,7 @@ function fixture(shared) {
   const command = (actor, operation, payload = {}) => context.workflowCommand_({ ...scope, operation, requestId: `qa-request-${++request}`, workflowSessionToken: tokens[actor], ...payload });
   const note = (id, extra = {}) => ({ id, priority: "Bình thường", workType: "Tư vấn", content: `Công việc ${id}`, dueDate: "30/10/2026", assigneeEmail: "alice@example.com", ...extra });
   const message = (id = "pancake-qa-2026-10-28", extra = {}) => ({ id, conversationId: "qa-conversation", groupName: "QA-101-GM-Tư vấn", ...scope, messages: [{ id: "line-one", senderName: "Khách", content: "Xin sửa phương án", sentAt: "2026-10-28T02:00:00Z" }], firstMessageAt: "2026-10-28T02:00:00Z", lastMessageAt: "2026-10-28T02:00:00Z", messageCount: 1, ...extra });
-  const loadNotes = (actor = "admin") => context.loadWorkNotes_({ ...scope, workflowSessionToken: tokens[actor] });
+  const loadNotes = (actor = "manager") => context.loadWorkNotes_({ ...scope, workflowSessionToken: tokens[actor] });
   return { context, values, cache, propertyReads, propertyWrites, cacheWrites, clock, personnel, tokens, admin, command, note, message, loadNotes, driveCalls: () => driveCalls };
 }
 
@@ -72,6 +73,7 @@ test("workflow commands authenticate signed sessions and re-check active roster 
   const before = [...f.values];
   assert.throws(() => f.context.workflowCommand_({ ...scope, operation: "note.publish", requestId: "qa-forged", actorEmail: "admin", note: f.note("forged") }), code("AUTH_REQUIRED"));
   assert.throws(() => f.command("viewer", "note.publish", { note: f.note("forbidden") }), code("FORBIDDEN"));
+  assert.throws(() => f.command("creator", "note.publish", { note: f.note("staff-forged") }), code("FORBIDDEN"));
   const alice = f.personnel.find(member => member.id === "alice");
   alice.status = "Ngưng";
   assert.throws(() => f.command("alice", "note.publish", { note: f.note("inactive") }), code("AUTH_REQUIRED"));
@@ -86,10 +88,10 @@ test("workflow commands authenticate signed sessions and re-check active roster 
 test("publishing validates real dates, active assignee and content before changing state", () => {
   const f = fixture();
   const before = [...f.values];
-  for (const patch of [{ dueDate: "31/02/2026" }, { dueDate: "27/10/2026" }, { dueDate: "" }, { assigneeEmail: "missing@example.com" }, { content: "   " }]) assert.throws(() => f.command("creator", "note.publish", { note: f.note("bad", patch) }), code("VALIDATION"));
+  for (const patch of [{ dueDate: "31/02/2026" }, { dueDate: "27/10/2026" }, { dueDate: "" }, { assigneeEmail: "missing@example.com" }, { content: "   " }]) assert.throws(() => f.command("manager", "note.publish", { note: f.note("bad", patch) }), code("VALIDATION"));
   assert.deepEqual([...f.values], before);
-  const published = f.command("creator", "note.publish", { note: f.note("valid", { acceptedAt: "forged", actualDate: "forged", creatorEmail: "admin" }) });
-  assert.equal(published.note.creatorEmail, "creator@example.com");
+  const published = f.command("manager", "note.publish", { note: f.note("valid", { acceptedAt: "forged", actualDate: "forged", creatorEmail: "admin" }) });
+  assert.equal(published.note.creatorEmail, "manager@example.com");
   assert.equal(published.note.acceptedAt, "");
   assert.equal(published.note.actualDate, "");
   assert.equal(published.note.status, "Đen");
@@ -99,18 +101,18 @@ test("publishing validates real dates, active assignee and content before changi
 test("request replay is idempotent and rejects the same id with different content", () => {
   const f = fixture();
   const payload = { note: f.note("one"), requestId: "stable-publish" };
-  const first = f.command("creator", "note.publish", payload);
-  const replay = f.command("creator", "note.publish", payload);
+  const first = f.command("manager", "note.publish", payload);
+  const replay = f.command("manager", "note.publish", payload);
   assert.equal(replay.repeated, true);
   assert.equal(replay.notes.length, 1);
   assert.equal(replay.revision, first.revision);
-  assert.throws(() => f.command("creator", "note.publish", { ...payload, note: { ...payload.note, content: "khác" } }), code("CONFLICT"));
+  assert.throws(() => f.command("manager", "note.publish", { ...payload, note: { ...payload.note, content: "khác" } }), code("CONFLICT"));
 });
 
 test("assignee completion reaches manager review without closing, archiving or exposing colleagues' work", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("alice-task") });
-  f.command("creator", "note.publish", { note: f.note("bob-task", { assigneeEmail: "bob@example.com" }) });
+  f.command("manager", "note.publish", { note: f.note("alice-task") });
+  f.command("manager", "note.publish", { note: f.note("bob-task", { assigneeEmail: "bob@example.com" }) });
   assert.throws(() => f.command("bob", "note.accept", { noteId: "alice-task" }), code("FORBIDDEN"));
   assert.throws(() => f.command("alice", "note.complete", { noteId: "alice-task" }), code("VALIDATION"));
   f.command("alice", "note.accept", { noteId: "alice-task" });
@@ -132,7 +134,7 @@ test("assignee completion reaches manager review without closing, archiving or e
   assert.ok(f.loadNotes().notes.find(note => note.id === "bob-task").acceptedAt);
   const review = { noteId: result.note.id, expectedRevision: result.note.revision };
   assert.throws(() => f.command("alice", "note.approve", { ...review, manager: true }), code("FORBIDDEN"));
-  assert.throws(() => f.command("creator", "note.delete", review), code("CONFLICT"));
+  assert.throws(() => f.command("manager", "note.delete", review), code("CONFLICT"));
   assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.find(note => note.id === "alice-task").completionRequestedAt, result.note.completionRequestedAt);
   assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice }).notes.length, 1);
   f.clock.now += 86400000;
@@ -149,7 +151,7 @@ test("assignee completion reaches manager review without closing, archiving or e
 
 test("unarchived completion survives retention and retries safely without changing completion date", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("archive") });
+  f.command("manager", "note.publish", { note: f.note("archive") });
   f.command("alice", "note.accept", { noteId: "archive" });
   let archives = 0;
   f.context.workflowArchiveItem_ = () => { archives += 1; throw new Error("Drive unavailable"); };
@@ -172,12 +174,12 @@ test("unarchived completion survives retention and retries safely without changi
 
 test("creator edits are revision-checked and reassignment requires a fresh acceptance", () => {
   const f = fixture();
-  const original = f.command("creator", "note.publish", { note: f.note("edit") }).note;
-  assert.throws(() => f.command("manager", "note.edit", { note: { ...original, content: "not creator" }, expectedRevision: original.revision }), code("FORBIDDEN"));
+  const original = f.command("manager", "note.publish", { note: f.note("edit") }).note;
+  assert.throws(() => f.command("otherManager", "note.edit", { note: { ...original, content: "not creator" }, expectedRevision: original.revision }), code("FORBIDDEN"));
   f.command("alice", "note.accept", { noteId: "edit" });
-  assert.throws(() => f.command("creator", "note.edit", { note: { ...original, content: "stale" }, expectedRevision: original.revision }), code("CONFLICT"));
+  assert.throws(() => f.command("manager", "note.edit", { note: { ...original, content: "stale" }, expectedRevision: original.revision }), code("CONFLICT"));
   const current = f.loadNotes().notes[0];
-  const changed = f.command("creator", "note.edit", { note: { ...current, assigneeEmail: "bob@example.com" }, expectedRevision: current.revision }).note;
+  const changed = f.command("manager", "note.edit", { note: { ...current, assigneeEmail: "bob@example.com" }, expectedRevision: current.revision }).note;
   assert.equal(changed.acceptedAt, "");
   assert.equal(changed.actualDate, "");
   assert.equal(changed.status, "Đen");
@@ -187,14 +189,14 @@ test("creator edits are revision-checked and reassignment requires a fresh accep
 
 test("deletion tombstones persist across server instances and reject legacy resurrection", () => {
   const f = fixture();
-  const note = f.command("creator", "note.publish", { note: f.note("deleted") }).note;
-  f.command("creator", "note.delete", { noteId: note.id, expectedRevision: note.revision });
+  const note = f.command("manager", "note.publish", { note: f.note("deleted") }).note;
+  f.command("manager", "note.delete", { noteId: note.id, expectedRevision: note.revision });
   const later = fixture(f.values);
   const loaded = later.loadNotes();
   assert.deepEqual(plain(loaded.notes), []);
   assert.deepEqual(plain(loaded.deletedIds), ["deleted"]);
   assert.throws(() => later.context.syncWorkNotes_({ ...scope, notes: [note] }), code("UPDATE_REQUIRED"));
-  assert.throws(() => later.command("creator", "note.publish", { note }), code("CONFLICT"));
+  assert.throws(() => later.command("manager", "note.publish", { note }), code("CONFLICT"));
 });
 
 test("assigned staff submit design for review, managers approve and stale workspace saves cannot undo it", () => {
@@ -247,7 +249,7 @@ test("returning a submitted task requires valid feedback and a date, then starts
     const assigned = fixture => domain === "note"
       ? fixture.context.loadAssignedWorkNotes_({ workflowSessionToken: fixture.tokens.alice }).notes
       : fixture.context.loadAssignedDesignTasks_({ workflowSessionToken: fixture.tokens.alice }).tasks;
-    if (domain === "note") f.command("creator", "note.publish", { note: f.note(id) });
+    if (domain === "note") f.command("manager", "note.publish", { note: f.note(id) });
     else f.command("manager", "design.publish", { kind: scope.kind, rows: [{ id, content: "Mặt bằng", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026" }] });
     const accepted = item(f.command("alice", `${domain}.accept`, scope));
     const submission = { ...scope, expectedRevision: accepted.revision, requestId: `submit-${domain}` };
@@ -267,7 +269,8 @@ test("returning a submitted task requires valid feedback and a date, then starts
     assert.ok(returned.reassignedAt);
     assert.equal(f.command("manager", `${domain}.return`, change).repeated, true);
     assert.equal(f.command("alice", `${domain}.complete`, submission).repeated, true, "replaying a prior submission cannot reopen a review");
-    assert.throws(() => f.command("admin", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision }), code("CONFLICT"));
+    assert.throws(() => f.command("admin", `${domain}.approve`, { ...scope, expectedRevision: returned.revision }), code("FORBIDDEN"));
+    assert.throws(() => f.command("manager", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision }), code("CONFLICT"));
     assert.throws(() => f.command("alice", `${domain}.accept`, scope), code("UPDATE_REQUIRED"));
     assert.throws(() => f.command("alice", `${domain}.complete`, { ...scope, expectedRevision: returned.revision }), code("VALIDATION"));
     const restarted = fixture(f.values);
@@ -277,9 +280,9 @@ test("returning a submitted task requires valid feedback and a date, then starts
     const reaccepted = item(restarted.command("alice", `${domain}.accept`, { ...scope, expectedRevision: reassigned.revision, requestId: `reaccept-${domain}` }));
     assert.equal(reaccepted.reviewComment, returned.reviewComment);
     const second = item(restarted.command("alice", `${domain}.complete`, { ...scope, expectedRevision: reaccepted.revision, requestId: `resubmit-${domain}` }));
-    assert.throws(() => restarted.command("admin", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision, requestId: `approve-stale-${domain}` }), code("CONFLICT"));
+    assert.throws(() => restarted.command("manager", `${domain}.approve`, { ...scope, expectedRevision: submitted.revision, requestId: `approve-stale-${domain}` }), code("CONFLICT"));
     restarted.context.workflowArchiveItem_ = () => ({});
-    const approved = item(restarted.command("admin", `${domain}.approve`, { ...scope, expectedRevision: second.revision, requestId: `approve-current-${domain}` }));
+    const approved = item(restarted.command("manager", `${domain}.approve`, { ...scope, expectedRevision: second.revision, requestId: `approve-current-${domain}` }));
     assert.equal(approved.actualDate, "28/10/2026");
     assert.equal(assigned(restarted).length, 0);
   }
@@ -329,7 +332,7 @@ test("normalized roster manager titles have admin message actions while admin-on
 
 test("consulting and draft design fields are protected from employee cache writes while warranty updates remain available", () => {
   const f = fixture();
-  const years = f.context.loadWorkspaceCache_().years;
+  const years = f.context.loadWorkspaceCache_({ workflowSessionToken: f.tokens.manager }).years;
   const record = years[0].months[9].records[0];
   const managerVersion = { ...record, name: "Thông tin do quản lý lưu", details: { HVT: "Tên đã duyệt", ZALO_GROUP_NAME: "QA-101-GM" }, functionalFloors: [{ id: "floor", floor: "Tầng 1", rooms: [] }], designProgress: [{ id: "draft", content: "Bản nháp thiết kế", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com" }] };
   years[0].months[9].records = [managerVersion];
@@ -337,8 +340,17 @@ test("consulting and draft design fields are protected from employee cache write
   const employeeYears = plain(years);
   Object.assign(employeeYears[0].months[9].records[0], { name: "Sửa trái quyền", details: { HVT: "Sửa trái quyền" }, functionalFloors: [], designProgress: [], customerShareToken: "forged-share", warrantyProgress: [{ id: "warranty", note: "Cập nhật ngoài phạm vi chỉ xem" }] });
   f.context.saveWorkspaceCache_({ years: employeeYears, updatedAt: 101, workflowSessionToken: f.tokens.alice });
-  const saved = f.context.loadWorkspaceCache_().years[0].months[9].records[0];
-  for (const field of ["name", "details", "functionalFloors", "designProgress"]) assert.deepEqual(plain(saved[field]), plain(managerVersion[field]));
+  const saved = f.context.loadWorkspaceCache_({ workflowSessionToken: f.tokens.manager }).years[0].months[9].records[0];
+  for (const field of ["name", "details", "functionalFloors"]) assert.deepEqual(plain(saved[field]), plain(managerVersion[field]));
+  assert.deepEqual(plain(saved.designProgress), [{ ...managerVersion.designProgress[0], creatorEmail: "manager@example.com", creatorName: "Quản lý" }]);
+  const staffRecord = f.context.loadWorkspaceCache_({ workflowSessionToken: f.tokens.alice }).years[0].months[9].records[0];
+  assert.deepEqual(plain(staffRecord.designProgress), [], "staff can only see published design assignments");
+  const otherManagerYears = f.context.loadWorkspaceCache_({ workflowSessionToken: f.tokens.otherManager }).years;
+  assert.deepEqual(plain(otherManagerYears[0].months[9].records[0].designProgress), [], "the second manager cannot read the first manager's draft");
+  otherManagerYears[0].months[9].records[0].designProgress = [{ id: "other-draft", content: "Nháp riêng" }];
+  f.context.saveWorkspaceCache_({ years: otherManagerYears, updatedAt: 102, workflowSessionToken: f.tokens.otherManager });
+  const retainedDrafts = f.context.loadWorkspaceCache_({ workflowSessionToken: f.tokens.manager }).years[0].months[9].records[0].designProgress;
+  assert.deepEqual(plain(retainedDrafts), plain(saved.designProgress), "the second manager's filtered cache write cannot erase a hidden draft");
   assert.equal(saved.customerShareToken, undefined);
   assert.equal(saved.warrantyProgress[0].id, "warranty");
   assert.equal(f.driveCalls(), 0);
@@ -396,7 +408,7 @@ test("resolved messages remain visible until archive succeeds and reopen for fre
 
 test("completion dates follow Vietnam calendar across UTC midnight", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("timezone", { dueDate: "29/10/2026" }) });
+  f.command("manager", "note.publish", { note: f.note("timezone", { dueDate: "29/10/2026" }) });
   f.command("alice", "note.accept", { noteId: "timezone" });
   f.clock.now = Date.parse("2026-10-28T18:00:00Z");
   f.context.workflowArchiveItem_ = () => ({});
@@ -435,23 +447,87 @@ test("doPost returns actionable workflow errors without accepting spoofed actor 
 
 test("canonical reads ignore claimed admin email and expose only the signed employee's permitted notes", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("alice-private") });
-  f.command("creator", "note.publish", { note: f.note("bob-private", { assigneeEmail: "bob@example.com" }) });
+  f.command("manager", "note.publish", { note: f.note("alice-private") });
+  f.command("manager", "note.publish", { note: f.note("bob-private", { assigneeEmail: "bob@example.com" }) });
   assert.throws(() => f.context.loadWorkNotes_({ ...scope, email: "admin" }), code("AUTH_REQUIRED"));
   const project = f.context.loadWorkNotes_({ ...scope, email: "admin", workflowSessionToken: f.tokens.alice });
   assert.deepEqual(plain(project.notes.map(note => note.id)), ["alice-private"]);
   const overview = f.context.loadAssignedWorkNotes_({ email: "admin", workflowSessionToken: f.tokens.bob });
   assert.deepEqual(plain(overview.notes.map(note => note.id)), ["bob-private"]);
-  assert.deepEqual(plain(f.context.loadAssignedWorkNotes_({ email: "admin" }).notes), []);
-  const creator = f.loadNotes("creator");
-  assert.equal(creator.notes.length, 2, "the original creator retains edit access");
+  assert.throws(() => f.context.loadAssignedWorkNotes_({ email: "admin" }), code("AUTH_REQUIRED"));
+  assert.equal(f.loadNotes("manager").notes.length, 2, "the assignment owner retains access");
+  assert.equal(f.loadNotes("creator").notes.length, 0, "another permitted employee has no assignment");
   f.personnel.find(member => member.id === "alice").permissions = [];
   assert.throws(() => f.loadNotes("alice"), code("FORBIDDEN"));
 });
 
+test("assignment ownership isolates two managers, admin and staff in project snapshots, queues and commands", () => {
+  const f = fixture();
+  const assignments = [
+    ["manager", "manager-work", "alice@example.com"],
+    ["otherManager", "other-manager-work", "bob@example.com"],
+    ["admin", "admin-work", "alice@example.com"],
+  ];
+  const designRow = (id, assigneeEmail) => ({ id, content: `Thiết kế ${id}`, plannedDate: "30/10/2026", assigneeEmail });
+  const ids = items => plain(items.map(item => item.id)).sort();
+  for (const [owner, id, assignee] of assignments) {
+    const published = f.command(owner, "note.publish", { note: f.note(id, { assigneeEmail: assignee, creatorEmail: "forged@example.com" }) });
+    assert.deepEqual(ids(published.notes), [id], "note publication returns only the assigning account's notes");
+    const designed = f.command(owner, "design.publish", { kind: "architecture", rows: [designRow(id, assignee)] });
+    assert.deepEqual(ids(designed.rows.filter(row => row.publishedAt)), [id], "design publication returns only the assigning account's rows");
+  }
+  const historical = f.context.workflowReadProject_(scope);
+  historical.notes.push(f.note("legacy-cross-manager", { assigneeEmail: "other-manager@example.com", creatorEmail: "manager@example.com", revision: 1 }));
+  historical.design.architecture.push({ ...designRow("legacy-cross-manager", "other-manager@example.com"), creatorEmail: "manager@example.com", publishedAt: "2026-10-28T02:00:00.000Z", revision: 1 });
+  f.context.workflowWriteProject_(historical);
+  const expected = {
+    manager: ["legacy-cross-manager", "manager-work"],
+    otherManager: ["other-manager-work"],
+    admin: ["admin-work"],
+    alice: ["admin-work", "manager-work"],
+    bob: ["other-manager-work"],
+  };
+  for (const [account, visible] of Object.entries(expected)) {
+    const session = { workflowSessionToken: f.tokens[account], email: "admin" };
+    assert.deepEqual(ids(f.loadNotes(account).notes), visible, `${account} project notes`);
+    const noteFeed = f.context.loadAssignedWorkNotes_({ ...session, project: scope });
+    assert.deepEqual(ids(noteFeed.notes), visible, `${account} note queue`);
+    assert.deepEqual(ids(noteFeed.projectSnapshot.notes), visible, `${account} project poll snapshot`);
+    assert.deepEqual(ids(f.context.loadAssignedDesignTasks_(session).tasks), visible, `${account} design queue`);
+    const workspace = f.context.loadWorkspaceCache_(session);
+    const record = workspace.years[0].months[9].records[0];
+    assert.deepEqual(ids(record.designProgress.filter(row => row.publishedAt)), visible, `${account} workspace design cache`);
+  }
+  assert.throws(() => f.context.loadAssignedDesignTasks_({ email: "admin" }), code("AUTH_REQUIRED"));
+  assert.deepEqual(ids(f.context.loadWorkspaceCache_().years[0].months[9].records[0].designProgress), [], "the unsigned workspace view cannot expose published assignments");
+
+  const note = f.loadNotes("manager").notes.find(item => item.id === "manager-work");
+  assert.throws(() => f.command("otherManager", "note.delete", { noteId: note.id, expectedRevision: note.revision }), code("FORBIDDEN"));
+  assert.throws(() => f.command("otherManager", "design.publish", { kind: "architecture", rows: [designRow(note.id, "bob@example.com")] }), code("FORBIDDEN"));
+  assert.throws(() => f.command("otherManager", "note.accept", { noteId: "legacy-cross-manager" }), code("FORBIDDEN"));
+  assert.throws(() => f.command("otherManager", "design.accept", { kind: "architecture", rowId: "legacy-cross-manager" }), code("FORBIDDEN"));
+  assert.throws(() => f.command("manager", "note.publish", { note: f.note("hidden-for-assignee", { assigneeEmail: "other-manager@example.com" }) }), code("VALIDATION"));
+  assert.throws(() => f.command("manager", "design.publish", { kind: "architecture", rows: [designRow("hidden-for-assignee", "other-manager@example.com")] }), code("VALIDATION"));
+  for (const [domain, target] of [["note", { noteId: note.id }], ["design", { kind: "architecture", rowId: note.id }]]) {
+    const item = result => domain === "note" ? result.note : result.rows.find(row => row.id === note.id);
+    f.command("alice", `${domain}.accept`, target);
+    const requested = item(f.command("alice", `${domain}.complete`, target));
+    const decision = { ...target, expectedRevision: requested.revision };
+    for (const wrongOwner of ["otherManager", "admin"]) {
+      assert.throws(() => f.command(wrongOwner, `${domain}.approve`, decision), code("FORBIDDEN"));
+      assert.throws(() => f.command(wrongOwner, `${domain}.return`, { ...decision, reviewComment: "Không được duyệt", dueDate: "31/10/2026" }), code("FORBIDDEN"));
+      assert.throws(() => f.command(wrongOwner, "archive.retry", target), code("FORBIDDEN"));
+    }
+    f.context.workflowArchiveItem_ = () => ({});
+    assert.equal(item(f.command("manager", `${domain}.approve`, decision)).actualDate, "28/10/2026");
+  }
+  assert.equal(f.command("manager", "note.publish", { note: f.note("own-assignment", { assigneeEmail: "manager@example.com" }) }).note.assigneeEmail, "manager@example.com");
+  assert.equal(f.command("manager", "design.publish", { kind: "architecture", rows: [designRow("own-assignment", "manager@example.com")] }).rows.find(row => row.id === "own-assignment").assigneeEmail, "manager@example.com");
+});
+
 test("read-only workflow polling reuses six-second snapshots and commits invalidate project/index caches", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("cache-one") });
+  f.command("manager", "note.publish", { note: f.note("cache-one") });
   const projectKey = f.context.workflowProjectKey_(scope);
   const cacheKey = f.context.workflowReadCacheKey_(projectKey);
   const indexCacheKey = f.context.workflowReadCacheKey_("gmcrm-workflow-project-index-v2");
@@ -461,21 +537,21 @@ test("read-only workflow polling reuses six-second snapshots and commits invalid
   f.propertyReads.length = 0;
   f.loadNotes();
   assert.equal(f.propertyReads.filter(key => key.startsWith(`${projectKey}:`)).length, 0, "cache hit avoids project manifest/chunk reads");
-  f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.admin });
+  f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager });
   assert.ok(f.cache.has(indexCacheKey));
   f.command("alice", "note.accept", { noteId: "cache-one" });
   assert.equal(f.cache.has(cacheKey), false, "a committed acknowledgement invalidates the read snapshot");
   assert.ok(f.loadNotes().notes[0].acceptedAt);
   const nextScope = { ...scope, projectId: "GM-QA-ANOTHER", houseId: "QA-102" };
   f.context.writePropertyJson_(f.context.workNotesPropertyKey_(nextScope), []);
-  f.command("creator", "note.publish", { ...nextScope, note: f.note("cache-two") });
+  f.command("manager", "note.publish", { ...nextScope, note: f.note("cache-two") });
   assert.equal(f.cache.has(indexCacheKey), false, "a newly indexed project invalidates the registry snapshot");
-  assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.admin }).notes.length, 2);
+  assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.length, 2);
 });
 
 test("mutations ignore an old poll snapshot reinserted after cache invalidation", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("stale-cache") });
+  f.command("manager", "note.publish", { note: f.note("stale-cache") });
   f.loadNotes();
   const cacheKey = f.context.workflowReadCacheKey_(f.context.workflowProjectKey_(scope));
   const oldSnapshot = f.cache.get(cacheKey);
@@ -494,7 +570,7 @@ test("mutations ignore an old poll snapshot reinserted after cache invalidation"
 
 test("large or unavailable read caches do not block authoritative workflow reads", () => {
   const f = fixture();
-  const state = { version: 2, details: scope, revision: 1, notes: [f.note("large", { content: "ấ".repeat(31000), creatorEmail: "creator@example.com", acceptedAt: "" })], design: {}, deletedIds: [], requests: [] };
+  const state = { version: 2, details: scope, revision: 1, notes: [f.note("large", { content: "ấ".repeat(31000), creatorEmail: "manager@example.com", acceptedAt: "" })], design: {}, deletedIds: [], requests: [] };
   f.context.workflowWriteProject_(state);
   const cacheKey = f.context.workflowReadCacheKey_(f.context.workflowProjectKey_(scope));
   assert.equal(f.loadNotes().notes[0].content.length, 31000);
@@ -505,7 +581,7 @@ test("large or unavailable read caches do not block authoritative workflow reads
 
 test("corrupted canonical state fails closed instead of migrating an older legacy projection", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("do-not-reset") });
+  f.command("manager", "note.publish", { note: f.note("do-not-reset") });
   f.loadNotes();
   const key = f.context.workflowProjectKey_(scope);
   f.values.set(`${key}:manifest`, "{corrupted-manifest");
@@ -555,7 +631,7 @@ test("publishing a reverted dirty design draft advances its acknowledgement revi
 test("first-time notes and design assignments remain usable when legacy Drive import is denied", () => {
   const f = fixture();
   f.context.clearPropertyJson_(f.context.workNotesPropertyKey_(scope));
-  const published = f.command("creator", "note.publish", { note: f.note("first-cache-note") });
+  const published = f.command("manager", "note.publish", { note: f.note("first-cache-note") });
   assert.equal(published.note.id, "first-cache-note");
   assert.equal(published.legacyImportPending, true);
   assert.equal(f.driveCalls(), 1, "first publish only attempts the read-only legacy import");
@@ -584,34 +660,35 @@ test("deferred legacy import merges unknown notes without overwriting new versio
   const f = fixture();
   f.context.clearPropertyJson_(f.context.workNotesPropertyKey_(scope));
   const draft = f.note("same-id", { content: "Bản mới đã xác nhận" });
-  f.command("creator", "note.publish", { note: draft, requestId: "first-publish-stable" });
+  f.command("manager", "note.publish", { note: draft, requestId: "first-publish-stable" });
   f.command("alice", "note.accept", { noteId: "same-id" });
-  const removed = f.command("creator", "note.publish", { note: f.note("removed-before-import") }).note;
-  f.command("creator", "note.delete", { noteId: removed.id, expectedRevision: removed.revision });
+  const removed = f.command("manager", "note.publish", { note: f.note("removed-before-import") }).note;
+  f.command("manager", "note.delete", { noteId: removed.id, expectedRevision: removed.revision });
   let legacyWrites = 0;
   const legacyNotes = [
     { ...f.note("same-id", { content: "Bản Drive cũ" }), creatorEmail: "admin", acceptedAt: "", actualDate: "" },
     { ...f.note("removed-before-import"), creatorEmail: "creator@example.com", acceptedAt: "", actualDate: "" },
-    { ...f.note("legacy-only", { content: "Công việc cũ cần giữ", assigneeEmail: "bob@example.com" }), creatorEmail: "admin", acceptedAt: "", actualDate: "" },
+    { ...f.note("legacy-only", { content: "Công việc cũ cần giữ", assigneeEmail: "bob@example.com" }), creatorEmail: "", acceptedAt: "", actualDate: "" },
   ];
   const file = { getBlob: () => ({ getDataAsString: () => JSON.stringify(legacyNotes) }), setContent() { legacyWrites += 1; }, setTrashed() { legacyWrites += 1; } };
   f.context.workNotesFolder_ = (_year, _month, _project, createMissing) => {
     assert.equal(createMissing, false);
     return { getFilesByName: () => { let emitted = false; return { hasNext: () => !emitted, next: () => { emitted = true; return file; } }; } };
   };
-  const replay = f.command("creator", "note.publish", { note: draft, requestId: "first-publish-stable" });
+  const replay = f.command("manager", "note.publish", { note: draft, requestId: "first-publish-stable" });
   assert.equal(replay.repeated, true);
   assert.equal(replay.legacyImportPending, true, "normal request replays stay off the legacy Drive import path");
-  f.command("creator", "archive.retry");
+  f.command("manager", "archive.retry");
   const stored = f.loadNotes();
   assert.equal(stored.legacyImportPending, false);
   assert.equal(stored.notes.find(note => note.id === "same-id").content, "Bản mới đã xác nhận");
   assert.ok(stored.notes.find(note => note.id === "same-id").acceptedAt);
-  assert.ok(stored.notes.some(note => note.id === "legacy-only"));
+  assert.ok(f.loadNotes("bob").notes.some(note => note.id === "legacy-only"), "the legacy note survives for its ordinary assignee");
+  assert.equal(stored.notes.some(note => note.id === "legacy-only"), false, "no assigning manager is inferred for an ownerless task");
   assert.equal(stored.notes.some(note => note.id === "removed-before-import"), false);
   assert.equal(legacyWrites, 0, "legacy Drive files are never rewritten during import");
   const keys = stored.notes.map(note => note.id);
-  f.command("creator", "archive.retry");
+  f.command("manager", "archive.retry");
   assert.deepEqual(plain(f.loadNotes().notes.map(note => note.id)), plain(keys), "later commands do not import historical notes twice");
 });
 
@@ -620,7 +697,7 @@ test("corrupt legacy Properties still block first publication rather than being 
   const key = f.context.workNotesPropertyKey_(scope);
   f.values.set(`${key}:manifest`, "not-json");
   const before = [...f.values];
-  assert.throws(() => f.command("creator", "note.publish", { note: f.note("must-not-ack") }), code("STORAGE_CORRUPT"));
+  assert.throws(() => f.command("manager", "note.publish", { note: f.note("must-not-ack") }), code("STORAGE_CORRUPT"));
   assert.deepEqual([...f.values], before);
   assert.equal(f.driveCalls(), 0);
 });
@@ -653,7 +730,7 @@ test("an ambiguous manifest RPC acknowledgement never deletes potentially publis
 test("customer deletion/recreation masks old canonical and legacy jobs without resetting a normal create retry", () => {
   for (const variant of ["same-project", "different-project", "cleanup-retry"]) {
     const f = fixture();
-    f.command("creator", "note.publish", { note: f.note("old-customer-note") });
+    f.command("manager", "note.publish", { note: f.note("old-customer-note") });
     const oldDesign = f.command("manager", "design.publish", { kind: "architecture", rows: [{ id: "old-customer-design", content: "Thiết kế cũ", assigneeEmail: "alice@example.com", plannedDate: "30/10/2026", note: "" }] }).rows[0];
     f.context.writePropertyJson_("gmcrm-active-design-tasks-v2", [{ ...oldDesign, ...scope, kind: "architecture" }]);
     const folders = new Map();
@@ -681,7 +758,7 @@ test("customer deletion/recreation masks old canonical and legacy jobs without r
     if (variant === "cleanup-retry") f.context.workflowResetCustomerProject_ = () => { throw new Error("Canonical cleanup quota unavailable"); };
     const deleted = f.context.deleteCustomerFolder_({ ...scope, folderId: oldFolder.id, adminSessionToken: f.admin.adminSessionToken, mutationId: `qa-customer-delete-${variant}` });
     assert.equal(deleted.trashed, true, "confirmed Drive deletion survives a best-effort canonical cleanup failure");
-    assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.admin }).notes.length, 0);
+    assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.length, 0);
     const recreatedScope = { ...scope, projectId: variant === "different-project" ? "GM-QA-RECREATED" : scope.projectId };
     const createPayload = { ...recreatedScope, adminSessionToken: f.admin.adminSessionToken };
     if (variant === "cleanup-retry") {
@@ -692,14 +769,14 @@ test("customer deletion/recreation masks old canonical and legacy jobs without r
     f.context.createCustomerFolder_(createPayload);
     assert.equal(f.context.workflowReadProject_(recreatedScope).customerDeleted, false);
     if (variant === "different-project") assert.equal(f.context.workflowReadProject_(scope).customerDeleted, true, "a reused house code cannot unmask a different old project");
-    assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.admin }).notes.length, 0);
-    assert.equal(f.context.loadAssignedDesignTasks_({ workflowSessionToken: f.tokens.admin }).tasks.length, 0, "the blank canonical index masks untouched legacy registry rows");
+    assert.equal(f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.manager }).notes.length, 0);
+    assert.equal(f.context.loadAssignedDesignTasks_({ workflowSessionToken: f.tokens.manager }).tasks.length, 0, "the blank canonical index masks untouched legacy registry rows");
     const protectedOldRows = f.context.workflowProtectWorkspace_([{ year: 2026, months: [{ label: "T10", records: [{ ...recreatedScope, designProgress: [oldDesign] }] }] }]);
     assert.deepEqual(plain(protectedOldRows[0].months[0].records[0].designProgress), [], "stale workspace data cannot reintroduce old published design rows");
-    const newJob = f.command("creator", "note.publish", { ...recreatedScope, note: f.note("new-customer-note") });
+    const newJob = f.command("manager", "note.publish", { ...recreatedScope, note: f.note("new-customer-note") });
     const beforeRetryRevision = newJob.revision;
     f.context.createCustomerFolder_(createPayload);
-    const afterRetry = f.context.loadWorkNotes_({ ...recreatedScope, workflowSessionToken: f.tokens.admin });
+    const afterRetry = f.context.loadWorkNotes_({ ...recreatedScope, workflowSessionToken: f.tokens.manager });
     assert.deepEqual(plain(afterRetry.notes.map(note => note.id)), ["new-customer-note"]);
     assert.equal(afterRetry.revision, beforeRetryRevision, "a normal create retry never resets active new jobs");
   }
@@ -707,8 +784,8 @@ test("customer deletion/recreation masks old canonical and legacy jobs without r
 
 test("note and message-assignment hot paths do not read/write global workspace or unrelated project states", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("hotpath-edit") });
-  f.command("creator", "note.publish", { note: f.note("hotpath-delete") });
+  f.command("manager", "note.publish", { note: f.note("hotpath-edit") });
+  f.command("manager", "note.publish", { note: f.note("hotpath-delete") });
   const unrelated = { ...scope, projectId: "GM-QA-UNRELATED", houseId: "QA-OTHER" };
   f.context.workflowResetCustomerProject_(unrelated, false);
   const workspace = f.context.readPropertyJson_("gmcrm-workspace-cache-v1");
@@ -729,21 +806,21 @@ test("note and message-assignment hot paths do not read/write global workspace o
     assert.equal(f.driveCalls(), 0, "known canonical note mutations do not depend on legacy Drive reads");
     return result;
   };
-  const published = measure(() => f.command("creator", "note.publish", { note: f.note("hotpath-new") }));
-  measure(() => f.command("creator", "note.edit", { note: { ...published.note, content: "Nội dung cập nhật" }, expectedRevision: published.note.revision }));
+  const published = measure(() => f.command("manager", "note.publish", { note: f.note("hotpath-new") }));
+  measure(() => f.command("manager", "note.edit", { note: { ...published.note, content: "Nội dung cập nhật" }, expectedRevision: published.note.revision }));
   measure(() => f.command("alice", "note.accept", { noteId: "hotpath-new" }));
   const submitted = measure(() => f.command("alice", "note.complete", { noteId: "hotpath-new" }));
   assert.equal(archiveAttempts, 0, "pending review does not archive");
   measure(() => f.command("manager", "note.approve", { noteId: "hotpath-new", expectedRevision: submitted.note.revision }));
   assert.equal(archiveAttempts, 1, "approval still runs its explicit archival step");
-  measure(() => f.command("creator", "note.delete", { noteId: "hotpath-delete", expectedRevision: 1 }));
+  measure(() => f.command("manager", "note.delete", { noteId: "hotpath-delete", expectedRevision: 1 }));
   const assigned = measure(() => f.command("manager", "message.assign", { messageId: group.id, selectedLineIds: ["line-one"], assignment: f.note("hotpath-assigned") }));
   assert.equal(assigned.note.sourceMessageId, group.id);
 });
 
 test("design projections update only their target record and survive optional cache failure", () => {
   const f = fixture();
-  f.command("creator", "note.publish", { note: f.note("known-project") });
+  f.command("manager", "note.publish", { note: f.note("known-project") });
   const unrelated = { ...scope, projectId: "GM-QA-DESIGN-UNRELATED", houseId: "QA-OTHER" };
   f.context.workflowResetCustomerProject_(unrelated, false);
   const workspace = f.context.readPropertyJson_("gmcrm-workspace-cache-v1");
@@ -765,7 +842,7 @@ test("design projections update only their target record and survive optional ca
 
 test("assigned feeds include removal revisions and the selected project snapshot without reading it twice", () => {
   const f = fixture();
-  const published = f.command("creator", "note.publish", { note: f.note("remote-change") });
+  const published = f.command("manager", "note.publish", { note: f.note("remote-change") });
   const key = f.context.workflowProjectKey_(scope);
   f.propertyReads.length = 0;
   const first = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice, project: scope });
@@ -773,7 +850,7 @@ test("assigned feeds include removal revisions and the selected project snapshot
   assert.deepEqual(plain(Object.keys(first.projectRevisions[0]).sort()), ["month", "projectId", "revision", "year"]);
   assert.equal(first.projectSnapshot.notes[0].id, "remote-change");
   assert.equal(first.projectSnapshot.revision, first.projectRevisions[0].revision);
-  const reassigned = f.command("creator", "note.edit", { note: { ...published.note, assigneeEmail: "bob@example.com" }, expectedRevision: published.note.revision });
+  const reassigned = f.command("manager", "note.edit", { note: { ...published.note, assigneeEmail: "bob@example.com" }, expectedRevision: published.note.revision });
   const removedFromAlice = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.alice, project: scope });
   assert.deepEqual(plain(removedFromAlice.notes), []);
   assert.deepEqual(plain(removedFromAlice.projectSnapshot.notes), []);
@@ -781,16 +858,14 @@ test("assigned feeds include removal revisions and the selected project snapshot
   const bob = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.bob, project: scope });
   assert.equal(bob.notes[0].id, "remote-change");
   assert.equal(bob.projectSnapshot.notes[0].assigneeEmail, "bob@example.com");
-  const deleted = f.command("creator", "note.delete", { noteId: "remote-change", expectedRevision: reassigned.note.revision });
+  const deleted = f.command("manager", "note.delete", { noteId: "remote-change", expectedRevision: reassigned.note.revision });
   const removedFromBob = f.context.loadAssignedWorkNotes_({ workflowSessionToken: f.tokens.bob, project: scope });
   assert.deepEqual(plain(removedFromBob.notes), []);
   assert.equal(removedFromBob.projectRevisions[0].revision, deleted.revision);
   assert.deepEqual(plain(removedFromBob.projectSnapshot.deletedIds), ["remote-change"]);
-  const unauthorized = f.context.loadAssignedWorkNotes_({ email: "admin", project: scope });
-  assert.deepEqual(plain(unauthorized.projectRevisions), []);
-  assert.equal(unauthorized.projectSnapshot, undefined);
+  assert.throws(() => f.context.loadAssignedWorkNotes_({ email: "admin", project: scope }), code("AUTH_REQUIRED"));
   const completed = fixture();
-  completed.command("creator", "note.publish", { note: completed.note("completed-history") });
+  completed.command("manager", "note.publish", { note: completed.note("completed-history") });
   completed.command("alice", "note.accept", { noteId: "completed-history" });
   completed.context.workflowArchiveItem_ = () => ({});
   const submitted = completed.command("alice", "note.complete", { noteId: "completed-history" });
@@ -824,7 +899,7 @@ test("a newly created empty customer seeds canonical cache before its first note
   assert.deepEqual(plain(blank.notes), []);
   const design = f.command("manager", "design.publish", { ...newScope, kind: "architecture", rows: [{ id: "brand-new-design", content: "Mặt bằng mới", plannedDate: "30/10/2026", assigneeEmail: "alice@example.com", note: "" }] });
   assert.equal(design.rows[0].id, "brand-new-design");
-  const note = f.command("creator", "note.publish", { ...newScope, note: f.note("brand-new-note") });
+  const note = f.command("manager", "note.publish", { ...newScope, note: f.note("brand-new-note") });
   assert.equal(note.note.id, "brand-new-note");
   assert.equal(note.legacyImportPending, false);
   assert.equal(legacyReads, 0, "the server's known-empty customer does not inspect Drive on first publication");

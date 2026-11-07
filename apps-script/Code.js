@@ -408,7 +408,7 @@ function doPost(event) {
   try {
     const payload = JSON.parse(event.postData.contents || "{}");
     if (payload.action === "redeploy-latest") return json_(redeployLatest(payload));
-    if (["audio-insight", "process-audio-chunk", "store-audio-chunk", "delete-audio-note", "customer-portal-share", "sync-design-progress"].indexOf(payload.action) >= 0) requireCustomerWorkflowManager_(payload);
+    if (["audio-insight", "process-audio-chunk", "store-audio-chunk", "delete-audio-note"].indexOf(payload.action) >= 0) requireCustomerWorkflowManager_(payload);
     if (payload.action === "audio-insight") return json_(transcribeAudio_(payload));
     if (payload.action === "process-audio-chunk") return json_(processStoredAudioChunk_(payload));
     if (payload.action === "store-audio-chunk") {
@@ -460,11 +460,10 @@ function doPost(event) {
       if (payload.action === "rename-customer-folder") return json_(renameCustomerFolder_(payload));
       if (payload.action === "delete-customer-folder") return json_(deleteCustomerFolder_(payload));
       if (payload.action === "save-workspace-cache") return json_(saveWorkspaceCache_(payload));
-      if (payload.action === "sync-work-notes") return json_(syncWorkNotes_(payload));
+      if (payload.action === "sync-work-notes" || payload.action === "sync-design-tasks") throw workflowError_("UPDATE_REQUIRED", "Hãy cập nhật ứng dụng để giao và sửa công việc.");
       if (payload.action === "complete-work-note") throw workflowError_("UPDATE_REQUIRED", "Hãy cập nhật ứng dụng để báo hoàn thành và gửi ban quản lý duyệt.");
       if (payload.action === "save-pancake-config") return json_(savePancakeConfig_(payload));
       if (payload.action === "update-customer-message-status") return json_(updateCustomerMessageStatus_(payload));
-      if (payload.action === "sync-design-tasks") return json_(syncDesignTasks_(payload));
     if (payload.action === "create-document-snapshot") return json_(createDocumentSnapshot_(payload));
     if (payload.action === "update-document-metadata") return json_(updateDocumentMetadata_(payload));
     if (payload.action === "set-document-snapshot-lock") return json_(setDocumentSnapshotLock_(payload));
@@ -472,7 +471,8 @@ function doPost(event) {
       if (!payload.record || !payload.year || !payload.month) throw new Error("Thi\u1ebfu d\u1eef li\u1ec7u h\u1ed3 s\u01a1.");
 
       if (payload.action === "sync-design-progress") {
-        const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month), payload.progressKind);
+        const actor = requireCustomerWorkflowManager_(payload);
+        const designResult = exportDesignProgressWorkbook_(payload.record, Number(payload.year), Number(payload.month), payload.progressKind, actor);
         return json_({ ok: true, ...designResult });
       }
 
@@ -482,7 +482,7 @@ function doPost(event) {
       }
 
       requireCustomerWorkflowManager_(payload);
-      const result = exportCustomerWorkbook_(payload.record, Number(payload.year), Number(payload.month));
+      const result = exportCustomerWorkbook_(payload.record, Number(payload.year), Number(payload.month), payload.publishCustomerShare === true);
       return json_({ ok: true, ...result });
     } finally {
       lock.releaseLock();
@@ -676,8 +676,16 @@ function loadConsultingWorkspace_(payload) {
 
   const mode = String(payload.mode || "index");
   const refresh = Boolean(payload.refresh);
-  if (mode === "detail") return loadCustomerDetail_(customers, payload);
-  if (mode === "progress") return loadCustomerProgress_(customers, payload);
+  if (mode === "detail" || mode === "progress") {
+    const actor = workflowOptionalActor_(payload);
+    const result = mode === "detail" ? loadCustomerDetail_(customers, payload) : loadCustomerProgress_(customers, payload);
+    const record = result.record;
+    if (!record.progressHydrated) return { ...result, record: workflowScopeDesignRecord_(record, actor) };
+    const details = { year: result.year, month: result.month, projectId: record.projectId };
+    const state = workflowReadProject_(details, true);
+    const current = state && !state.customerDeleted ? workflowOverlayDesignRecord_(record, state) : record;
+    return { ...result, record: workflowScopeDesignRecord_(current, actor) };
+  }
   if (mode === "search") {
     const query = String(payload.query || "").trim();
     const cacheKey = "gmcrm-search-" + Utilities.base64EncodeWebSafe(query).slice(0, 120);
@@ -1062,7 +1070,7 @@ function latestDesignProgressWorkbook_(customerFolder, progressKind) {
   let latest = null;
   while (files.hasNext()) {
     const file = files.next();
-    if (!filePattern.test(file.getName())) continue;
+    if (!filePattern.test(file.getName()) || / \[GM-[A-Za-z0-9_-]{12}\]\.xlsx$/i.test(file.getName())) continue;
     if (!latest || file.getLastUpdated().getTime() > latest.getLastUpdated().getTime()) latest = file;
   }
   return latest;
@@ -1327,15 +1335,20 @@ function keyValueRows_(rows) {
   return values;
 }
 
-function exportCustomerWorkbook_(record, year, month) {
+function exportCustomerWorkbook_(record, year, month, publishCustomerShare) {
   const folderKey = customerFolderKey_(record);
   const customerFolder = customerFolderForRecord_(record, year, month, true);
   const consultingFolder = getOrCreateFolder_(customerFolder, "T\u01b0 v\u1ea5n");
   const fileName = "Phi\u1ebfu th\u00f4ng tin kh\u00e1ch h\u00e0ng " + folderKey + ".xlsx";
+  const previous = latestCustomerWorkbook_(customerFolder, folderKey);
+  const previousSheets = previous ? readXlsxSheets_(previous) : {};
+  const metadata = keyValueRows_(previousSheets["0. GM-CRM"] || []);
+  const proposedToken = normalizeCustomerShareToken_(record.customerShareToken);
+  const shareToken = normalizeCustomerShareToken_(metadata.customerShareToken) || proposedToken;
 
   const spreadsheet = SpreadsheetApp.create("GM-CRM temporary " + folderKey);
   try {
-    writeWorkbook_(spreadsheet, record);
+    writeWorkbook_(spreadsheet, { ...record, customerShareToken: shareToken });
     const xlsxBlob = exportXlsx_(spreadsheet.getId()).setName(fileName);
     const legacyWorkbook = findFileByName_(customerFolder, fileName);
     if (legacyWorkbook) legacyWorkbook.moveTo(consultingFolder);
@@ -1345,25 +1358,35 @@ function exportCustomerWorkbook_(record, year, month) {
       fileUrl: xlsxFile.getUrl(),
       folderUrl: consultingFolder.getUrl(),
       fileName: fileName,
+      ...(publishCustomerShare && shareToken ? { customerShareToken: shareToken } : {}),
     };
   } finally {
     try { DriveApp.getFileById(spreadsheet.getId()).setTrashed(true); } catch (error) { /* Preserve the original export result. */ }
   }
 }
 
-function exportDesignProgressWorkbook_(record, year, month, progressKind) {
+function exportDesignProgressWorkbook_(record, year, month, progressKind, actor) {
   const folderKey = customerFolderKey_(record);
   const customerFolder = customerFolderForRecord_(record, year, month, true);
   const designFolder = getOrCreateFolder_(customerFolder, "Thi\u1ebft k\u1ebf");
   const isInterior = progressKind === "interior";
   const isAcceptance = progressKind === "acceptance";
   const label = isInterior ? "n\u1ed9i th\u1ea5t" : isAcceptance ? "nghi\u1ec7m thu" : "ki\u1ebfn tr\u00fac";
-  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + label + " " + folderKey + ".xlsx";
+  const suffix = actor ? " [GM-" + workflowHash_(actor.account).slice(0, 12) + "]" : "";
+  const fileName = "Ti\u1ebfn \u0111\u1ed9 thi\u1ebft k\u1ebf " + label + " " + folderKey + suffix + ".xlsx";
+  const field = isInterior ? "interiorDesignProgress" : isAcceptance ? "acceptanceDesignProgress" : "designProgress";
+  let sourceRows = record[field] || [];
+  if (actor) {
+    const details = { year: year, month: month, projectId: String(record.projectId || folderKey) };
+    const draftRecord = workflowMergeDesignDrafts_(record, workflowWorkspaceRecord_(details), actor);
+    const state = workflowReadProject_(details);
+    const current = state && !state.customerDeleted ? workflowOverlayDesignRecord_(draftRecord, state) : draftRecord;
+    sourceRows = (current[field] || []).filter(function(row) { return workflowCanSeeDesignRow_(actor, row); });
+  }
   const spreadsheet = SpreadsheetApp.create("GM-CRM " + label + " design progress temporary " + folderKey);
   try {
     const sheet = spreadsheet.getSheets()[0];
     sheet.setName("Ti\u1ebfn \u0111\u1ed9");
-    const sourceRows = isInterior ? record.interiorDesignProgress || [] : isAcceptance ? record.acceptanceDesignProgress || [] : record.designProgress || [];
     const rows = sourceRows.map(function(row) {
       return [String(row.content || ""), String(row.plannedDate || ""), String(row.actualDate || ""), String(row.assignee || ""), String(row.note || ""), String(row.id || ""), row.isCustom ? "true" : "false", String(row.assigneeEmail || ""), String(row.acceptedAt || ""), String(row.acceptedBy || ""), String(row.publishedAt || "")];
     });
@@ -1559,7 +1582,7 @@ function listWorkflowFiles_(payload) {
 
   const cacheKey = "gmcrm-files-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow);
   const cached = payload.refresh ? null : readCachedJson_(cacheKey);
-  if (cached) return cached;
+  if (cached) return { ...cached, files: (cached.files || []).filter(function(file) { return file.name !== WORK_NOTES_FILE_NAME; }) };
 
   // Ghi chú was added after some existing projects were created. Opening it
   // creates just that missing folder, without rechecking every project folder.
@@ -1577,6 +1600,7 @@ function listWorkflowFiles_(payload) {
     listDriveChildrenMetadata_(workflowFolder.getId()).forEach(function(item) {
       const isFolder = item.mimeType === "application/vnd.google-apps.folder";
       if (isFolder && item.name.indexOf("-") === 0) return;
+      if (!isFolder && item.name === WORK_NOTES_FILE_NAME) return;
       if (!isFolder && isSpecialWorkflowWorkbook_(item.name)) return;
       if (!isFolder && isSpreadsheetFile_(item.name, item.mimeType)) return;
       const modified = item.modifiedTime ? new Date(item.modifiedTime) : new Date(0);
@@ -1687,7 +1711,6 @@ function uploadWorkflowFile_(payload) {
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
 const COMPLETED_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_hoan_thanh.json";
 const ACTIVE_WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec_dang_giao.json";
-const WORK_NOTES_ADMIN_ACCOUNT = "admin";
 const WORK_NOTE_PRIORITIES = ["Gấp", "Cần lập tức", "Bình thường"];
 const WORK_NOTE_TYPES = ["Thiết kế", "Tư vấn", "Bảo hành", "Nghiệm thu", "Thi công", "Dự toán"];
 const WORK_NOTE_STATUSES = ["Đỏ", "Cam", "Xanh", "Đen"];
@@ -1813,32 +1836,34 @@ function clearPropertyJson_(key) {
 
 const WORKSPACE_CACHE_PROPERTY_KEY = "gmcrm-workspace-cache-v1";
 
-function loadWorkspaceCache_() {
+function loadWorkspaceCache_(payload = {}) {
+  const actor = workflowOptionalActor_(payload);
   const stored = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
   return {
     ok: true,
     updatedAt: stored && Number(stored.updatedAt || 0) || 0,
-    years: stored && Array.isArray(stored.years) ? workflowProtectWorkspace_(applyCustomerDriveMutations_(stored.years), true) : [],
+    years: stored && Array.isArray(stored.years) ? workflowScopeWorkspace_(applyCustomerDriveMutations_(stored.years), actor) : [],
   };
 }
 
 function saveWorkspaceCache_(payload) {
+  const actor = workflowOptionalActor_(payload);
   const incomingUpdatedAt = Number(payload.updatedAt || Date.now());
   const current = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
   if (current && Number(current.updatedAt || 0) > incomingUpdatedAt) {
-    return { ok: true, updatedAt: Number(current.updatedAt || 0), years: Array.isArray(current.years) ? current.years : [], ignored: true };
+    return { ok: true, updatedAt: Number(current.updatedAt || 0), years: Array.isArray(current.years) ? workflowScopeWorkspace_(current.years, actor) : [], ignored: true };
   }
   const incoming = applyCustomerDriveMutations_(Array.isArray(payload.years) ? payload.years : []);
   const previous = applyCustomerDriveMutations_(current && Array.isArray(current.years) ? current.years : []);
-  const years = workflowProtectWorkspace_(protectedCustomerCacheYears_(incoming, previous, payload));
+  const years = workflowProtectWorkspace_(protectedCustomerCacheYears_(incoming, previous, payload, actor));
   writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { version: 1, updatedAt: incomingUpdatedAt, years: years });
   return { ok: true, updatedAt: incomingUpdatedAt, savedYears: years.length };
 }
 
-function protectedCustomerCacheYears_(incoming, previous, payload) {
+function protectedCustomerCacheYears_(incoming, previous, payload, actor) {
   let admin = false;
   if (payload.adminSessionToken) { requireCustomerAdminSession_(payload); admin = true; }
-  const manager = admin || Boolean(payload.workflowSessionToken && workflowActor_(payload).manager);
+  const manager = Boolean(actor && actor.manager);
   const managerFields = ["id", "name", "houseId", "createdAt", "details", "audioNote", "functionalFloors", "functionalRows", "designProgress", "interiorDesignProgress", "acceptanceDesignProgress", "customerShareToken"];
   const periods = new Map();
   const years = [];
@@ -1959,7 +1984,7 @@ function protectedCustomerCacheYears_(incoming, previous, payload) {
             else if (field === "details") next.details = {};
             else delete next[field];
           });
-        }
+        } else next = workflowMergeDesignDrafts_(next, prior && prior.record, actor);
         if (!validCustomerFolderKey_(String(next.projectId || "").trim())) throw new Error("Mã hồ sơ khách hàng không hợp lệ.");
         if (seen.has(recordKey)) throw new Error("Hồ sơ khách hàng bị trùng trong dữ liệu gửi lên.");
         const folderKey = next.driveFolderId ? yearNumber + ":" + monthNumber + ":" + next.driveFolderId : "";
@@ -2078,36 +2103,28 @@ function syncActiveWorkNotes_(details, notes, payload) {
 }
 
 function loadAssignedWorkNotes_(payload) {
-  const actor = payload.workflowSessionToken || payload.adminSessionToken ? workflowActor_(payload) : null;
-  if (actor) workflowMayUse_(actor, "Ghi chú");
-  const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
-  if (!email) throw new Error("Thiếu email nhân viên.");
+  const actor = workflowActor_(payload);
+  workflowMayUse_(actor, "Ghi chú");
   const queue = workflowReadQueue_("notes", payload.project, actor);
-  const metadata = { ok: true, projectRevisions: actor ? queue.projectRevisions : [], ...(actor && queue.projectSnapshot ? { projectSnapshot: queue.projectSnapshot } : {}) };
-  const activeNotes = queue.items.filter(function(note) { return !note.actualDate && (actor || note.collectionRevision === undefined); });
-  // The built-in manager account needs an overview across every customer,
-  // while each employee continues to receive only work assigned to them.
-  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, notes: activeNotes };
-  const member = actor ? actor.member : employeeRosterMember_(email);
-  if (personnelIsManager_(member)) return { ...metadata, notes: activeNotes };
-  return { ...metadata, notes: activeNotes.filter(function(note) { return assignmentMatchesEmployee_(note.assigneeEmail, email, member); }) };
+  return { ok: true, projectRevisions: queue.projectRevisions, ...(queue.projectSnapshot ? { projectSnapshot: queue.projectSnapshot } : {}), notes: queue.items };
 }
 
 function loadWorkNotes_(payload) {
+  const actor = workflowActor_(payload);
+  workflowMayUse_(actor, "Ghi chú");
   const details = workNotesPayload_(payload);
   if (isCustomerDriveRecordDeleted_(details)) return { ok: true, notes: [], deleted: true };
   const canonical = workflowReadProject_(details, true);
   if (canonical) {
     if (canonical.customerDeleted) return { ok: true, notes: [], deleted: true, revision: canonical.revision, deletedIds: canonical.deletedIds || [] };
-    const actor = workflowActor_(payload);
-    workflowMayUse_(actor, "Ghi chú");
-    return workflowSnapshot_(canonical, { source: "workflow-v2", archivePending: canonical.notes.some(function(note) { return note.archivePending; }) }, actor);
+    return workflowSnapshot_(canonical, { source: "workflow-v2" }, actor);
   }
+  const visible = function(notes) { return normalizeWorkNotes_(notes).filter(function(note) { return workflowCanSeeItem_(actor, note); }); };
   const cacheKey = workNotesCacheKey_(details);
   const shared = readPropertyJson_(workNotesPropertyKey_(details));
-  if (Array.isArray(shared)) return { ok: true, notes: normalizeWorkNotes_(shared), source: "script-properties" };
+  if (Array.isArray(shared)) return { ok: true, notes: visible(shared), source: "script-properties" };
   const cached = readCachedJson_(cacheKey);
-  if (cached) return { ok: true, notes: normalizeWorkNotes_(cached), source: "cache" };
+  if (cached) return { ok: true, notes: visible(cached), source: "cache" };
   const folder = workNotesFolder_(details.year, details.month, details.projectId, false, details.houseId);
   if (!folder) return { ok: true, notes: [] };
   const file = findFileByName_(folder, WORK_NOTES_FILE_NAME);
@@ -2121,7 +2138,7 @@ function loadWorkNotes_(payload) {
     });
     if (keptNotes.length !== notes.length) file.setContent(JSON.stringify(keptNotes));
     cacheJson_(cacheKey, keptNotes, 21600);
-    return { ok: true, notes: keptNotes, source: "drive" };
+    return { ok: true, notes: keptNotes.filter(function(note) { return workflowCanSeeItem_(actor, note); }), source: "drive" };
   } catch (error) {
     throw new Error("Không thể đọc dữ liệu ghi chú công việc.");
   }
@@ -2643,6 +2660,7 @@ function updateCustomerMessageStatus_(payload) {
 // cross-device assignment queue; the Excel files remain optional exports.
 const ACTIVE_DESIGN_TASKS_FILE_NAME = "_gmcrm_thiet_ke_dang_giao.json";
 const DESIGN_TASK_KINDS = ["architecture", "interior", "acceptance"];
+const WORKFLOW_DESIGN_FIELDS = ["designProgress", "interiorDesignProgress", "acceptanceDesignProgress"];
 const WORKFLOW_PROJECT_PREFIX = "gmcrm-workflow-project-v2-";
 const WORKFLOW_PROJECT_INDEX = "gmcrm-workflow-project-index-v2";
 const WORKFLOW_MESSAGE_STATES = "gmcrm-workflow-message-states-v2";
@@ -2712,12 +2730,33 @@ function workflowAssigned_(actor, item) {
   return assignmentMatchesEmployee_(item.assigneeEmail, actor.account, actor.member);
 }
 
-function workflowAssignee_(value) {
+function workflowOptionalActor_(payload) {
+  return payload.workflowSessionToken || payload.adminSessionToken ? workflowActor_(payload) : null;
+}
+
+function workflowOwns_(actor, item) {
+  return assignmentMatchesEmployee_(item.creatorEmail, actor.account, actor.member);
+}
+
+function workflowCanSeeItem_(actor, item) {
+  return Boolean(actor && (actor.manager ? workflowOwns_(actor, item) : workflowAssigned_(actor, item)));
+}
+
+function workflowCanSeeDesignRow_(actor, row) {
+  if (!actor || !actor.manager && actor.permissions.indexOf("Thiết kế") < 0) return false;
+  if (row.publishedAt || row.actualDate) return workflowCanSeeItem_(actor, row);
+  return actor.manager && (!row.creatorEmail || workflowOwns_(actor, row));
+}
+
+function workflowAssignee_(value, actor, current) {
   const account = workNoteText_(value, 240).toLowerCase();
-  if (account === "admin") return { account: "admin", name: "Admin" };
-  const member = employeeRosterMember_(account);
-  if (!member) throw workflowError_("VALIDATION", "Người phụ trách không tồn tại hoặc đã ngưng hoạt động trong Nhân lực.");
-  return { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160) };
+  const member = account === "admin" ? null : employeeRosterMember_(account);
+  if (!member && account !== "admin") throw workflowError_("VALIDATION", "Người phụ trách không tồn tại hoặc đã ngưng hoạt động trong Nhân lực.");
+  const assignee = member ? { account: personnelAssignmentKey_(member), name: workNoteText_(member.name, 160) } : { account: "admin", name: "Admin" };
+  if ((account === "admin" || personnelIsManager_(member)) && assignee.account !== actor.account && (!current || !assignmentMatchesEmployee_(current.assigneeEmail, assignee.account, member))) {
+    throw workflowError_("VALIDATION", "Chỉ có thể giao việc cho chính bạn hoặc nhân viên không thuộc ban quản lý.");
+  }
+  return assignee;
 }
 
 function workflowDayNumber_(text) {
@@ -2869,8 +2908,10 @@ function workflowDetails_(payload) {
 
 function workflowSnapshot_(state, extra, actor) {
   const now = Date.now();
-  const notes = state.notes.filter(function(note) { return (!actor || actor.manager || actor.permissions.indexOf("Ghi chú") >= 0 && (note.creatorEmail === actor.account || workflowAssigned_(actor, note))) && (!note.completedAt || note.archivePending || !note.archivedAt || now - new Date(note.completedAt).getTime() < 2 * 86400000); }).map(function(note) { return { ...note, status: workNoteStatus_(note.acceptedAt, note.dueDate) }; });
-  return { ok: true, revision: state.revision, notes: notes, deletedIds: state.deletedIds || [], legacyImportPending: Boolean(state.legacyImportPending), legacyImportError: state.legacyImportError || "", ...extra };
+  const notes = actor && (actor.manager || actor.permissions.indexOf("Ghi chú") >= 0) ? state.notes.filter(function(note) {
+    return workflowCanSeeItem_(actor, note) && (!note.completedAt || note.archivePending || !note.archivedAt || now - new Date(note.completedAt).getTime() < 2 * 86400000);
+  }).map(function(note) { return { ...note, status: workNoteStatus_(note.acceptedAt, note.dueDate) }; }) : [];
+  return { ok: true, revision: state.revision, notes: notes, deletedIds: state.deletedIds || [], legacyImportPending: Boolean(state.legacyImportPending), legacyImportError: state.legacyImportError || "", archivePending: notes.some(function(note) { return note.archivePending; }), ...extra };
 }
 
 function workflowCheckRevision_(payload, item) {
@@ -2926,7 +2967,7 @@ function workflowRememberRequest_(state, payload, signature, actor, targetId) {
 
 function workflowNewNote_(draft, actor, previous) {
   draft = draft || {};
-  const assignee = workflowAssignee_(draft.assigneeEmail);
+  const assignee = workflowAssignee_(draft.assigneeEmail, actor, previous);
   const dueDate = workflowDueDate_(draft.dueDate, Boolean(previous && previous.dueDate === draft.dueDate));
   const content = workNoteText_(draft.content, 4000);
   if (!content) throw workflowError_("VALIDATION", "Hãy nhập nội dung công việc trước khi phát hành.");
@@ -2978,7 +3019,7 @@ function workflowAttemptArchives_(state, onlyId, report, actor, onlyKind) {
   let changed = false;
   let attempted = 0;
   const archive = function(item, kind) {
-    if (actor && !actor.manager && (kind !== "note" || !workflowAssigned_(actor, item))) return item;
+    if (!workflowCanSeeItem_(actor, item) || !actor.manager && (kind !== "note" || actor.permissions.indexOf("Ghi chú") < 0)) return item;
     if (!item.actualDate || !item.completedAt || (onlyId && item.id !== onlyId) || (onlyKind && kind !== onlyKind) || item.archivedAt || attempted >= 10) return item;
     attempted += 1;
     let result;
@@ -3012,11 +3053,21 @@ function workflowPruneArchived_(state) {
 
 function workflowProjectResponse_(state, payload, targetId, repeated, actor) {
   const kind = payload.kind;
-  const note = state.notes.find(function(item) { return item.id === (targetId || payload.noteId || payload.note && payload.note.id); });
-  const canViewDesign = !actor || actor.manager || actor.permissions.indexOf("Thiết kế") >= 0;
-  const rows = canViewDesign && DESIGN_TASK_KINDS.indexOf(kind) >= 0 ? state.design[kind] || [] : undefined;
-  const items = state.notes.concat(workflowProjectItems_(state, "design"));
-  return workflowSnapshot_(state, { note: note, rows: rows, design: canViewDesign ? state.design : undefined, tasks: canViewDesign ? workflowProjectItems_(state, "design").filter(function(row) { return row.publishedAt && !row.actualDate; }) : [], archivePending: items.some(function(item) { return item.archivePending; }), repeated: Boolean(repeated), deleted: payload.operation === "note.delete" }, actor);
+  const snapshot = workflowSnapshot_(state, {}, actor);
+  const canViewNotes = actor.manager || actor.permissions.indexOf("Ghi chú") >= 0;
+  const note = canViewNotes ? state.notes.find(function(item) {
+    return item.id === (targetId || payload.noteId || payload.note && payload.note.id) && workflowCanSeeItem_(actor, item);
+  }) : undefined;
+  const design = {};
+  DESIGN_TASK_KINDS.forEach(function(key) {
+    design[key] = (state.design[key] || []).filter(function(row) {
+      return (row.publishedAt || row.actualDate) && workflowCanSeeDesignRow_(actor, row);
+    });
+  });
+  const designItems = workflowProjectItems_({ design: design }, "design");
+  return { ...snapshot, note: note, rows: design[kind], design: design, tasks: designItems.filter(function(row) {
+    return row.publishedAt && !row.actualDate;
+  }), archivePending: snapshot.archivePending || designItems.some(function(item) { return item.archivePending; }), repeated: Boolean(repeated), deleted: payload.operation === "note.delete" };
 }
 
 function workflowCommand_(payload) {
@@ -3028,6 +3079,7 @@ function workflowCommand_(payload) {
   const reviewing = /\.(?:approve|return)$/.test(operation);
   const approving = /\.approve$/.test(operation);
   if (reviewing && !actor.manager) throw workflowError_("FORBIDDEN", "Chỉ ban quản lý được duyệt hoặc giao lại công việc.");
+  if (operation === "note.publish" && !actor.manager) throw workflowError_("FORBIDDEN", "Chỉ ban quản lý được giao việc.");
   if (operation === "design.publish" || operation.indexOf("message.") === 0 || operation === "archive.retry" && (payload.kind || payload.rowId)) workflowRequireManager_(actor);
   if (operation === "message.status") return workflowMessageStatus_(payload, actor);
   let messageSource = null;
@@ -3040,6 +3092,7 @@ function workflowCommand_(payload) {
     details = workflowDetails_({ ...messageSource, projectId: special ? VIRTUAL_PANCAKE_TEST_PROJECT_ID : messageSource.projectId, houseId: special ? "Bùi Đức Thành" : messageSource.houseId });
   } else details = workflowDetails_(payload);
   if (operation === "archive.retry") {
+    if (payload.noteId) workflowMayUse_(actor, "Ghi chú");
     if (!actor.manager && actor.permissions.indexOf("Ghi chú") < 0 && actor.permissions.indexOf("Thiết kế") < 0) throw workflowError_("FORBIDDEN", "Bạn không có quyền lưu trữ công việc.");
   } else workflowMayUse_(actor, operation.indexOf("design.") === 0 ? "Thiết kế" : "Ghi chú");
   const state = workflowProject_(details, operation === "archive.retry");
@@ -3047,7 +3100,7 @@ function workflowCommand_(payload) {
   delete state._legacyImportChanged;
   const pruned = workflowPruneArchived_(state);
   const signature = workflowRequestSignature_(payload, actor);
-  const archiveKind = operation.indexOf("design.") === 0 ? "design:" + payload.kind : "note";
+  const archiveKind = operation.indexOf("design.") === 0 || operation === "archive.retry" && payload.rowId ? "design:" + payload.kind : "note";
   const previousRequest = (state.requests || []).find(function(item) { return item.id === requestId; });
   if (previousRequest) {
     if (previousRequest.signature !== signature || previousRequest.actor !== actor.account) throw workflowError_("CONFLICT", "Mã yêu cầu đã được dùng cho nội dung hoặc nhân viên khác.");
@@ -3055,13 +3108,18 @@ function workflowCommand_(payload) {
     // A completion accepted before reviews were introduced may still have an
     // archive to deliver when its original request is replayed.
     const canRetryArchive = approving || operation === "note.complete" || operation === "design.complete" || operation === "archive.retry";
-    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport, actor, operation === "archive.retry" ? undefined : archiveKind);
+    const archiveChanged = canRetryArchive && workflowAttemptArchives_(state, previousRequest.targetId, archiveReport, actor, operation === "archive.retry" && !previousRequest.targetId ? undefined : archiveKind);
     if (archiveChanged) state.revision += 1;
     if (archiveChanged || pruned || legacyImported) { workflowWriteProject_(state); workflowProjectProjection_(state, { kind: payload.kind, designChanged: Boolean(archiveReport.designChanged) }); }
     return workflowProjectResponse_(state, payload, previousRequest.targetId, true, actor);
   }
   let targetId = String(payload.noteId || payload.rowId || "");
   const now = new Date().toISOString();
+  if (operation === "archive.retry" && targetId) {
+    const archiveItems = payload.rowId ? state.design[payload.kind] || [] : state.notes;
+    const archiveItem = archiveItems.find(function(item) { return item.id === targetId; });
+    if (!archiveItem || !workflowCanSeeItem_(actor, archiveItem)) throw workflowError_("FORBIDDEN", "Bạn không có quyền lưu trữ công việc này.");
+  }
   if (operation === "note.publish" || operation === "message.assign") {
     let draft = payload.note || {};
     if (messageSource) {
@@ -3082,8 +3140,9 @@ function workflowCommand_(payload) {
     const index = state.notes.findIndex(function(note) { return note.id === targetId; });
     if (index < 0 || state.deletedIds.indexOf(targetId) >= 0) throw workflowError_("NOT_FOUND", "Ghi chú không còn tồn tại. Hãy nạp lại danh sách.");
     const current = state.notes[index];
+    if (!workflowCanSeeItem_(actor, current)) throw workflowError_("FORBIDDEN", "Bạn không có quyền cập nhật công việc này.");
     if (operation === "note.edit" || operation === "note.delete") {
-      if (current.creatorEmail !== actor.account) throw workflowError_("FORBIDDEN", "Chỉ người tạo ghi chú mới có thể sửa hoặc xóa.");
+      if (!actor.manager || !workflowOwns_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người giao việc mới có thể sửa hoặc xóa.");
       workflowCheckRevision_(payload, current);
       if (current.actualDate) throw workflowError_("FORBIDDEN", "Ghi chú đã hoàn thành được giữ nguyên để lưu lịch sử.");
       if (workflowAwaitingReview_(current)) throw workflowError_("CONFLICT", "Ghi chú đang chờ ban quản lý xác nhận hoàn thành.");
@@ -3104,7 +3163,7 @@ function workflowCommand_(payload) {
   workflowWriteProject_(state);
   const projection = { kind: payload.kind, designChanged: operation.indexOf("design.") === 0 };
   if (approving || operation === "archive.retry") {
-    if (workflowAttemptArchives_(state, operation === "archive.retry" ? null : targetId, projection, actor, approving ? archiveKind : undefined)) { state.revision += 1; workflowWriteProject_(state); }
+    if (workflowAttemptArchives_(state, targetId, projection, actor, approving || targetId ? archiveKind : undefined)) { state.revision += 1; workflowWriteProject_(state); }
   }
   workflowProjectProjection_(state, projection);
   return workflowProjectResponse_(state, payload, targetId, false, actor);
@@ -3120,20 +3179,25 @@ function workflowDesignCommand_(state, payload, actor, now, reviewing, approving
     const seen = new Set();
     let published = 0;
     const next = currentRows.slice();
+    const workspaceRecord = workflowWorkspaceRecord_(state.details);
+    const field = WORKFLOW_DESIGN_FIELDS[DESIGN_TASK_KINDS.indexOf(kind)];
+    const workspaceRows = workspaceRecord && workspaceRecord[field] || [];
+    const workspaceById = new Map(workspaceRows.filter(Boolean).map(function(row) { return [row.id, row]; }));
     incoming.forEach(function(draft) {
       const id = workNoteText_(draft.id, 140);
       if (!id || seen.has(id)) throw workflowError_("VALIDATION", "Hạng mục thiết kế bị thiếu hoặc trùng mã.");
       seen.add(id);
       const previousIndex = next.findIndex(function(row) { return row.id === id; });
-      const current = previousIndex >= 0 ? next[previousIndex] : null;
+      const canonical = previousIndex >= 0 ? next[previousIndex] : null;
+      const current = canonical && canonical.publishedAt ? canonical : workspaceById.get(id) || canonical;
+      if (current && !workflowCanSeeDesignRow_(actor, current)) throw workflowError_("FORBIDDEN", "Bạn không có quyền cập nhật hạng mục thiết kế này.");
       const content = workNoteText_(draft.content, 800);
       if (!content || (!draft.assigneeEmail && !draft.plannedDate && !draft.publishedAt)) return;
-      const assignee = workflowAssignee_(draft.assigneeEmail);
+      const assignee = workflowAssignee_(draft.assigneeEmail, actor, current && current.publishedAt ? current : null);
       const dueDate = workflowDueDate_(draft.plannedDate, Boolean(current && current.plannedDate === draft.plannedDate));
       const changed = current && current.publishedAt && (current.content !== content || current.assigneeEmail !== assignee.account || current.plannedDate !== dueDate || current.note !== workNoteText_(draft.note, 4000));
       const dirtyAcknowledgement = draft.assignmentDirty === true;
       const editingPublished = Boolean(current && current.publishedAt && (changed || dirtyAcknowledgement));
-      if (editingPublished && (!actor.manager && current.creatorEmail !== actor.account)) throw workflowError_("FORBIDDEN", "Chỉ người phát hành hoặc quản lý mới được thay đổi hạng mục đã giao.");
       if (editingPublished && current.actualDate) throw workflowError_("FORBIDDEN", "Hạng mục đã hoàn thành được giữ nguyên để lưu lịch sử.");
       if (current && workflowAwaitingReview_(current)) {
         if (editingPublished) throw workflowError_("CONFLICT", "Hạng mục đang chờ ban quản lý xác nhận hoàn thành.");
@@ -3156,11 +3220,9 @@ function workflowDesignCommand_(state, payload, actor, now, reviewing, approving
   const index = currentRows.findIndex(function(row) { return row.id === payload.rowId; });
   const current = currentRows[index];
   if (!current || !current.publishedAt) throw workflowError_("NOT_FOUND", "Hạng mục chưa được phát hành hoặc không còn tồn tại.");
+  if (!workflowCanSeeItem_(actor, current)) throw workflowError_("FORBIDDEN", "Bạn không có quyền cập nhật hạng mục thiết kế này.");
   if (reviewing) currentRows[index] = workflowReviewItem_(payload, current, actor, now, "plannedDate", approving);
-  else {
-    if (!actor.manager && !workflowAssigned_(actor, current)) throw workflowError_("FORBIDDEN", "Chỉ người phụ trách hoặc ban quản lý được nhận hoặc báo hoàn thành hạng mục.");
-    currentRows[index] = workflowAssignmentAction_(payload, current, actor, now, payload.operation === "design.accept");
-  }
+  else currentRows[index] = workflowAssignmentAction_(payload, current, actor, now, payload.operation === "design.accept");
   state.design[kind] = currentRows;
 }
 
@@ -3201,6 +3263,50 @@ function workflowProtectWorkspace_(years, useReadCache) {
     if (state.customerDeleted) return null;
     return workflowOverlayDesignRecord_(record, state);
   }).filter(Boolean) }; }) }; });
+}
+
+function workflowScopeDesignRecord_(record, actor) {
+  const scoped = { ...record };
+  delete scoped.customerShareToken;
+  WORKFLOW_DESIGN_FIELDS.forEach(function(field) {
+    if (Array.isArray(record[field])) scoped[field] = record[field].filter(function(row) { return row && workflowCanSeeDesignRow_(actor, row); });
+  });
+  return scoped;
+}
+
+function workflowScopeWorkspace_(years, actor) {
+  return workflowProtectWorkspace_(years, true).map(function(year) {
+    return { ...year, months: (year.months || []).map(function(month) {
+      return { ...month, records: (month.records || []).map(function(record) { return workflowScopeDesignRecord_(record, actor); }) };
+    }) };
+  });
+}
+
+function workflowMergeDesignDrafts_(record, prior, actor) {
+  const merged = { ...record };
+  WORKFLOW_DESIGN_FIELDS.forEach(function(field) {
+    const previousRows = prior && Array.isArray(prior[field]) ? prior[field].filter(Boolean) : [];
+    if (!Array.isArray(record[field])) {
+      if (previousRows.length) merged[field] = previousRows;
+      else delete merged[field];
+      return;
+    }
+    const previousById = new Map(previousRows.map(function(row) { return [row.id, row]; }));
+    const byId = new Map(previousRows.filter(function(row) {
+      return row.publishedAt || row.actualDate || !workflowOwns_(actor, row);
+    }).map(function(row) { return [row.id, row]; }));
+    record[field].forEach(function(row) {
+      if (!row || !row.id || row.publishedAt || row.actualDate || row.creatorEmail && !workflowOwns_(actor, row)) return;
+      const previous = previousById.get(row.id);
+      if (previous && (previous.publishedAt || previous.actualDate || previous.creatorEmail && !workflowOwns_(actor, previous))) return;
+      const unchanged = previous && !previous.creatorEmail && ["isCustom", "content", "plannedDate", "assigneeEmail", "assignee", "note"].every(function(key) {
+        return (previous[key] || "") === (row[key] || "");
+      });
+      byId.set(row.id, unchanged ? previous : { ...row, creatorEmail: actor.account, creatorName: actor.name });
+    });
+    merged[field] = Array.from(byId.values());
+  });
+  return merged;
 }
 
 function workflowOverlayDesignRecord_(record, state, selectedKind) {
@@ -3345,10 +3451,14 @@ function workflowAssignedRegistry_(domain, readContext) {
       }
     }
     if (deleted) return;
-    result = result.concat(workflowProjectItems_(state, domain).filter(function(item) { return !item.actualDate && (domain === "notes" || item.publishedAt); }).map(function(item) { return { ...item, ...state.details, collectionRevision: state.revision }; }));
+    result = result.concat(workflowProjectItems_(state, domain).filter(function(item) {
+      return !item.actualDate && (domain === "notes" || item.publishedAt) && (!readContext || workflowCanSeeItem_(readContext.actor, item));
+    }).map(function(item) { return { ...item, ...state.details, collectionRevision: state.revision }; }));
   });
   const legacy = domain === "notes" ? readActiveWorkNotes_() : readActiveDesignTasks_();
-  return result.concat(legacy.filter(function(item) { return !migrated.has(Number(item.year) + ":" + Number(item.month) + ":" + item.projectId) && !isCustomerDriveRecordDeleted_(item); }));
+  return result.concat(legacy.filter(function(item) {
+    return !item.actualDate && !migrated.has(Number(item.year) + ":" + Number(item.month) + ":" + item.projectId) && !isCustomerDriveRecordDeleted_(item) && (!readContext || workflowCanSeeItem_(readContext.actor, item));
+  }));
 }
 
 function activeDesignTasksFile_() {
@@ -3382,6 +3492,8 @@ function normalizeDesignTaskRows_(rows) {
       actualDate: normalizeWorkNoteDate_(row && row.actualDate),
       assignee: workNoteText_(row && row.assignee, 160),
       assigneeEmail: workNoteText_(row && row.assigneeEmail, 240).toLowerCase(),
+      creatorEmail: workNoteText_(row && row.creatorEmail, 240).toLowerCase(),
+      creatorName: workNoteText_(row && row.creatorName, 160),
       acceptedAt: workNoteText_(row && row.acceptedAt, 40),
       acceptedBy: workNoteText_(row && row.acceptedBy, 240).toLowerCase(),
       publishedAt: workNoteText_(row && row.publishedAt, 40),
@@ -3420,17 +3532,10 @@ function syncDesignTasks_(payload) {
 }
 
 function loadAssignedDesignTasks_(payload) {
-  const actor = payload.workflowSessionToken || payload.adminSessionToken ? workflowActor_(payload) : null;
-  if (actor) workflowMayUse_(actor, "Thiết kế");
-  const email = actor ? actor.account : workNoteText_(payload.email, 240).toLowerCase();
-  if (!email) throw new Error("Thiếu email nhân viên.");
+  const actor = workflowActor_(payload);
+  workflowMayUse_(actor, "Thiết kế");
   const queue = workflowReadQueue_("design", undefined, actor);
-  const metadata = { ok: true, projectRevisions: actor ? queue.projectRevisions : [] };
-  const tasks = queue.items.filter(function(task) { return !task.actualDate && (actor || task.collectionRevision === undefined); });
-  if (actor && actor.manager || email === WORK_NOTES_ADMIN_ACCOUNT) return { ...metadata, tasks: tasks };
-  const member = actor ? actor.member : employeeRosterMember_(email);
-  if (personnelIsManager_(member)) return { ...metadata, tasks: tasks };
-  return { ...metadata, tasks: tasks.filter(function(task) { return assignmentMatchesEmployee_(task.assigneeEmail, email, member); }) };
+  return { ok: true, projectRevisions: queue.projectRevisions, tasks: queue.items };
 }
 
 const DOCUMENTS_FOLDER_NAME = "Tài liệu";

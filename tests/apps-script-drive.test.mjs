@@ -265,7 +265,7 @@ test("customer Delete trashes only the resolved Drive folder and prunes only tha
   assert.deepEqual(Array.from(f.context.readPropertyJson_("gmcrm-active-work-notes-state"), (note) => note.id), ["note-keep"]);
   f.context.saveWorkspaceCache_({ updatedAt: Date.now() + 1000, years });
   assert.equal(f.context.loadWorkspaceCache_().years[0].months[8].records.length, 1, "a newer stale-device save cannot resurrect a deleted folder");
-  assert.equal(f.context.loadWorkNotes_({ year: 2026, month: 9, projectId: "GM-TARGET" }).notes.length, 0);
+  assert.equal(f.context.loadWorkNotes_({ year: 2026, month: 9, projectId: "GM-TARGET", adminSessionToken: f.adminSessionToken }).notes.length, 0);
 });
 
 test("customer mutations do not create missing paths or delete ambiguous folder names", () => {
@@ -478,12 +478,13 @@ test("publishing work notes falls back to shared script properties when Drive is
     year: 2026,
     month: 9,
     projectId: "GM03092026TEST",
-    notes: [{ id: "note-1", priority: "Gấp", workType: "Tư vấn", content: "Gọi khách", dueDate: "05/09/2026" }],
+    notes: [{ id: "note-1", priority: "Gấp", workType: "Tư vấn", content: "Gọi khách", dueDate: "05/09/2026", creatorEmail: "admin" }],
   };
   const result = context.syncWorkNotes_(payload);
   assert.equal(result.ok, true);
   assert.equal(result.storage, "script-properties");
-  assert.equal(context.loadWorkNotes_(payload).notes[0].content, "Gọi khách");
+  const workflowSessionToken = context.issueWorkflowSession_("admin");
+  assert.equal(context.loadWorkNotes_({ ...payload, workflowSessionToken }).notes[0].content, "Gọi khách");
 });
 
 test("workspace cache is shared without touching Drive", () => {
@@ -590,7 +591,7 @@ test("admin optimistic cache creates survive parallel omissions and failed Drive
   assert.deepEqual(Array.from(retainedYear.months, (month) => month.label), Array.from({ length: 12 }, (_, index) => `T${index + 1}`));
   assert.deepEqual(Array.from(retainedYear.months[8].records, (record) => record.projectId), [pending.projectId, existing.projectId]);
   const before = [...f.values];
-  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([pending, existing]), adminSessionToken: "forged" }), /Chỉ admin mới có quyền/);
+  assert.throws(() => f.context.saveWorkspaceCache_({ updatedAt: 12, years: period([pending, existing]), adminSessionToken: "forged" }), error => error.code === "AUTH_REQUIRED");
   assert.deepEqual([...f.values], before);
 });
 
@@ -633,23 +634,26 @@ test("personnel cache is shared without touching Drive", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(loaded.personnel)), personnel);
 });
 
-test("admin receives the active work-note overview across every customer", () => {
+test("admin receives only their own legacy assignments in the active work-note overview", () => {
   const context = loadContext();
   context.readActiveWorkNotes_ = () => [
-    { id: "note-a", projectId: "GM-A", assigneeEmail: "an@company.com", actualDate: "" },
-    { id: "note-b", projectId: "GM-B", assigneeEmail: "binh@company.com", actualDate: "" },
-    { id: "note-done", projectId: "GM-C", assigneeEmail: "an@company.com", actualDate: "29/08/2026" },
+    { id: "note-a", projectId: "GM-A", assigneeEmail: "an@company.com", actualDate: "", creatorEmail: "admin" },
+    { id: "note-b", projectId: "GM-B", assigneeEmail: "binh@company.com", actualDate: "", creatorEmail: "admin" },
+    { id: "note-foreign", projectId: "GM-C", assigneeEmail: "admin", actualDate: "", creatorEmail: "manager@example.com" },
+    { id: "note-done", projectId: "GM-C", assigneeEmail: "an@company.com", actualDate: "29/08/2026", creatorEmail: "admin" },
   ];
-  assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "admin" }).notes.map((note) => note.id))), ["note-a", "note-b"]);
-  assert.deepEqual(JSON.parse(JSON.stringify(context.loadAssignedWorkNotes_({ email: "an@company.com" }).notes.map((note) => note.id))), ["note-a"]);
+  const workflowSessionToken = context.issueWorkflowSession_("admin");
+  assert.deepEqual(Array.from(context.loadAssignedWorkNotes_({ workflowSessionToken }).notes, note => note.id), ["note-a", "note-b"]);
+  assert.throws(() => context.loadAssignedWorkNotes_({ email: "admin" }), error => error.code === "AUTH_REQUIRED");
 });
 
 test("legacy personnel rows without email remain assignable by stable member id", () => {
   const context = loadContext();
   context.readActiveWorkNotes_ = () => [{ id: "note-legacy", assigneeEmail: "member:person-1", actualDate: "" }];
-  context.employeeRosterMember_ = () => ({ id: "person-1", email: "employee@example.com", status: "Có" });
+  context.employeeRosterMember_ = () => ({ id: "person-1", email: "employee@example.com", status: "Có", permissions: ["Ghi chú"] });
   assert.equal(context.personnelAssignmentKey_({ id: "person-1", email: "" }), "member:person-1");
-  assert.equal(context.loadAssignedWorkNotes_({ email: "employee@example.com" }).notes[0].id, "note-legacy");
+  const workflowSessionToken = context.issueWorkflowSession_("employee@example.com");
+  assert.equal(context.loadAssignedWorkNotes_({ workflowSessionToken }).notes[0].id, "note-legacy");
 });
 
 test("Pancake group names map to a house code only when the GM marker is present", () => {

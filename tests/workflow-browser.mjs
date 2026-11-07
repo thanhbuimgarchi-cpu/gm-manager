@@ -11,14 +11,17 @@ const scriptUrl = pageSource.match(/scriptUrl:\s*"(https:\/\/script\.google\.com
 const fixedNow = '2026-10-28T02:00:00.000Z';
 const permissions = ['Ghi chú','Tư vấn','Thiết kế','Dự toán','Thi công','Nghiệm thu','Bảo hành','Tài liệu','3D'];
 const member = {id:'workflow-employee',status:'Có',name:'Nguyễn Minh Anh',email:'anh@example.com',loginCode:'00123',role:'Nhân viên thiết kế',permissions,birthDate:'',phone:'',address:''};
+const colleague = {...member,id:'workflow-colleague',name:'Trần Văn Bình',email:'binh@example.com',loginCode:'colleague-code'};
 const manager = {...member,id:'workflow-manager',name:'Quản lý kiểm thử',email:'manager@example.com',loginCode:'manager-code',role:'  QUẢN   LÝ '.normalize('NFD'),permissions:[]};
-const personnel = {office:[member,manager]};
+const personnel = {office:[member,colleague,manager]};
 const token = (account, purpose='workflow', version=2) => `${Buffer.from(JSON.stringify({version,purpose,account,expiresAt:Date.parse('2026-11-28T02:00:00Z'),nonce:`qa-${account}`})).toString('base64url')}.fixture-signature`;
-const tokens = Object.fromEntries(['admin',member.email,manager.email].map(account=>[account,token(account)]));
+const tokens = Object.fromEntries(['admin',member.email,colleague.email,manager.email].map(account=>[account,token(account)]));
 const adminToken = token('admin','customer-admin',1);
 const clone = value => JSON.parse(JSON.stringify(value));
+const privateAdminNote = { id:'private-admin-note', workType:'Thiết kế', priority:'Bình thường', content:'Ghi chú riêng do Admin giao', creatorEmail:'admin', assignee:colleague.name, assigneeEmail:colleague.email, dueDate:'10/11/2026', actualDate:'', status:'Xanh', acceptedAt:fixedNow, acceptedBy:colleague.email, completionRequestedAt:fixedNow, completionRequestedBy:colleague.email, revision:1 };
+const privateAdminDesign = { id:'private-admin-design', isCustom:true, content:'Thiết kế riêng do Admin giao', plannedDate:'10/11/2026', actualDate:'', note:'', creatorEmail:'admin', assignee:colleague.name, assigneeEmail:colleague.email, publishedAt:fixedNow, acceptedAt:fixedNow, acceptedBy:colleague.email, completionRequestedAt:fixedNow, completionRequestedBy:colleague.email, revision:1 };
 const records = [
-  {id:'workflow-house-a',name:'Khách A',houseId:'QA-A',projectId:'WORKFLOW-QA-A',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Khách A','NCT-KT':'Có'},designProgress:[{id:'design-qa-a',isCustom:true,content:'Thiết kế kiểm thử',plannedDate:'10/11/2026',actualDate:'',assignee:member.name,assigneeEmail:member.email,note:'',publishedAt:'',acceptedAt:'',acceptedBy:''}]},
+  {id:'workflow-house-a',name:'Khách A',houseId:'QA-A',projectId:'WORKFLOW-QA-A',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Khách A','NCT-KT':'Có'},designProgress:[{id:'design-qa-a',isCustom:true,content:'Thiết kế kiểm thử',plannedDate:'10/11/2026',actualDate:'',assignee:member.name,assigneeEmail:member.email,note:'',publishedAt:'',acceptedAt:'',acceptedBy:''},privateAdminDesign]},
   {id:'workflow-house-b',name:'Khách B',houseId:'QA-B',projectId:'WORKFLOW-QA-B',createdAt:'28/10/2026',isHydrated:true,progressHydrated:true,details:{HVT:'Khách B'}},
 ];
 const years = [{year:2026,months:Array.from({length:12},(_,i)=>({label:`T${i+1}`,records:i===9?records:[]}))}];
@@ -26,8 +29,8 @@ const message = {id:'message-qa-a',conversationId:'conversation-qa-a',year:2026,
   {id:'line-selected',senderName:'Khách A',content:'Chọn dòng giao việc này.',sentAt:fixedNow},
   {id:'line-unselected',senderName:'Khách A',content:'Dòng chưa chọn để tham khảo.',sentAt:'2026-10-28T02:30:00.000Z'},
 ]};
-const notes = new Map(records.map(record=>[record.projectId,[]]));
-const notesRevision = new Map(records.map(record=>[record.projectId,0]));
+const notes = new Map([[records[0].projectId,[privateAdminNote]],[records[1].projectId,[]]]);
+const notesRevision = new Map([[records[0].projectId,1],[records[1].projectId,0]]);
 const deletedNoteIds = new Map(records.map(record=>[record.projectId,[]]));
 const commandLog = [];
 const readLog = [];
@@ -42,17 +45,19 @@ function holdNext(operation) {
   return {entered:observed,release};
 }
 const actorFor = payload => Object.keys(tokens).find(account=>tokens[account]===payload.workflowSessionToken) || (payload.adminSessionToken===adminToken?'admin':'');
+const managerAccount = actor => actor === 'admin' || actor === manager.email;
+const visibleTo = (actor, item) => Boolean(actor && (managerAccount(actor) ? item.creatorEmail === actor : item.assigneeEmail === actor));
 function scopeRecord(payload) { return records.find(record=>record.projectId===payload.projectId); }
 function noteResult(payload,note) {
   const revision=(notesRevision.get(payload.projectId)||0)+1;
   notesRevision.set(payload.projectId,revision);
-  return {ok:true,note:clone(note),notes:clone(notes.get(payload.projectId)),revision,deletedIds:clone(deletedNoteIds.get(payload.projectId)||[]),archivePending:Boolean(note?.archivePending)};
+  return {ok:true,note:clone(note),notes:clone(notes.get(payload.projectId).filter(item=>visibleTo(actorFor(payload),item))),revision,deletedIds:clone(deletedNoteIds.get(payload.projectId)||[]),archivePending:Boolean(note?.archivePending)};
 }
 function applyAssignmentDecision(item, action, actor, payload, dateField, archivePending) {
   if (Number(payload.expectedRevision) !== item.revision) return {ok:false,code:'CONFLICT',error:'Hãy tải lại công việc.'};
-  const isManager = actor === 'admin' || actor === manager.email;
+  const isManager = managerAccount(actor);
   if (action === 'approve' || action === 'return') {
-    if (!isManager) return {ok:false,code:'FORBIDDEN',error:'Chỉ ban quản lý được duyệt.'};
+    if (!isManager || !visibleTo(actor,item)) return {ok:false,code:'FORBIDDEN',error:'Chỉ người giao việc được duyệt.'};
     if (!item.completionRequestedAt || item.actualDate) return {ok:false,code:'CONFLICT',error:'Công việc không còn chờ xác nhận.'};
   } else if (item.assigneeEmail !== actor && !(isManager && dateField === 'plannedDate')) return {ok:false,code:'FORBIDDEN',error:'Chỉ Người phụ trách mới được cập nhật.'};
   const now = new Date(Date.parse(fixedNow) + item.revision * 1000).toISOString();
@@ -80,13 +85,13 @@ async function dispatch(payload) {
   if(payload.action==='load-assigned-work-notes'){
     const actor=actorFor(payload);
     if(!actor)return {ok:false,code:'AUTH_REQUIRED',error:'Hãy đăng nhập lại.'};
-    const visible=note=>actor==='admin'||actor===manager.email||note.assigneeEmail===actor;
+    const visible=note=>visibleTo(actor,note);
     const projectRevisions=records.map(record=>({year:2026,month:10,projectId:record.projectId,revision:Math.max(0,(notesRevision.get(record.projectId)||0)-(control.staleAssignedFeed?1:0))}));
     const selected=payload.project&&records.find(record=>payload.project.year===2026&&payload.project.month===10&&payload.project.projectId===record.projectId);
     const projectSnapshot=selected?{year:2026,month:10,projectId:selected.projectId,revision:projectRevisions.find(item=>item.projectId===selected.projectId).revision,notes:control.staleAssignedFeed?[]:clone(notes.get(selected.projectId).filter(visible)),deletedIds:control.staleAssignedFeed?[]:clone(deletedNoteIds.get(selected.projectId)||[]),legacyImportPending:false}:undefined;
     return {ok:true,notes:control.staleAssignedFeed?[]:records.flatMap(record=>(notes.get(record.projectId)||[]).filter(note=>!note.actualDate&&visible(note)).map(note=>({...clone(note),year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name}))),projectRevisions,...(projectSnapshot?{projectSnapshot}:{}),qaFeedSerial:++feedSerial};
   }
-  if(payload.action==='load-assigned-design-tasks')return {ok:true,tasks:records.flatMap(record=>(record.designProgress||[]).filter(row=>row.publishedAt&&!row.actualDate&&(payload.email==='admin'||payload.email===manager.email||row.assigneeEmail===payload.email)).map(row=>({...clone(row),kind:'architecture',title:'Tiến độ thiết kế kiến trúc',year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name})))};
+  if(payload.action==='load-assigned-design-tasks')return {ok:true,tasks:records.flatMap(record=>(record.designProgress||[]).filter(row=>row.publishedAt&&!row.actualDate&&visibleTo(actorFor(payload),row)).map(row=>({...clone(row),kind:'architecture',title:'Tiến độ thiết kế kiến trúc',year:2026,month:10,projectId:record.projectId,houseId:record.houseId,customerName:record.name})))};
   if(payload.action==='load-customer-messages')return {ok:true,configured:true,messages:message.status!=='resolved'||message.archivePending?[clone(message)]:[]};
   if(payload.action==='list-documents')return {ok:true,snapshots:[],files:[]};
   if(payload.action==='list-3d-library')return {ok:true,folders:[]};
@@ -120,17 +125,19 @@ async function dispatch(payload) {
     const assigned=payload.rows.filter(row=>row.content?.trim()&&(row.assigneeEmail||row.plannedDate||row.publishedAt));
     if(assigned.some(row=>!row.assigneeEmail||!row.plannedDate))return {ok:false,code:'VALIDATION',error:'Thiếu Người phụ trách hoặc ngày dự kiến.'};
     const canonical=assigned.map(row=>({...clone(row),publishedAt:row.publishedAt||fixedNow,revision:(row.revision||0)+1,creatorEmail:actor,acceptedAt:row.acceptedAt||'',acceptedBy:row.acceptedBy||'',actualDate:row.actualDate||''}));
-    record.designProgress=payload.rows.map(row=>canonical.find(item=>item.id===row.id)||clone(row));
+    const foreign = (record.designProgress||[]).filter(row=>row.publishedAt&&!visibleTo(actor,row));
+    if(payload.rows.some(row=>foreign.some(other=>other.id===row.id)))return {ok:false,code:'FORBIDDEN',error:'Không được phát hành lại hạng mục của người khác.'};
+    record.designProgress=[...payload.rows.map(row=>canonical.find(item=>item.id===row.id)||clone(row)),...foreign];
     result={ok:true,rows:clone(canonical),revision:1,tasks:[]};
   } else if(/^design\.(accept|complete|approve|return)$/.test(operation)) {
     const row=(record.designProgress||[]).find(row=>row.id===payload.rowId);
     if(!row)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy hạng mục.'};
     const failure=applyAssignmentDecision(row,operation.split('.')[1],actor,payload,'plannedDate',control.designArchivePending);
     if(failure)return failure;
-    result={ok:true,rows:clone(record.designProgress.filter(row=>row.publishedAt)),revision:row.revision,row:clone(row),archivePending:Boolean(row.archivePending)};
+    result={ok:true,rows:clone(record.designProgress.filter(row=>row.publishedAt&&visibleTo(actor,row))),revision:row.revision,row:clone(row),archivePending:Boolean(row.archivePending)};
   } else if(operation==='archive.retry') {
     if(payload.noteId){const note=collection.find(note=>note.id===payload.noteId);if(!note)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy ghi chú.'};Object.assign(note,{archivePending:control.noteArchivePending,archivedAt:control.noteArchivePending?'':fixedNow,revision:note.revision+1});result=noteResult(payload,note);}
-    else {const row=record.designProgress?.find(row=>row.id===payload.rowId);if(!row)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy thiết kế.'};Object.assign(row,{archivePending:control.designArchivePending,archivedAt:control.designArchivePending?'':fixedNow,revision:row.revision+1});result={ok:true,rows:clone(record.designProgress.filter(row=>row.publishedAt)),revision:row.revision,archivePending:Boolean(row.archivePending)};}
+    else {const row=record.designProgress?.find(row=>row.id===payload.rowId);if(!row)return {ok:false,code:'NOT_FOUND',error:'Không tìm thấy thiết kế.'};Object.assign(row,{archivePending:control.designArchivePending,archivedAt:control.designArchivePending?'':fixedNow,revision:row.revision+1});result={ok:true,rows:clone(record.designProgress.filter(row=>row.publishedAt&&visibleTo(actor,row))),revision:row.revision,archivePending:Boolean(row.archivePending)};}
   } else if(operation==='message.assign') {
     if(!['admin',manager.email].includes(actor))return {ok:false,code:'FORBIDDEN',error:'Chỉ quản lý mới giao việc.'};
     const selected=message.messages.filter(line=>payload.selectedLineIds?.includes(line.id));
@@ -187,12 +194,27 @@ async function openHouse(code){await overview();await page.locator('.customer-re
 async function login(name,code){await overview();await page.locator('.workspace-header .pwa-action--login').click();const dialog=page.getByRole('dialog',{name:'Đăng nhập',exact:true});await dialog.getByLabel('Tên nhân viên',{exact:true}).fill(name);await dialog.getByLabel('Mã đăng nhập',{exact:true}).fill(code);await dialog.getByRole('button',{name:'Đăng nhập',exact:true}).click();await dialog.waitFor({state:'hidden'});}
 async function compose(content){await page.locator('.work-notes__actions button').first().click();const composer=page.getByLabel('Ghi chú mới',{exact:true});await composer.getByLabel('Người phụ trách',{exact:true}).selectOption(member.email);await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).fill('10112026');await composer.getByLabel('Nội dung công việc',{exact:true}).fill(content);return composer;}
 const cachedNotes=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value||[]);
+const visibleNoteContents=()=>page.locator('.work-note textarea[aria-label="Nội dung công việc"]').evaluateAll(inputs=>inputs.map(input=>input.value));
+const designAssigneeField=content=>page.getByLabel(`Người phụ trách ${content}`,{exact:true});
+const reviewPanel=page.getByLabel('Công việc chờ xác nhận',{exact:true});
 const outbox=()=>page.evaluate(()=>window.qaReadOutbox());
 async function focusPoll(){const previous=await page.evaluate(()=>window.qaFeedSerial);await page.evaluate(()=>window.dispatchEvent(new Event('focus')));await page.waitForFunction(value=>window.qaFeedSerial>value,previous,{timeout:8000});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));}
+
+phase='admin-to-manager assignment isolation';
+await reviewPanel.getByText(privateAdminNote.content,{exact:true}).waitFor();
+await reviewPanel.getByText(privateAdminDesign.content,{exact:true}).waitFor();
+await openHouse('QA-A');
+await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+await page.waitForFunction(content=>Array.from(document.querySelectorAll('.work-note textarea[aria-label="Nội dung công việc"]')).some(input=>input.value===content),privateAdminNote.content);
+await login(manager.name,manager.loginCode);
+await focusPoll();
+assert.equal(await reviewPanel.count(),0,'switching to another manager clears the previous account’s review queue');
 
 await openHouse('QA-A');
 phase='note publish';
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+await focusPoll();
+assert.ok(!(await visibleNoteContents()).includes(privateAdminNote.content),'a manager cannot read another assigning account’s note from a broad legacy response or cache');
 const firstComposer=await compose('Công việc kiểm thử nguyên tử');
 const publishHold=holdNext('note.publish');
 await firstComposer.getByRole('button',{name:'Phát hành',exact:true}).evaluate(button=>{button.click();button.click();});
@@ -207,6 +229,7 @@ assert.equal(commandLog.filter(command=>command.operation==='note.publish').leng
 await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
 phase='design publish';
 const designSection=page.locator('.design-schedule').first();
+assert.equal(await designAssigneeField(privateAdminDesign.content).count(),0,'foreign published design is hidden even when present in the shared project record');
 await designSection.getByRole('button',{name:'Phát hành',exact:true}).click();
 await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-consulting')).flatMap(year=>year.months.flatMap(month=>month.records)).find(record=>record.projectId==='WORKFLOW-QA-A')?.designProgress?.[0]?.publishedAt);
 assert.equal(commandLog.filter(command=>command.operation==='design.publish').length,1);
@@ -220,6 +243,7 @@ const activeNoteIndex=await page.locator('.work-note').evaluateAll(cards=>cards.
 assert.ok(activeNoteIndex>=0,'assigned note is visible');
 const activeNote=page.locator('.work-note').nth(activeNoteIndex);
 await activeNote.waitFor();
+assert.ok(!(await visibleNoteContents()).includes(privateAdminNote.content),'an employee cannot read a colleague’s note in the same customer');
 assert.equal(await activeNote.getByRole('button',{name:'Tùy chọn ghi chú',exact:true}).count(),0,'assignee cannot edit or delete the creator’s note');
 const acceptance=holdNext('note.accept');
 await activeNote.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
@@ -246,6 +270,7 @@ assert.ok(await page.locator('.record-detail--inline').getByLabel('Tên khách h
 await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
 const employeeDesign=page.locator('.design-schedule').first();
 assert.equal(await employeeDesign.getByRole('button',{name:'Phát hành',exact:true}).count(),0);
+assert.equal(await designAssigneeField(privateAdminDesign.content).count(),0,'an employee cannot read a colleague’s design in the same customer');
 const employeeDesignRow=employeeDesign.getByRole('row').filter({hasText:'Thiết kế kiểm thử'});
 assert.ok(await employeeDesignRow.getByLabel('Người phụ trách Thiết kế kiểm thử').isDisabled());
 await employeeDesignRow.getByRole('button',{name:'Xác nhận nhận việc',exact:true}).click();
@@ -261,11 +286,12 @@ assert.equal(await page.locator('.customer-message__status-actions').getByRole('
 assert.equal(commandLog.length,beforeRead,'reading as an employee cannot submit workflow commands');
 await login(manager.name,manager.loginCode);
 phase='manager feedback and design approval';
-const reviewPanel=page.getByLabel('Công việc chờ xác nhận',{exact:true});
 const noteReview=reviewPanel.locator('article').filter({hasText:'Công việc kiểm thử nguyên tử'});
 const designReview=reviewPanel.locator('article').filter({hasText:'Thiết kế kiểm thử'});
 await noteReview.waitFor();
 await designReview.waitFor();
+assert.equal(await reviewPanel.getByText(privateAdminNote.content,{exact:true}).count(),0);
+assert.equal(await reviewPanel.getByText(privateAdminDesign.content,{exact:true}).count(),0);
 await page.waitForFunction(()=>window.qaNotifications.some(({title,body})=>title.includes('Công việc chờ xác nhận')&&body.includes('Công việc kiểm thử nguyên tử')));
 await noteReview.getByRole('button',{name:'Nhận xét',exact:true}).click();
 const feedbackDialog=page.getByRole('dialog',{name:'Nhận xét công việc',exact:true});
@@ -314,6 +340,15 @@ await returnedCard.getByRole('button',{name:'Thử lưu Drive',exact:true}).clic
 await page.waitForFunction(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value?.some(note=>note.actualDate==='28/10/2026'&&!note.archivePending&&note.archivedAt));
 
 await login('admin','1');
+phase='admin remains scoped to own work';
+await openHouse('QA-A');
+await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
+await focusPoll();
+assert.ok((await visibleNoteContents()).includes(privateAdminNote.content),'admin still sees their own note');
+assert.ok(!(await visibleNoteContents()).includes('Công việc kiểm thử nguyên tử'),'admin cannot read another manager’s note history');
+await page.getByRole('button',{name:'Thiết kế',exact:true}).click();
+assert.ok(await designAssigneeField(privateAdminDesign.content).isVisible(),'admin still sees their own design');
+assert.equal(await designAssigneeField('Thiết kế kiểm thử').count(),0,'admin cannot read another manager’s design history');
 phase='message assignment';
 await overview();
 await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
