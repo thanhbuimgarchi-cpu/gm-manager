@@ -15,12 +15,15 @@ let qaPage;
 await mkdir('outputs/interface-qa', { recursive: true });
 const release = version => ({ version, installerUrl: `https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup-${version}.exe`, sha256: 'a'.repeat(64), size: 111000000 });
 
-async function fixture({ mode = 'integrated', version = '1.3.0', manifest = release('1.4.0'), notifications = false, query = '' } = {}) {
+async function fixture({ mode = 'integrated', version = '1.3.0', manifest = release('1.4.0'), notifications = false, query = '', role = 'Nhân viên văn phòng', waitingWebUpdate = false } = {}) {
   const fixture = { manifest, offline: false, manifestRequests: 0 };
+  const member = {
+    id: 'staff', name: 'Nhân viên kiểm thử', email: 'staff@example.com', role,
+    permissions: ['Ghi chú'], status: 'Có', birthDate: '20/09/1995', phone: '', address: '', loginCode: '00123',
+  };
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' });
   context.setDefaultTimeout(7000);
-  await context.addInitScript(({ mode, version, notifications, scriptUrl }) => {
-    const member = { id: 'staff', name: 'Nhân viên kiểm thử', email: 'staff@example.com', role: 'Nhân viên văn phòng', permissions: ['Ghi chú'], status: 'Có' };
+  await context.addInitScript(({ mode, version, notifications, scriptUrl, member, waitingWebUpdate }) => {
     localStorage.setItem('gm-manager-personnel-v1', JSON.stringify({ office: [member] }));
     localStorage.setItem('gm-manager-personnel-session-email', member.email);
     localStorage.setItem('gm-manager-notifications-enabled-v1', notifications ? 'enabled' : 'disabled');
@@ -28,6 +31,14 @@ async function fixture({ mode = 'integrated', version = '1.3.0', manifest = rele
     const token = `${btoa(JSON.stringify(claims)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')}.fixture-signature`;
     localStorage.setItem('gm-manager-workflow-session-v1', JSON.stringify({ scriptUrl, account: member.email, token }));
     const qa = window.qaUpdates = { downloads: [], nativeDownloads: 0, installCalls: 0, beforeInstallCalls: 0, notifications: [], infoCalls: 0, failInfo: false, failDownload: false, failInstall: false, currentAtInstall: false, holdInfo: false, pendingInfo: null, holdInstall: false, pendingInstall: null, progress: { phase: 'idle' }, progressListeners: new Set(), prepareListeners: new Set() };
+    if (waitingWebUpdate) {
+      qa.webUpdates = [];
+      Object.defineProperty(navigator, 'serviceWorker', { value: {
+        controller: {},
+        addEventListener() {},
+        register: async () => ({ waiting: { postMessage: message => qa.webUpdates.push(message.type) }, addEventListener() {}, update: async () => {} }),
+      } });
+    }
     qa.emit = progress => { qa.progress = progress; for (const listener of qa.progressListeners) listener(progress); };
     window.open = url => { qa.downloads.push(url); return null; };
     if (mode === 'web') return;
@@ -62,13 +73,13 @@ async function fixture({ mode = 'integrated', version = '1.3.0', manifest = rele
         onBeforeUpdate: listener => { qa.prepareListeners.add(listener); return () => qa.prepareListeners.delete(listener); },
       }),
     };
-  }, { mode, version, notifications, scriptUrl });
+  }, { mode, version, notifications, scriptUrl, member, waitingWebUpdate });
   await context.route('**/desktop-version.json*', route => {
     fixture.manifestRequests += 1;
     return fixture.offline ? route.abort('failed') : route.fulfill({ contentType: 'application/json', body: JSON.stringify(fixture.manifest) });
   });
   await context.route('https://script.google.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<meta charset="utf-8"><script>
-const personnel={office:[{id:'staff',name:'Nhân viên kiểm thử',email:'staff@example.com',role:'Nhân viên văn phòng',permissions:['Ghi chú'],status:'Có'}]};
+const personnel=${JSON.stringify({ office: [member] })};
 addEventListener('message',event=>{if(event.data?.channel!=='gm-manager-apps-script')return;const {id,payload:p}=event.data;let result={ok:true};
 if(p.action==='load-personnel')result.personnel=personnel;
 if(p.action==='load-consulting'||p.action==='load-workspace-cache')result.years=[];
@@ -122,6 +133,36 @@ try {
   assert.equal(await native.page.locator('.crm-shell').evaluate(shell => shell.inert), true, 'editing stops after final save while the installer is taking over');
   assert.ok(await native.page.evaluate(() => qaUpdates.beforeInstallCalls) >= 1, 'latest drafts are saved before handoff');
   await native.context.close();
+
+  const untouched = await fixture({ role: 'Quản lý chung', manifest: release('1.3.0'), waitingWebUpdate: true });
+  await untouched.page.getByRole('button', { name: /Nhân lực.*Thông tin/ }).click();
+  await untouched.page.getByRole('button', { name: 'Thêm nhân lực', exact: true }).click();
+  await untouched.page.locator('.personnel-add-form').waitFor();
+  await untouched.page.getByRole('button', { name: '← Tổng quan', exact: true }).click();
+  await untouched.page.locator('.personnel-add-form').waitFor({ state: 'hidden' });
+  await untouched.button.click();
+  await untouched.page.waitForFunction(() => qaUpdates.webUpdates.includes('SKIP_WAITING'));
+  assert.equal(await untouched.page.evaluate(() => qaUpdates.installCalls), 0, 'leaving an untouched editor allows the web update without launching an installer');
+  await untouched.context.close();
+
+  const edited = await fixture({ role: 'Quản lý chung' });
+  await edited.page.getByRole('button', { name: /Nhân lực.*Thông tin/ }).click();
+  await edited.page.getByRole('button', { name: 'Nhân viên văn phòng', exact: true }).click();
+  await edited.page.getByRole('button', { name: 'Tùy chọn Nhân viên kiểm thử', exact: true }).click();
+  await edited.page.getByRole('button', { name: 'Thay đổi', exact: true }).click();
+  const personnelName = edited.page.locator('.personnel-add-form').getByLabel('Họ và tên', { exact: true });
+  const originalName = await personnelName.inputValue();
+  assert.equal(originalName, 'Nhân viên kiểm thử');
+  await personnelName.fill('Nhân viên đang sửa');
+  await edited.button.click();
+  await edited.page.locator('.toast').filter({ hasText: 'biểu mẫu' }).waitFor();
+  assert.equal(await edited.page.evaluate(() => qaUpdates.installCalls), 0, 'unsaved personnel changes block updates');
+  assert.equal(await personnelName.inputValue(), 'Nhân viên đang sửa', 'the blocked update keeps the unsaved entry');
+  await personnelName.fill(originalName);
+  await edited.button.click();
+  await edited.button.getByText('Đang khởi động lại…', { exact: true }).waitFor();
+  assert.equal(await edited.page.evaluate(() => qaUpdates.installCalls), 1, 'a populated editor with no changes allows the update');
+  await edited.context.close();
 
   const failed = await fixture();
   await failed.page.evaluate(() => { qaUpdates.failInstall = true; });

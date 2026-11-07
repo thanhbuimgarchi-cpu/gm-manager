@@ -311,6 +311,13 @@ type PersonnelMember = {
   address: string;
 };
 
+type PersonnelDraft = Omit<PersonnelMember, "id">;
+const emptyPersonnelDraft: PersonnelDraft = { status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" };
+
+function personnelDraftSnapshot(draft: PersonnelDraft) {
+  return JSON.stringify({ ...draft, permissions: [...draft.permissions].sort() });
+}
+
 // Email is the preferred assignment key. Older personnel rows may not have
 // an email yet, so keep a stable member key instead of dropping them from
 // every assignment selector. Once an email is added, the server can resolve
@@ -437,6 +444,10 @@ type CustomerMessageTaskDraft = {
   assigneeEmail: string;
   request: string;
   dueDate: string;
+};
+
+const messageTaskDefaults: Omit<CustomerMessageTaskDraft, "message"> = {
+  selectedLineIds: [], priority: "Bình thường", workType: "Tư vấn", assigneeEmail: "", request: "", dueDate: "",
 };
 
 type OutstandingWorkNote = {
@@ -1988,7 +1999,7 @@ export default function Home() {
   const [editingPersonnelId, setEditingPersonnelId] = useState<string | null>(null);
   const [personnelMenuId, setPersonnelMenuId] = useState<string | null>(null);
   const [loadingPersonnel, setLoadingPersonnel] = useState(false);
-  const [personnelDraft, setPersonnelDraft] = useState<Omit<PersonnelMember, "id">>({ status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+  const [personnelDraft, setPersonnelDraft] = useState<PersonnelDraft>(emptyPersonnelDraft);
   const [consultingSearch, setConsultingSearch] = useState("");
   const [workflowSearch, setWorkflowSearch] = useState("");
   const [selectedCustomerProjectId, setSelectedCustomerProjectId] = useState<string | null>(null);
@@ -2127,6 +2138,13 @@ export default function Home() {
   const serviceWorkerRegistration = useRef<ServiceWorkerRegistration | null>(null);
   const workflowClient = useRef<WorkflowClient | null>(null);
   const desktopUpdatePreparation = useRef<() => Promise<void>>(async () => { throw new Error("Dữ liệu chưa sẵn sàng để cập nhật."); });
+  const updateFormBaselines = useRef({
+    customerPeriod: { month: modalMonth, year: modalYear },
+    personnel: "",
+    drive: { scriptUrl: driveScriptUrl, driveUrl: driveLinkUrl, pageName: pancakePageName },
+    rename: { name: "", houseId: "" },
+    login: { name: "", workspacePath: "" },
+  });
   const workflowResultHandler = useRef<(entry: WorkflowOutboxEntry, result: WorkflowServerResult) => void>(() => {});
   const workflowReadRevisions = useRef(new Map<string, number>());
   const assignedDesignTasksRef = useRef<AssignedDesignTask[]>([]);
@@ -2880,7 +2898,7 @@ export default function Home() {
         setDesktopUpdateDismissed(false);
         try { window.localStorage.removeItem("gm-manager-desktop-update-dismissed-v1"); } catch { /* Optional banner preference. */ }
         if (desktopIntegratedUpdates && desktop.installUpdate) {
-          await prepareForDesktopUpdate();
+          await desktopUpdatePreparation.current();
           const result = await desktop.installUpdate();
           if (!result?.ok) throw new Error(result?.error || "Không thể cập nhật ứng dụng. Hãy thử lại.");
           if (result.current) {
@@ -2902,7 +2920,7 @@ export default function Home() {
           setNotice("Bản PC hiện tại cần cài nâng cấp một lần để hỗ trợ cập nhật tự động. Bộ cài đã mở; cài đè rồi các lần sau chỉ cần bấm Cập nhật trong ứng dụng.");
         }
       } else if ((checked.status === "current" || checked.status === "unavailable") && updateAvailable) {
-        await prepareForDesktopUpdate();
+        await desktopUpdatePreparation.current();
         updateGMCRM();
       } else {
         setDesktopUpdateProgress({ phase: "idle" });
@@ -2932,20 +2950,45 @@ export default function Home() {
   const renderUpdateAction = () => desktopUpdatesSupported && !isCustomerPortal
     ? <button type="button" className={`pwa-action pwa-action--desktop-update ${desktopUpdate ? "pwa-action--update" : ""}`.trim()} onClick={() => void updateDesktopApplication()} disabled={desktopUpdateBusy} title={desktopUpdate ? `Cập nhật lên PC ${desktopUpdate.version}` : "Kiểm tra và cập nhật GM Manager"} aria-live="polite">{desktopUpdateLabel}</button>
     : updateAvailable && <button type="button" className="pwa-action pwa-action--update" onClick={updateGMCRM}>↻ Cập nhật</button>;
+  const openEmployeeLogin = (name = employeeLoginEmail) => {
+    updateFormBaselines.current.login = { name, workspacePath: localWorkspacePath };
+    setEmployeeLoginEmail(name);
+    setEmployeeLoginPassword("");
+    setEmployeeLoginError("");
+    setLoginOpen(true);
+  };
+  const editLocalWorkspacePath = (path: string) => {
+    if (!workspacePathEdited.current) updateFormBaselines.current.login.workspacePath = localWorkspacePath;
+    workspaceLocationRevision.current++;
+    workspacePathEdited.current = true;
+    setLocalWorkspacePath(path);
+    setEmployeeLoginError("");
+  };
   const renderMobileAppActions = (includeInstall = true) => <>
     {includeInstall && renderUpdateAction()}
     {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
-    <button type="button" className="pwa-action pwa-action--login" onClick={() => { setEmployeeLoginError(""); setEmployeeLoginPassword(""); setLoginOpen(true); }}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
+    <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
     {renderWindowsStartupAction()}
   </>;
 
   const prepareForDesktopUpdate = async () => {
     if (!workspaceStorageReady) throw new Error("Dữ liệu đang mở. Hãy chờ một chút rồi cập nhật.");
-    if (creatingCustomer || customerMutationBusy || uploadingWorkflowFiles || savingWorkNotes || customerMessageTaskBusy || customerMessageStatusBusyId || audioProcessingId || syncingRecordId || syncingDesignId || syncingWarrantyId || exportingPersonnel || savingPancakeConfig || employeeAuthBusy || documentSnapshotActionId || workflowRequestInFlight.current.size) {
+    if (creatingCustomer || customerMutationBusy || uploadingWorkflowFiles || savingWorkNotes || customerMessageTaskBusy || customerMessageStatusBusyId || audioProcessingId || syncingRecordId || syncingDesignId || syncingWarrantyId || exportingPersonnel || savingPancakeConfig || employeeAuthBusy || choosingWorkspace || documentSnapshotActionId || workflowRequestInFlight.current.size) {
       throw new Error("Hãy chờ thao tác đang chạy hoàn tất rồi cập nhật.");
     }
-    if (addOpen || personnelAddOpen || driveConfigOpen || protectedAction || customerMessageTaskDraft || completionFeedback || loginOpen) {
+    const baseline = updateFormBaselines.current;
+    if (personnelAddOpen && personnelDraftSnapshot(personnelDraft) !== baseline.personnel) {
+      throw new Error("Hãy lưu hoặc hủy biểu mẫu Nhân lực đang chỉnh sửa trước khi cập nhật.");
+    }
+    const customerEdited = addOpen && (customerName.trim() || houseId.trim() || modalMonth !== baseline.customerPeriod.month || modalYear !== baseline.customerPeriod.year);
+    const driveEdited = driveConfigOpen && (driveScriptUrl.trim() !== baseline.drive.scriptUrl.trim() || driveLinkUrl.trim() !== baseline.drive.driveUrl.trim() || pancakePageName.trim() !== baseline.drive.pageName.trim() || pancakeUserAccessToken.trim() || pancakePageAccessToken.trim());
+    const renameEdited = protectedAction?.type === "rename" && (renameValue.trim() !== baseline.rename.name.trim() || renameHouseId.trim() !== baseline.rename.houseId.trim());
+    const task = customerMessageTaskDraft;
+    const taskEdited = task && (task.selectedLineIds.length || task.assigneeEmail || task.request.trim() || task.dueDate || task.priority !== messageTaskDefaults.priority || task.workType !== messageTaskDefaults.workType);
+    const feedbackEdited = completionFeedback && (completionFeedback.comment.trim() || completionFeedback.dueDate);
+    const loginEdited = loginOpen && (employeeLoginEmail.trim() !== baseline.login.name.trim() || employeeLoginPassword || (workspacePathEdited.current && localWorkspacePath.trim() !== baseline.login.workspacePath.trim()));
+    if (customerEdited || driveEdited || renameEdited || taskEdited || feedbackEdited || loginEdited) {
       throw new Error("Hãy lưu hoặc đóng biểu mẫu đang nhập trước khi cập nhật.");
     }
     try {
@@ -3259,10 +3302,7 @@ export default function Home() {
     const token = isCurrentWorkflowSession(workflowSession, loggedInEmployeeEmail, driveScriptUrl) ? workflowSession!.token
       : isBuiltInAdminLoggedIn && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
     if (!location || !loggedInEmployeeEmail || !token) {
-      setEmployeeLoginError("");
-      setEmployeeLoginPassword("");
-      setEmployeeLoginEmail(loggedInEmployee?.name ?? "");
-      setLoginOpen(true);
+      openEmployeeLogin(loggedInEmployee?.name ?? "");
       setNotice("Hãy đăng nhập lại để xác thực quyền giao và hoàn thành công việc.");
       return null;
     }
@@ -3429,7 +3469,7 @@ export default function Home() {
     }
     if (!loggedInEmployee) {
       setNotice("Hãy đăng nhập trước khi giao việc từ tin nhắn khách.");
-      setLoginOpen(true);
+      openEmployeeLogin();
       return;
     }
     if (!customerLocationForMessage(message)) {
@@ -3440,15 +3480,7 @@ export default function Home() {
       setNotice("Tin nhắn không có dòng nội dung để chọn.");
       return;
     }
-    setCustomerMessageTaskDraft({
-      message,
-      selectedLineIds: [],
-      priority: "Bình thường",
-      workType: "Tư vấn",
-      assigneeEmail: "",
-      request: "",
-      dueDate: "",
-    });
+    setCustomerMessageTaskDraft({ message, ...messageTaskDefaults });
   };
   const updateCustomerMessageTaskDraft = (changes: Partial<CustomerMessageTaskDraft>) => {
     setCustomerMessageTaskDraft((draft) => draft ? { ...draft, ...changes } : draft);
@@ -3472,7 +3504,7 @@ export default function Home() {
     } finally { setCustomerMessageTaskBusy(false); }
   };
   const addWorkNote = () => {
-    if (!loggedInEmployee) { setNotice("Hãy đăng nhập trước khi tạo và giao việc."); setLoginOpen(true); return; }
+    if (!loggedInEmployee) { setNotice("Hãy đăng nhập trước khi tạo và giao việc."); openEmployeeLogin(); return; }
     if (newWorkNote) return;
     setNewWorkNote({
       id: `work-note-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -4013,10 +4045,7 @@ export default function Home() {
       setAddOpen(false);
       setProtectedAction(null);
       try { window.localStorage.removeItem(adminSessionStorageKey); } catch { /* Reauthentication also resets the in-memory session. */ }
-      setEmployeeLoginError("");
-      setEmployeeLoginEmail(builtInAdminAccount);
-      setEmployeeLoginPassword("");
-      setLoginOpen(true);
+      openEmployeeLogin(builtInAdminAccount);
       setNotice("Hãy đăng nhập lại tài khoản admin để xác thực quyền tạo và xóa khách hàng.");
       return null;
     }
@@ -4026,6 +4055,7 @@ export default function Home() {
   const openAddDialog = () => {
     if (!requireAdminCustomerSession()) return;
     const currentDate = getVietnamDate();
+    updateFormBaselines.current.customerPeriod = { month: currentDate.month, year: currentDate.year };
     setModalMonth(currentDate.month);
     setModalYear(currentDate.year);
     setCustomerName("");
@@ -4298,8 +4328,11 @@ export default function Home() {
     setCustomerMutationError("");
     setProtectedAction({ type, record, year, month });
     if (type === "rename") {
-      setRenameValue(record.name === record.projectId || record.name === record.houseId || isPlaceholderCustomerName(record.name) ? "" : record.name);
-      setRenameHouseId(record.houseId || record.projectId);
+      const name = record.name === record.projectId || record.name === record.houseId || isPlaceholderCustomerName(record.name) ? "" : record.name;
+      const houseId = record.houseId || record.projectId;
+      updateFormBaselines.current.rename = { name, houseId };
+      setRenameValue(name);
+      setRenameHouseId(houseId);
     }
   };
 
@@ -4666,6 +4699,7 @@ export default function Home() {
         pageName: pancakePageName.trim() || "Gm Manager",
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể lưu cấu hình Pancake.");
+      updateFormBaselines.current.drive.pageName = pancakePageName;
       setPancakeUserAccessToken("");
       setPancakePageAccessToken("");
       setNotice("Đã kết nối Pancake page " + (result.pageName || pancakePageName || "Gm Manager") + ".");
@@ -4791,6 +4825,7 @@ export default function Home() {
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
   const openDriveSettings = () => {
     if (!isBuiltInAdminLoggedIn) { setNotice("Hãy liên hệ admin để thiết lập kết nối ứng dụng."); return; }
+    updateFormBaselines.current.drive = { scriptUrl: driveScriptUrl, driveUrl: driveLinkUrl, pageName: pancakePageName };
     setDriveConfigOpen(true);
   };
   const canViewAllNotesAndMessages = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || isPersonnelManager(loggedInEmployee)));
@@ -5085,14 +5120,16 @@ export default function Home() {
     const member: PersonnelMember = { id: editingPersonnelId ?? `person-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...personnelDraft, name: personnelDraft.name.trim(), birthDate: formatDesignDateInput(personnelDraft.birthDate), phone: normalizePersonnelPhone(personnelDraft.phone) };
     const nextMembers = editingPersonnelId ? selectedPersonnel.map((item) => item.id === editingPersonnelId ? member : item) : [...selectedPersonnel, member];
     persistPersonnel({ ...personnelByCategory, [selectedPersonnelCategory.id]: nextMembers });
-    setPersonnelDraft({ status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+    setPersonnelDraft(emptyPersonnelDraft);
     setEditingPersonnelId(null);
     setPersonnelAddOpen(false);
     setNotice(editingPersonnelId ? `Đã cập nhật ${member.name}.` : `Đã thêm ${member.name} vào ${selectedPersonnelCategory.label}.`);
   };
   const openPersonnelEditor = (member?: PersonnelMember) => {
+    const draft: PersonnelDraft = member ? { status: member.status ?? "Có", name: member.name, email: member.email ?? "", loginCode: member.loginCode ?? "", birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, permissions: member.permissions ?? [], address: member.address } : emptyPersonnelDraft;
+    updateFormBaselines.current.personnel = personnelDraftSnapshot(draft);
     setEditingPersonnelId(member?.id ?? null);
-    setPersonnelDraft(member ? { status: member.status ?? "Có", name: member.name, email: member.email ?? "", loginCode: member.loginCode ?? "", birthDate: member.birthDate, phone: normalizePersonnelPhone(member.phone), role: member.role, permissions: member.permissions ?? [], address: member.address } : { status: "Có", name: "", email: "", loginCode: "", birthDate: "", phone: "", role: "", permissions: [], address: "" });
+    setPersonnelDraft(draft);
     setPersonnelMenuId(null);
     setPersonnelAddOpen(true);
   };
@@ -5248,6 +5285,7 @@ export default function Home() {
     setDriveConfigOpen(false);
     setProtectedAction(null);
     setLoggedInEmployeeEmail("");
+    updateFormBaselines.current.login.name = "";
     setEmployeeLoginEmail("");
     setEmployeeLoginPassword("");
     setNotice("Đã đăng xuất tài khoản nhân viên.");
@@ -5665,7 +5703,7 @@ export default function Home() {
   };
   const messageStatusClass = (status: CustomerMessageStatus) => status === "processing" ? "customer-message--processing" : status === "resolved" ? "customer-message--resolved" : "customer-message--alert";
   const renderCustomerMessagesSummary = (className = "") => !canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary customer-message-summary--locked " + className} aria-label="Tin nhắn khách bị giới hạn quyền">
-    <button type="button" className="sidebar-notes__toggle" onClick={() => loggedInEmployee ? setNotice("Chỉ Admin và Quản lý chung được xem toàn bộ Tin nhắn khách.") : setLoginOpen(true)}>
+    <button type="button" className="sidebar-notes__toggle" onClick={() => loggedInEmployee ? setNotice("Chỉ Admin và Quản lý chung được xem toàn bộ Tin nhắn khách.") : openEmployeeLogin()}>
       <span><b>Tin nhắn khách</b><small>Chỉ Admin / Quản lý chung</small></span><em aria-hidden="true">🔒</em>
     </button>
   </section> : <section className={"sidebar-notes customer-message-summary " + className + (sidebarMessagesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
@@ -5775,7 +5813,7 @@ export default function Home() {
         return <article key={entry.requestId}>
           <b>{String(entry.payload.houseId || "Khách hàng")} · {content}</b>
           <p role={entry.error ? "alert" : "status"}>{entry.error || (entry.state === "sending" ? "Đang gửi…" : "Đã giữ trên thiết bị, chờ đồng bộ.")}</p>
-          <div>{entry.code === "AUTH_REQUIRED" && <button type="button" onClick={() => { setEmployeeLoginPassword(""); setEmployeeLoginError(""); setLoginOpen(true); }}>Đăng nhập lại</button>}<button type="button" disabled={entry.state === "sending"} onClick={() => { workflowClient.current?.retry(entry.requestId); void workflowClient.current?.flush(); }}>Thử lại</button><button type="button" disabled={entry.state === "sending"} onClick={() => workflowClient.current?.discard(entry.requestId)}>Hủy yêu cầu</button></div>
+          <div>{entry.code === "AUTH_REQUIRED" && <button type="button" onClick={() => openEmployeeLogin()}>Đăng nhập lại</button>}<button type="button" disabled={entry.state === "sending"} onClick={() => { workflowClient.current?.retry(entry.requestId); void workflowClient.current?.flush(); }}>Thử lại</button><button type="button" disabled={entry.state === "sending"} onClick={() => workflowClient.current?.discard(entry.requestId)}>Hủy yêu cầu</button></div>
         </article>;
       })}</div>
     </details>;
@@ -5810,7 +5848,7 @@ export default function Home() {
               </aside>
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading personnel-workspace__heading--compact">
-                  <div><p className="eyebrow">Đội ngũ GM</p><h1>{selectedPersonnelCategory?.label || "Nhân lực"}</h1><p>Quản lý thông tin, chức vụ và quyền truy cập của đội ngũ.</p></div><div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><WorkspaceIcon name="plus" size={16} /> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Xuất Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Tổng quan</button></div>
+                  <div><p className="eyebrow">Đội ngũ GM</p><h1>{selectedPersonnelCategory?.label || "Nhân lực"}</h1><p>Quản lý thông tin, chức vụ và quyền truy cập của đội ngũ.</p></div><div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><WorkspaceIcon name="plus" size={16} /> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Xuất Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); if (!personnelAddOpen) setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Tổng quan</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
                   <span>⌕</span>
@@ -5873,7 +5911,7 @@ export default function Home() {
                 )}
               </div>
 
-              {canManagePersonnel && <button className="personnel-entry" onClick={() => { setPersonnelView(true); setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
+              {canManagePersonnel && <button className="personnel-entry" onClick={() => { setPersonnelView(true); if (!personnelAddOpen) setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
                 <span className="personnel-entry__icon"><WorkspaceIcon name="people" /></span>
                 <span><b>Nhân lực</b><small>Thông tin đội ngũ & quyền truy cập</small></span><WorkspaceIcon name="arrow" size={18} />
               </button>}
@@ -6116,7 +6154,7 @@ export default function Home() {
             <p className="dialog-intro">Dùng tên và mã do quản lý cấp trong danh sách Nhân lực.</p>
             <label>Tên nhân viên<input type="text" value={employeeLoginEmail} autoComplete="username" placeholder="Nhập đúng họ và tên" onChange={(event) => setEmployeeLoginEmail(event.target.value)} autoFocus required /></label>
             <label>Mã đăng nhập<input type="password" value={employeeLoginPassword} autoComplete="current-password" placeholder="Mã trong danh sách Nhân lực" onChange={(event) => setEmployeeLoginPassword(event.target.value)} required /></label>
-            {!isMobileDevice() && <label className="workspace-location-field">Vị trí GM Manager<div><input value={localWorkspacePath} onChange={(event) => { workspaceLocationRevision.current++; workspacePathEdited.current = true; setLocalWorkspacePath(event.target.value); setEmployeeLoginError(""); }} disabled={choosingWorkspace || employeeAuthBusy} placeholder={"Ví dụ: I:\\ hoặc I:\\Shared drives\\GM Manager\\GM Manager\\Khách hàng"} aria-label="Vị trí GM Manager" autoComplete="off" spellCheck={false} /><button type="button" onClick={() => void selectLocalWorkspace()} disabled={choosingWorkspace || employeeAuthBusy}>{choosingWorkspace ? "Đang tìm…" : "Chọn ổ / thư mục"}</button></div><small>Nhập đường dẫn hoặc chọn ổ để tìm GM Manager. Trên web, chọn ổ một lần để cấp quyền đọc; bản PC kiểm tra trực tiếp đường dẫn đã nhập.</small></label>}
+            {!isMobileDevice() && <label className="workspace-location-field">Vị trí GM Manager<div><input value={localWorkspacePath} onChange={(event) => editLocalWorkspacePath(event.target.value)} disabled={choosingWorkspace || employeeAuthBusy} placeholder={"Ví dụ: I:\\ hoặc I:\\Shared drives\\GM Manager\\GM Manager\\Khách hàng"} aria-label="Vị trí GM Manager" autoComplete="off" spellCheck={false} /><button type="button" onClick={() => void selectLocalWorkspace()} disabled={choosingWorkspace || employeeAuthBusy}>{choosingWorkspace ? "Đang tìm…" : "Chọn ổ / thư mục"}</button></div><small>Nhập đường dẫn hoặc chọn ổ để tìm GM Manager. Trên web, chọn ổ một lần để cấp quyền đọc; bản PC kiểm tra trực tiếp đường dẫn đã nhập.</small></label>}
             {employeeLoginError && <p className="customer-portal__error" role="alert">{employeeLoginError}</p>}
             <div className="login-dialog__actions"><button className="add-button" type="submit" disabled={employeeAuthBusy || choosingWorkspace}>{employeeAuthBusy ? "Đang xác thực…" : "Đăng nhập"}</button>{loggedInEmployeeEmail && <button className="login-google" type="button" onClick={logoutEmployee}>Đăng xuất</button>}</div>
           </form>
