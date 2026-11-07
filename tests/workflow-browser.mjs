@@ -184,7 +184,7 @@ await page.goto(baseUrl);
 await page.locator('.overview-metrics').waitFor();
 async function overview(){const back=page.getByRole('button',{name:'← Tổng quan',exact:true});if(await back.count())await back.click();await page.locator('.overview-metrics').waitFor();}
 async function openHouse(code){await overview();await page.locator('.customer-result-row').filter({hasText:code}).locator('.customer-result').click();await page.locator('.record-detail--inline').waitFor();}
-async function login(name,code){await page.getByRole('button',{name:/Đổi tài khoản|Đăng nhập/}).first().click();const dialog=page.getByRole('dialog',{name:'Đăng nhập',exact:true});await dialog.getByLabel('Tên nhân viên',{exact:true}).fill(name);await dialog.getByLabel('Mã đăng nhập',{exact:true}).fill(code);await dialog.getByRole('button',{name:'Đăng nhập',exact:true}).click();await dialog.waitFor({state:'hidden'});}
+async function login(name,code){await overview();await page.locator('.workspace-header .pwa-action--login').click();const dialog=page.getByRole('dialog',{name:'Đăng nhập',exact:true});await dialog.getByLabel('Tên nhân viên',{exact:true}).fill(name);await dialog.getByLabel('Mã đăng nhập',{exact:true}).fill(code);await dialog.getByRole('button',{name:'Đăng nhập',exact:true}).click();await dialog.waitFor({state:'hidden'});}
 async function compose(content){await page.locator('.work-notes__actions button').first().click();const composer=page.getByLabel('Ghi chú mới',{exact:true});await composer.getByLabel('Người phụ trách',{exact:true}).selectOption(member.email);await composer.getByLabel('Hoàn thành dự kiến',{exact:true}).fill('10112026');await composer.getByLabel('Nội dung công việc',{exact:true}).fill(content);return composer;}
 const cachedNotes=()=>page.evaluate(()=>JSON.parse(localStorage.getItem('gm-manager-drive-cache-v1:work-notes-draft-v1:2026-10-WORKFLOW-QA-A')||'null')?.value||[]);
 const outbox=()=>page.evaluate(()=>window.qaReadOutbox());
@@ -213,6 +213,7 @@ assert.equal(commandLog.filter(command=>command.operation==='design.publish').le
 
 await login(member.name,member.loginCode);
 phase='note accept/complete';
+await openHouse('QA-A');
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 await page.locator('.work-note').first().waitFor();
 const activeNoteIndex=await page.locator('.work-note').evaluateAll(cards=>cards.findIndex(card=>card.querySelector('textarea[aria-label="Nội dung công việc"]')?.value==='Công việc kiểm thử nguyên tử'));
@@ -292,6 +293,7 @@ await designRow.getByRole('button',{name:'Chờ lưu Drive · Thử lại',exact
 
 phase='employee re-submits after feedback and manager closes note';
 await login(member.name,member.loginCode);
+await openHouse('QA-A');
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 const returnedCard=page.locator('.work-note').filter({hasText:'Bổ sung ảnh kiểm tra trước khi gửi lại.'});
 await returnedCard.waitFor();
@@ -301,6 +303,7 @@ await returnedCard.getByRole('checkbox',{name:'Đánh dấu hoàn thành',exact:
 await page.getByRole('dialog',{name:/Xác nhận hoàn thành/}).getByRole('button',{name:'Có, hoàn thành',exact:true}).click();
 await returnedCard.getByText('Chờ quản lý xác nhận',{exact:true}).waitFor();
 await login(manager.name,manager.loginCode);
+await openHouse('QA-A');
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 control.noteArchivePending=true;
 await returnedCard.getByRole('button',{name:'Xác nhận',exact:true}).click();

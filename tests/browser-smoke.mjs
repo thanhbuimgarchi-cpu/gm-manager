@@ -79,6 +79,32 @@ if(p.action==='load-customer-messages'){window.qaMessageTargets=p.customerTarget
 if(p.action==='list-documents'){r.snapshots=[{id:'s1',name:'28-10-2026-DV-75',date:'28/10/2026'}];r.activeSnapshotId='s1';r.files=[{id:'f1',name:'Phương án kiến trúc.pdf',updatedAt:'28/10/2026 09:30',work:'Thiết kế',mimeType:'application/pdf',viewUrl:'https://drive.google.com/file/d/test/view',downloadUrl:'https://drive.google.com/file/d/test/view'}];}
 if(p.action==='list-3d-library')r.folders=[];
 setTimeout(()=>event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*'),p.action==='rename-customer-folder'||p.action==='delete-customer-folder'?250:0);});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
+const workspaceHeader = page.locator('header.workspace-header');
+const overviewBack = page.getByRole('button', { name: '← Tổng quan', exact: true });
+const accountAction = () => workspaceHeader.getByRole('button', { name: /Đăng nhập|Đổi tài khoản/ });
+const notificationAction = () => workspaceHeader.getByRole('button', { name: /Bật thông báo|Thông báo đã bật/i });
+const openPersonnel = () => page.getByRole('button', { name: 'Nhân lực', exact: true }).click();
+
+async function backButtonPosition(width) {
+  await overviewBack.waitFor();
+  assert.equal(await workspaceHeader.getByRole('button', { name: '← Tổng quan', exact: true }).count(), 1);
+  const logo = await workspaceHeader.getByRole('img', { name: 'GM', exact: true }).boundingBox();
+  const back = await overviewBack.boundingBox();
+  assert.ok(logo && back, 'logo and Tổng quan are visible in the shared header');
+  if (width <= 390) {
+    assert.ok(back.x >= logo.x + logo.width, 'Tổng quan sits alongside the logo');
+    assert.ok(Math.abs(back.y + back.height / 2 - logo.y - logo.height / 2) <= 2, 'Tổng quan and the logo share the same row');
+    assert.ok(back.height >= 44, 'Tổng quan remains easy to tap');
+  }
+  return back;
+}
+
+function assertSameBackPosition(project, personnel) {
+  for (const coordinate of ['x', 'y', 'width', 'height']) {
+    assert.ok(Math.abs(project[coordinate] - personnel[coordinate]) <= 2, `Tổng quan has the same ${coordinate} in both workspaces`);
+  }
+}
+
 async function assertRestrictedCustomerActions(accountLabel) {
   const manager = accountLabel === 'manager';
   await page.locator('.overview-metrics').waitFor();
@@ -90,6 +116,8 @@ async function assertRestrictedCustomerActions(accountLabel) {
   else assert.ok(await menu.isDisabled(),accountLabel+': customer identity is read only');
   await row.locator('.customer-result').click();
   const consulting=page.locator('.record-detail--inline');await consulting.waitFor();
+  assert.equal(await accountAction().count(),0,accountLabel+': account controls are on the overview');
+  assert.equal(await notificationAction().count(),0,accountLabel+': notification controls are on the overview');
   if(manager){const projectMenu=consulting.locator('.more-button');await projectMenu.click();assert.equal(await page.getByRole('button',{name:'Xóa hồ sơ',exact:true}).count(),0);assert.ok(await page.getByRole('button',{name:'Sửa thông tin',exact:true}).isVisible());await projectMenu.click();}
   else {assert.ok(await consulting.getByLabel('Tên khách hàng',{exact:true}).isDisabled());assert.equal(await consulting.getByRole('button',{name:'Export Excel'}).count(),0);assert.ok(await consulting.getByText('Chỉ xem · Quản lý cập nhật thông tin tư vấn',{exact:true}).isVisible());}
   await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
@@ -100,6 +128,8 @@ await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manage
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
 await page.locator('.customer-result').first().waitFor();
 assert.ok(await page.getByRole('button',{name:/Thiết lập/}).isVisible(),'admin can open settings');
+assert.ok(await accountAction().isVisible(),'account switching stays available on the overview');
+assert.ok(await notificationAction().isVisible(),'notifications can still be enabled on the overview');
 const groupedNotes=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__trigger').first();
 assert.equal(await groupedNotes.getAttribute('aria-expanded'),'false');
 await groupedNotes.click();
@@ -107,7 +137,10 @@ assert.equal(await groupedNotes.getAttribute('aria-expanded'),'true');
 assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__items').first().isVisible());
 await page.screenshot({path:'outputs/interface-qa/desktop-overview.png',fullPage:true});
 const overflow = () => page.evaluate(()=>({body:document.documentElement.scrollWidth,width:innerWidth}));
+const customerRowHeight = () => page.locator('.customer-result-row').first().evaluate(row => row.getBoundingClientRect().height);
 assert.ok((await overflow()).body<=1440,'desktop overflow');
+const desktopCustomerRowHeight = await customerRowHeight();
+assert.ok(desktopCustomerRowHeight <= 64,`desktop customer rows are compact (${desktopCustomerRowHeight}px)`);
 await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).click();
 await page.getByRole('dialog',{name:'Thêm khách hàng'}).waitFor();
 await page.keyboard.press('Escape');
@@ -154,6 +187,9 @@ assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').firs
 await page.getByRole('button',{name:'Mở danh sách Tin nhắn khách'}).click();
 await page.locator('.customer-result').filter({hasText:'DV-75'}).click();
 await page.locator('.record-detail--inline').waitFor();
+const desktopProjectBack = await backButtonPosition(1440);
+assert.equal(await accountAction().count(),0,'the project header omits the account action');
+assert.equal(await notificationAction().count(),0,'the project header omits the notification action');
 const zaloEditor = page.getByRole('group', {name:'Tên nhóm Zalo', exact:true});
 assert.equal(await zaloEditor.getByRole('textbox').first().inputValue(),'Nhóm Zalo DV-75','the previous single name is preserved');
 await zaloEditor.getByRole('button',{name:'Thêm dòng sau dòng 1 của Tên nhóm Zalo',exact:true}).click();
@@ -205,8 +241,13 @@ await page.locator('.message-task-dialog').waitFor();
 await page.screenshot({path:'outputs/interface-qa/desktop-assignment.png',fullPage:true});
 await page.keyboard.press('Escape');
 await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
-await page.getByRole('button',{name:/Nhân lực.*Thông tin/}).click();
+await openPersonnel();
+assertSameBackPosition(desktopProjectBack, await backButtonPosition(1440));
 await page.getByRole('button',{name:'Nhân viên văn phòng',exact:true}).click();
+const personnelRow = page.getByRole('row', { name: /Nguyễn Minh Anh/ });
+await personnelRow.waitFor();
+const desktopPersonnelRowHeight = await personnelRow.evaluate(row => row.getBoundingClientRect().height);
+assert.ok(desktopPersonnelRowHeight <= 64,`desktop personnel rows are compact (${desktopPersonnelRowHeight}px)`);
 await page.getByRole('button',{name:'Thêm nhân lực',exact:true}).click();
 await page.locator('.personnel-add-form').waitFor();
 await page.locator('.personnel-add-form').getByRole('button',{name:'Hủy',exact:true}).click();
@@ -215,6 +256,28 @@ await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
 await page.setViewportSize({width:390,height:844});
 await page.screenshot({path:'outputs/interface-qa/mobile-overview.png',fullPage:true});
 const mobile = await overflow(); assert.ok(mobile.body<=390,JSON.stringify(mobile));
+const mobileLayouts = [];
+for (const width of [360,390]) {
+  await page.setViewportSize({width,height:844});
+  const rowHeight = await customerRowHeight();
+  assert.ok(rowHeight <= 64,`customer rows stay compact at ${width}px (${rowHeight}px)`);
+  await openPersonnel();
+  await page.getByRole('button',{name:'Nhân viên văn phòng',exact:true}).click();
+  await personnelRow.waitFor();
+  const personnelBack = await backButtonPosition(width);
+  assert.ok((await overflow()).body<=width,`personnel does not overflow at ${width}px`);
+  if (width === 390) await page.screenshot({path:'outputs/interface-qa/mobile-personnel.png',fullPage:true});
+  await overviewBack.click();
+  await page.locator('.customer-result').first().click();
+  await page.locator('.record-detail--inline').waitFor();
+  assertSameBackPosition(await backButtonPosition(width), personnelBack);
+  assert.equal(await accountAction().count(),0,`the project header omits the account action at ${width}px`);
+  assert.equal(await notificationAction().count(),0,`the project header omits the notification action at ${width}px`);
+  assert.ok((await overflow()).body<=width,`consulting does not overflow at ${width}px`);
+  if (width === 390) await page.screenshot({path:'outputs/interface-qa/mobile-consulting.png'});
+  mobileLayouts.push({ width, customerRowHeight: rowHeight, back: personnelBack });
+  await overviewBack.click();
+}
 await page.locator('.customer-result').first().click();
 await page.getByRole('button',{name:'Ghi chú',exact:true}).click();
 await page.screenshot({path:'outputs/interface-qa/mobile-notes.png',fullPage:true});
@@ -352,5 +415,5 @@ await page.evaluate(()=>{localStorage.removeItem('gm-manager-personnel-session-e
 await page.reload();
 await assertRestrictedCustomerActions('logged out');
 assert.deepEqual(errors,[],'no browser runtime errors');
-console.log(JSON.stringify({passed:true,errors,mobile,projectMobile,screenshots:'outputs/interface-qa'}));
+console.log(JSON.stringify({passed:true,errors,mobile,projectMobile,desktopCustomerRowHeight,desktopPersonnelRowHeight,desktopProjectBack,mobileLayouts,screenshots:'outputs/interface-qa'}));
 await browser.close();

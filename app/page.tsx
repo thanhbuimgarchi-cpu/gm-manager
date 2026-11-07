@@ -2007,6 +2007,11 @@ export default function Home() {
   // appears as a real customer or a Drive-backed customer folder.
   const [virtualPancakeLocation, setVirtualPancakeLocation] = useState<CustomerLocation | null>(null);
   const [personnelView, setPersonnelView] = useState(false);
+  const isProjectWorkspace = Boolean(selectedCustomerProjectId || activeFolder === "Tin nhắn");
+  const workspaceView = isProjectWorkspace ? "project" : personnelView ? "personnel" : "overview";
+  useEffect(() => {
+    if (!isCustomerPortal) window.scrollTo(0, 0);
+  }, [isCustomerPortal, workspaceView, activeFolder, selectedCustomerProjectId, selectedPersonnelCategoryId]);
   const [addOpen, setAddOpen] = useState(false);
   const [modalMonth, setModalMonth] = useState(now.month);
   const [modalYear, setModalYear] = useState(now.year);
@@ -2964,12 +2969,12 @@ export default function Home() {
     setLocalWorkspacePath(path);
     setEmployeeLoginError("");
   };
-  const renderMobileAppActions = (includeInstall = true) => <>
-    {includeInstall && renderUpdateAction()}
-    {includeInstall && !isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
+  const renderOverviewActions = () => <>
+    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
     {renderWindowsStartupAction()}
+    {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
   </>;
 
   const prepareForDesktopUpdate = async () => {
@@ -5490,7 +5495,7 @@ export default function Home() {
     };
     return <section className="work-notes" aria-label="Ghi chú công việc">
           <header className="work-notes__heading">
-        <div><p className="eyebrow">Ghi chú</p><h1>Công việc dự án</h1><p>{canViewAllNotesAndMessages ? "Giao việc, theo dõi thời hạn và xác nhận kết quả hoàn thành của dự án." : "Nhận việc và gửi kết quả hoàn thành để quản lý xác nhận."}</p></div>
+        <h1>Công việc dự án</h1>
         {canViewAllNotesAndMessages && <div className="work-notes__actions"><span className={savingWorkNotes ? "is-saving" : ""}>{savingWorkNotes ? "Đang lưu…" : "Đã lưu trên thiết bị"}</span><button type="button" onClick={addWorkNote} disabled={Boolean(newWorkNote)}><b>＋</b> Ghi chú</button></div>}
       </header>
       <div className="work-notes__list">
@@ -5539,7 +5544,7 @@ export default function Home() {
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
       <header className="document-library__heading">
-        <div><p className="eyebrow">Tài liệu</p><h1>Tài liệu dự án</h1><p>Hồ sơ mới chưa có bản Tài liệu. Khi có nhu cầu, bấm <b>＋ Bản ngày mới</b> để tạo ngày tài liệu; bản mới sẽ sao chép toàn bộ tệp và Công việc từ ngày gần nhất.</p></div>
+        <h1>Tài liệu dự án</h1>
         <div className="document-library__actions">{desktopBridge()?.isDesktop && desktopBridge()?.openDrive && <button type="button" className="document-library__refresh" onClick={() => void openDesktopDocuments()}>▰ Mở Drive</button>}<button type="button" className="document-library__refresh" onClick={() => void loadDocuments(undefined, true, true)} disabled={loadingDocuments}>↻ Nạp lại</button><button type="button" className="add-button" onClick={() => void createDocumentSnapshot()} disabled={loadingDocuments}><span>＋</span> Bản ngày mới</button></div>
       </header>
       <div className="document-library__days">
@@ -5563,7 +5568,7 @@ export default function Home() {
     </section>;
   };
   const renderThreeDLibrary = () => <section className="three-d-library" aria-label="Thư mục 3D">
-    <header className="three-d-library__heading"><div><p className="eyebrow">3D</p><h1>Thư mục 3D</h1><p>Nằm cùng cấp với Tài liệu trong hồ sơ dự án. Không lưu theo ngày; tệp được đặt vào Kiến trúc hoặc Nội thất.</p></div><div>{threeDLibrary.rootUrl && <a href={threeDLibrary.rootUrl} target="_blank" rel="noreferrer" className="three-d-library__open">Mở 3D ↗</a>}<button type="button" className="document-library__refresh" onClick={() => void loadThreeDLibrary(true)} disabled={loadingThreeDLibrary} title="Cập nhật 3D từ Drive" aria-label="Cập nhật thư mục 3D">{loadingThreeDLibrary ? "…" : "↻"}</button></div></header>
+    <header className="three-d-library__heading"><h1>Thư mục 3D</h1><div>{threeDLibrary.rootUrl && <a href={threeDLibrary.rootUrl} target="_blank" rel="noreferrer" className="three-d-library__open">Mở 3D ↗</a>}<button type="button" className="document-library__refresh" onClick={() => void loadThreeDLibrary(true)} disabled={loadingThreeDLibrary} title="Cập nhật 3D từ Drive" aria-label="Cập nhật thư mục 3D">{loadingThreeDLibrary ? "…" : "↻"}</button></div></header>
     <div className="three-d-library__grid">
       {(threeDLibrary.folders.length ? threeDLibrary.folders : ([{ key: "architecture", name: "Kiến trúc", folderUrl: "", files: [] }, { key: "interior", name: "Nội thất", folderUrl: "", files: [] }] as ThreeDLibraryFolder[])).map((folder) => <section className="three-d-library__folder" key={folder.key}>
         <header><span>▧</span><h2>{folder.name}</h2>{folder.folderUrl && <a href={folder.folderUrl} target="_blank" rel="noreferrer" aria-label={`Mở thư mục 3D ${folder.name}`} title="Mở thư mục trên Drive">↗</a>}</header>
@@ -5572,12 +5577,10 @@ export default function Home() {
     </div>
   </section>;
   const renderWorkflowCustomerSearch = () => {
-    if (activeFolder === "Ghi chú" && !canViewAllNotesAndMessages) {
-      return <section className="workflow-customer-search workflow-customer-search--assigned" aria-label="Ghi chú được giao"><p>Danh sách ghi chú chỉ hiển thị công việc đã giao cho tài khoản này. Mở một mục ở thanh bên để xem chi tiết.</p></section>;
-    }
+    if (activeFolder === "Ghi chú" && !canViewAllNotesAndMessages) return null;
     return <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
-        <span>⌕</span>
+        <WorkspaceIcon name="search" />
         <input value={workflowSearch} onChange={(event) => { setWorkflowSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng trong quy trình" />
         {workflowSearch && <button type="button" onClick={() => setWorkflowSearch("")} aria-label="Xóa tìm kiếm trong quy trình">×</button>}
       </label>
@@ -5597,14 +5600,14 @@ export default function Home() {
     const analysis = progressAnalysisFor(kind);
     const enabled = isDemandSelected(definition.demandCode);
     if (!enabled) return <section className="design-schedule design-schedule--disabled">
-      <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><p>Chưa chọn nhu cầu {definition.shortTitle.toLocaleLowerCase("vi")} trong Phiếu thông tin khách hàng.</p></div>
+      <div><h2>{definition.title}</h2><p>Chưa chọn nhu cầu trong Tư vấn.</p></div>
       <span>Chưa kích hoạt</span>
     </section>;
 
     return <section className="design-schedule"><fieldset className="workflow-edit-scope">
       {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Bạn có thể nhận và gửi hoàn thành hạng mục được giao.</p>}
       <header className="design-schedule__heading">
-        <div><p className="eyebrow">{definition.shortTitle}</p><h2>{definition.title}</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
+        <h2>{definition.title}</h2>
         {canManageCustomerWorkflows && <div className="export-actions"><div className="design-progress-view__status"><i className={syncingDesignId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingDesignId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="work-note__publish" onClick={() => void publishDesignTasks(kind)} disabled={hasWorkflowPending("design.publish", kind) || !rows.some((row) => row.content.trim() && !row.actualDate && !isAwaitingCompletionReview(row) && (row.assigneeEmail || row.plannedDate || row.publishedAt))}>Phát hành</button><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncDesignProgressToDrive(activeCustomerRecord, selectedYear, selectedMonth, undefined, kind)} disabled={!activeCustomerRecord || syncingDesignId === activeCustomerRecord.id}>⇩ Export Excel</button></div>}
       </header>
       <div className="design-progress-table-wrap">
@@ -5646,13 +5649,12 @@ export default function Home() {
           <ol>{analysis.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol>
         </article>
       </section>
-              <footer className="design-progress-view__footer"><span>File: {definition.title} {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Thiết kế</span></footer>
     </fieldset></section>;
   };
 
   const renderWarrantySchedule = () => <section className="design-schedule warranty-schedule">
     <header className="design-schedule__heading">
-      <div><p className="eyebrow">Bảo hành</p><h2>Phiếu thông tin bảo hành</h2><span>Ngày tự định dạng dd/mm/yyyy · ngày trong mỗi cột tăng dần từ trên xuống</span></div>
+      <h2>Phiếu thông tin bảo hành</h2>
       <div className="export-actions"><div className="design-progress-view__status"><i className={syncingWarrantyId === activeCustomerRecord?.id ? "is-syncing" : ""} />{syncingWarrantyId === activeCustomerRecord?.id ? "Đang xuất Excel…" : "Đã lưu trên thiết bị"}</div><button type="button" className="export-button" onClick={() => activeCustomerRecord && void syncWarrantyToDrive(activeCustomerRecord, selectedYear, selectedMonth)} disabled={!activeCustomerRecord || syncingWarrantyId === activeCustomerRecord.id}>⇩ Export Excel</button></div>
     </header>
     <div className="design-progress-table-wrap">
@@ -5679,7 +5681,6 @@ export default function Home() {
       </table>
       <button type="button" className="design-progress-add-row" onClick={addWarrantyProgressRow}><span>＋</span> Thêm dòng bảo hành</button>
     </div>
-    <footer className="design-progress-view__footer"><span>File: Phiếu thông tin bảo hành {activeCustomerRecord?.houseId || "chưa-có-mã-nhà"}.xlsx</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {activeCustomerRecord?.houseId || "chưa có mã nhà"} / Bảo hành</span></footer>
   </section>;
 
   const openAllCustomerMessages = () => {
@@ -5730,8 +5731,8 @@ export default function Home() {
       : customerMessages;
     return <section className="customer-messages" aria-label="Tin nhắn khách">
       <header className="customer-messages__heading">
-        <div><p className="eyebrow">Tin nhắn khách</p><h1>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tổng hợp tin nhắn khách"}</h1><p>Tin nhắn được gom theo từng khoảng 2 giờ. Hồ sơ được ghép theo <b>Tên nhóm Zalo</b> đã gắn trong Tư vấn hoặc theo dạng <b>Mã nhà-GM-Nội dung</b>.</p></div>
-        <div className="customer-messages__actions"><span>{loadingCustomerMessages ? "Đang cập nhật…" : "Tự động cập nhật"}</span><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>↻ Nạp lại</button></div>
+        <h1>Tin nhắn khách</h1>
+        <div className="customer-messages__actions"><button type="button" onClick={() => void loadCustomerMessages(selectedCustomerLocation, true)} disabled={loadingCustomerMessages}>{loadingCustomerMessages ? "Đang cập nhật…" : "↻ Nạp lại"}</button></div>
       </header>
       <div className="customer-messages__list">
         {customerMessagesError && <p className="customer-messages__empty">{customerMessagesError}</p>}
@@ -5818,29 +5819,34 @@ export default function Home() {
       })}</div>
     </details>;
   };
+  const returnToOverview = () => {
+    if (isProjectWorkspace) {
+      returnToCustomerSearch();
+    } else {
+      setPersonnelView(false);
+      if (!personnelAddOpen) setSelectedPersonnelCategoryId(null);
+      setPersonnelSearch("");
+    }
+  };
   return (
-    <main className="crm-shell">
-      {/* Tin nhắn khách là màn hình tổng hợp, nên phải mở được ngay cả khi
-          chưa chọn một hồ sơ khách hàng cụ thể từ màn hình tổng. */}
-      {!selectedCustomerProjectId && activeFolder !== "Tin nhắn" && (
+    <main className={`crm-shell${isProjectWorkspace ? " crm-shell--project" : ""}`}>
+      <header className="customer-gateway__header workspace-header">
+        <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager</span></div>
+        {workspaceView !== "overview" && <button type="button" className="workspace-header__back customer-context--back" onClick={returnToOverview}>← Tổng quan</button>}
+        <div className="customer-gateway__actions">
+          {renderUpdateAction()}
+          {workspaceView === "overview" && renderOverviewActions()}
+        </div>
+      </header>
+      {!isProjectWorkspace && (
         <section className="customer-gateway" aria-label={personnelView ? "Nhân lực" : "Chọn khách hàng"}>
-          <header className="customer-gateway__header">
-            <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager<small>PROJECT WORKSPACE</small></span></div>
-            <div className="customer-gateway__actions">
-              {!personnelView && renderMobileAppActions()}
-              {personnelView && <>{renderUpdateAction()}{renderWindowsStartupAction()}</>}
-              {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
-            </div>
-          </header>
-
           {renderDesktopUpdateBanner()}
           {personnelView ? (
             <div className="personnel-layout">
               <aside className="personnel-sidebar">
-                <p className="sidebar-label sidebar-label--top">Nhân lực</p>
                 <nav className="main-nav" aria-label="Nhóm nhân lực">
                   {personnelCategories.map((category) => (
-                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); setEditingPersonnelId(null); setPersonnelMenuId(null); }} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
+                    <button key={category.id} type="button" onClick={() => { setSelectedPersonnelCategoryId(category.id); setPersonnelSearch(""); setPersonnelAddOpen(false); setEditingPersonnelId(null); setPersonnelMenuId(null); }} aria-pressed={selectedPersonnelCategory?.id === category.id} className={`nav-row ${selectedPersonnelCategory?.id === category.id ? "nav-row--active" : ""}`}>
                       <span className="nav-row__icon"><WorkspaceIcon name={category.id === "management" ? "shield" : category.id === "coordination" ? "chart" : category.id === "workshop" ? "cube" : category.id === "site" || category.id === "construction" ? "tool" : "people"} size={18} /></span><span>{category.label}</span>
                     </button>
                   ))}
@@ -5848,10 +5854,10 @@ export default function Home() {
               </aside>
               <section className="personnel-workspace">
                 <header className="personnel-workspace__heading personnel-workspace__heading--compact">
-                  <div><p className="eyebrow">Đội ngũ GM</p><h1>{selectedPersonnelCategory?.label || "Nhân lực"}</h1><p>Quản lý thông tin, chức vụ và quyền truy cập của đội ngũ.</p></div><div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><WorkspaceIcon name="plus" size={16} /> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Xuất Excel"}</button><button className="personnel-back" onClick={() => { setPersonnelView(false); if (!personnelAddOpen) setSelectedPersonnelCategoryId(null); setPersonnelSearch(""); }}>← Tổng quan</button></div>
+                  <h1>{selectedPersonnelCategory?.label || "Nhân lực"}</h1><div className="personnel-workspace__actions"><button className="add-button" onClick={() => openPersonnelEditor()}><WorkspaceIcon name="plus" size={16} /> Thêm nhân lực</button><button type="button" className="export-button" onClick={() => void exportPersonnelToDrive()} disabled={exportingPersonnel || loadingPersonnel}>{exportingPersonnel ? "Đang xuất…" : "⇩ Xuất Excel"}</button></div>
                 </header>
                 <label className="customer-search personnel-workspace__search">
-                  <span>⌕</span>
+                  <WorkspaceIcon name="search" />
                   <input value={personnelSearch} onChange={(event) => setPersonnelSearch(event.target.value)} placeholder={`Tìm trong ${selectedPersonnelCategory?.label.toLocaleLowerCase("vi") || "nhân lực"}…`} aria-label="Tìm nhân lực" />
                 </label>
                 <div className="personnel-category-detail">
@@ -5881,13 +5887,13 @@ export default function Home() {
                 {renderOutstandingDesignSummary("gateway-notes gateway-notes--side")}
               </div>
               <div className="customer-gateway__body">
-              <header className="workspace-overview"><div><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h1>Tổng quan dự án</h1><p>Theo dõi công việc, kết nối đội ngũ và chăm sóc khách hàng.</p></div><span className="workspace-overview__date"><WorkspaceIcon name="calendar" size={16} />{new Date().toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric" })}</span></header>
+              <header className="workspace-overview"><h1>Tổng quan dự án</h1><span className="workspace-overview__date"><WorkspaceIcon name="calendar" size={16} />{new Date().toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", year: "numeric" })}</span></header>
               <div className="overview-metrics">
                 <div className="overview-metric"><span><WorkspaceIcon name="folder" size={18} />Hồ sơ trong tháng</span><strong>{customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth).length}</strong><small>Tháng {selectedMonth} · {selectedYear}</small></div>
                 {canViewNotesSummary && <div className="overview-metric"><span><WorkspaceIcon name="note" size={18} />Công việc đang chờ</span><strong>{outstandingSidebarNotes.length}</strong><small>{outstandingSidebarNotes.filter(({ note }) => note.priority !== "Bình thường").length} công việc ưu tiên cao</small></div>}
                 {canViewCustomerMessages && <button type="button" className="overview-metric" onClick={openAllCustomerMessages}><span><WorkspaceIcon name="message" size={18} />Tin nhắn khách</span><strong>{customerMessages.filter((message) => message.status !== "resolved").length}</strong><small>Mở hộp tin nhắn <span aria-hidden="true">↗</span></small></button>}
               </div>
-              <div className="customer-directory-heading"><div><h2>Khách hàng</h2><p>Tất cả hồ sơ và tài liệu dự án của bạn.</p></div>{isBuiltInAdminLoggedIn && <button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button>}</div>
+              <div className="customer-directory-heading"><h2>Khách hàng</h2>{isBuiltInAdminLoggedIn && <button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button>}</div>
               <label className="customer-search">
                 <WorkspaceIcon name="search" />
                 <input value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng" />
@@ -5897,7 +5903,6 @@ export default function Home() {
               <div className="customer-period" aria-label="Chọn thời gian khách hàng">
                 <label>Tháng<select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
                 <label>Năm<select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
-                <span>Đang hiện hồ sơ trong <b>T{selectedMonth} / {selectedYear}</b></span>
               </div>
 
               <div className="customer-search-results" aria-live="polite">
@@ -5913,7 +5918,7 @@ export default function Home() {
 
               {canManagePersonnel && <button className="personnel-entry" onClick={() => { setPersonnelView(true); if (!personnelAddOpen) setSelectedPersonnelCategoryId(personnelCategories[0]?.id ?? null); setPersonnelSearch(""); }}>
                 <span className="personnel-entry__icon"><WorkspaceIcon name="people" /></span>
-                <span><b>Nhân lực</b><small>Thông tin đội ngũ & quyền truy cập</small></span><WorkspaceIcon name="arrow" size={18} />
+                <b>Nhân lực</b><WorkspaceIcon name="arrow" size={18} />
               </button>}
               </div>
             </div>
@@ -5922,12 +5927,10 @@ export default function Home() {
         </section>
       )}
 
-      {(selectedCustomerProjectId || activeFolder === "Tin nhắn") && <><aside className="sidebar">
-        <div className="brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager<small>PROJECT WORKSPACE</small></span></div>
-        <p className="sidebar-label sidebar-label--top">Quy trình công việc</p>
+      {isProjectWorkspace && <><aside className="sidebar">
         <nav className="main-nav" aria-label="Quy trình GM Manager">
           {visibleWorkspaceFolders.map((folder) => (
-            <button key={folder.label} onClick={() => setActiveFolder(folder.label)} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
+            <button key={folder.label} type="button" onClick={() => setActiveFolder(folder.label)} aria-pressed={activeFolder === folder.label} className={`nav-row ${activeFolder === folder.label ? "nav-row--active" : ""}`}>
               <span className="nav-row__icon"><WorkspaceIcon name={folder.label} size={18} /></span>
               <span>{folder.label}</span>
             </button>
@@ -5940,12 +5943,9 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
-          <div className="topbar__project-controls">
-            {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
-            <button type="button" className="customer-context customer-context--back" onClick={returnToCustomerSearch}>← Tổng quan</button><span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span>/</span>{activeFolder}</span>
-          </div>
-          <div className="topbar__actions">{renderUpdateAction()}{renderMobileAppActions(false)}{isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}</div>
+        <header className="topbar workspace-context-bar">
+          <span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span aria-hidden="true">/</span>{activeFolder}</span>
+          {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
         </header>
 
         {renderDesktopUpdateBanner()}
@@ -5964,7 +5964,7 @@ export default function Home() {
         ) : activeFolder === "Tư vấn" ? (
           <section className="consulting-view">
             <label className="customer-search consulting-search">
-              <span>⌕</span>
+              <WorkspaceIcon name="search" />
               <input value={consultingSearch} onChange={(event) => setConsultingSearch(event.target.value)} placeholder="Tìm nội dung trong phiếu thông tin…" aria-label="Tìm trong phiếu thông tin khách hàng" />
               {consultingSearch && <button type="button" onClick={() => setConsultingSearch("")} aria-label="Xóa tìm kiếm trong phiếu">×</button>}
             </label>
@@ -5973,13 +5973,11 @@ export default function Home() {
               {!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý cập nhật thông tin tư vấn</p>}
               <header className="record-detail__heading">
                 <div className="record-detail__identity">
-                  <p className="eyebrow">Tư vấn · Phiếu thông tin khách hàng</p>
-                  <h2>{customerDisplayName(selectedRecord)}</h2>
+                  <h2>Phiếu thông tin khách hàng</h2>
                   <GrowingTextarea className="record-detail__name-input" value={selectedRecord.name === selectedRecord.projectId ? "" : selectedRecord.name} onChange={(event) => updateRecordName(event.target.value)} placeholder="Nhập tên khách hàng" aria-label="Tên khách hàng" />
-                  <span>{selectedRecord.houseId ? `Mã nhà: ${selectedRecord.houseId} · ` : ""}Khởi tạo {selectedRecord.createdAt}</span>
                   <div className="record-detail__zalo-group" role="group" aria-label="Tên nhóm Zalo">
-                    <span>Tên nhóm Zalo (tùy chọn)</span>
-                    <LineListEditor value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(value) => updateRecordDetail("ZALO_GROUP_NAME", value)} ariaLabel="Tên nhóm Zalo" placeholder="Nhập đúng tên nhóm Zalo" maxLines={50} maxLineLength={400} />
+                    <span>Tên nhóm Zalo</span>
+                    <LineListEditor value={selectedRecord.details?.ZALO_GROUP_NAME ?? ""} onChange={(value) => updateRecordDetail("ZALO_GROUP_NAME", value)} ariaLabel="Tên nhóm Zalo" placeholder="Nhập tên nhóm Zalo" maxLines={50} maxLineLength={400} />
                   </div>
                 </div>
                   <div className="consulting-profile-actions">
@@ -6000,17 +5998,16 @@ export default function Home() {
                   <tbody>{visibleDetailSections.map((section) => <Fragment key={section.title}>
                     <tr className="information-table__section"><th colSpan={2}>{section.title}</th></tr>
                     {section.fields.map((field) => <tr key={field.code}>
-                      <td>{field.label} <span className="field-code">({field.code})</span></td>
-                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /><span>Chọn nhu cầu này</span></label> : dateDetailCodes.has(field.code) ? <VietnamDatePicker aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxDate={formatWorkNoteDate()} onChange={(value) => updateRecordDetail(field.code, value)} /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
+                      <td>{field.label}</td>
+                      <td>{demandCheckboxCodes.has(field.code) ? <label className="demand-checkbox"><input type="checkbox" aria-label={field.label} checked={Boolean(selectedRecord.details?.[field.code]?.trim())} onChange={(event) => updateRecordDetail(field.code, event.target.checked ? "Có" : "")} /></label> : dateDetailCodes.has(field.code) ? <VietnamDatePicker aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} maxDate={formatWorkNoteDate()} onChange={(value) => updateRecordDetail(field.code, value)} /> : field.options ? <select aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)}>
                         <option value="">Chọn giá trị</option>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}
-                      </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} placeholder="Nhập kết quả thu thập" />}</td>
+                      </select> : <GrowingTextarea aria-label={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(event) => updateRecordDetail(field.code, event.target.value)} />}</td>
                     </tr>)}
                   </Fragment>)}</tbody>
                 </table>}
 
                 {consultingSearchMatchesFunctional && <section className="dynamic-information">
                   <h3>4. Thông tin công năng</h3>
-                  <p>Gõ tối thiểu 2 ký tự để xem gợi ý gần đúng, hoặc bắt đầu bằng <b>@</b> để nhập phòng mới.</p>
                   <table className="functional-table">
                     <thead><tr><th>Tầng</th><th>Công năng</th><th>Số lượng</th><th>Mô tả chi tiết</th></tr></thead>
                     <tbody>{functionalFloors.flatMap((floor) => floor.rooms.map((room, roomIndex) => <tr key={room.id}>
@@ -6030,11 +6027,11 @@ export default function Home() {
 
                 {visibleSystemFields.length > 0 && <section className="dynamic-information system-information">
                   <h3>5. Thông tin hệ thống</h3>
-                  <table className="information-table"><thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead><tbody>{visibleSystemFields.map((field) => <tr key={field.code}><td>{field.label} <span className="field-code">({field.code})</span></td><td><LineListEditor ariaLabel={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(value) => updateRecordDetail(field.code, value)} placeholder="Nhập kết quả thu thập" /></td></tr>)}</tbody></table>
+                  <table className="information-table"><thead><tr><th>Nội dung</th><th>Kết quả thu thập</th></tr></thead><tbody>{visibleSystemFields.map((field) => <tr key={field.code}><td>{field.label}</td><td><LineListEditor ariaLabel={field.label} value={selectedRecord.details?.[field.code] ?? ""} onChange={(value) => updateRecordDetail(field.code, value)} /></td></tr>)}</tbody></table>
                 </section>}
 
                 {consultingSearchMatchesAudio && <section className="dynamic-information system-information audio-information">
-                  <div className="audio-information__heading"><div><h3>6. Thông tin ghi âm</h3><p>File được lưu trong thư mục khách hàng. Mỗi đoạn xong sẽ ghi ngay vào Excel; nếu dừng giữa chừng, lần sau tiếp tục từ đoạn chưa làm.</p></div>
+                  <div className="audio-information__heading"><h3>6. Thông tin ghi âm</h3>
                     <div className="audio-information__actions">{audioProcessingId === selectedRecord.id ? <button type="button" className="audio-import-button audio-import-button--busy" disabled>{audioProcessingStatus || "Đang xử lý…"}</button> : hasPendingAudio ? <button type="button" className="audio-import-button audio-resume-button" onClick={() => void resumeAudioProcessing(selectedRecord)}>Tiếp tục từ đoạn {audioCompletedChunks + 1}/{audioTotalChunks}</button> : <label className="audio-import-button"><input type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={importAudioNote} />{selectedAudioNote ? "Add ghi âm mới" : "Add ghi âm"}</label>}{selectedAudioNote && audioProcessingId !== selectedRecord.id && <button type="button" className="audio-delete-button" onClick={() => void deleteAudioNote(selectedRecord)}>Xóa ghi âm</button>}</div>
                   </div>
                   {selectedAudioNote && <div className="audio-note">
@@ -6043,7 +6040,6 @@ export default function Home() {
                   </div>}
                 </section>}
               </div>
-              <footer className="record-detail__footer"><span>{syncingRecordId === selectedRecord.id ? "Đang xuất Excel vào Drive…" : "Xuất Excel khi cần bằng nút Export Excel"}</span><span>GM Manager / Khách hàng / {selectedYear} / T{selectedMonth} / {selectedRecord.houseId || "chưa có mã nhà"} / Tư vấn</span></footer>
             </fieldset></section>}
           </section>
         ) : activeFolder === "Thiết kế" ? (
@@ -6088,7 +6084,7 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setAddOpen(false)}>
           <form className="add-dialog" onSubmit={addCustomer} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setAddOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Hồ sơ dự án mới</p><h2>Thêm khách hàng</h2><p className="dialog-intro">Tạo hồ sơ để quản lý thông tin, công việc và tài liệu của khách hàng.</p>
+            <h2>Thêm khách hàng</h2>
             <label>Tháng<select value={modalMonth} onChange={(event) => setModalMonth(Number(event.target.value))}>{monthLabels.map((month, index) => <option key={month} value={index + 1}>{month}</option>)}</select></label>
             <label>Năm<select value={modalYear} onChange={(event) => setModalYear(Number(event.target.value))}>{availableModalYears.map((year) => <option key={year} value={year}>{year}</option>)}</select></label>
             <label>Tên khách hàng<input autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Ví dụ: Lê Thanh K" /></label>

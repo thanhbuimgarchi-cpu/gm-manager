@@ -135,7 +135,7 @@ try {
   await native.context.close();
 
   const untouched = await fixture({ role: 'Quản lý chung', manifest: release('1.3.0'), waitingWebUpdate: true });
-  await untouched.page.getByRole('button', { name: /Nhân lực.*Thông tin/ }).click();
+  await untouched.page.getByRole('button', { name: 'Nhân lực', exact: true }).click();
   await untouched.page.getByRole('button', { name: 'Thêm nhân lực', exact: true }).click();
   await untouched.page.locator('.personnel-add-form').waitFor();
   await untouched.page.getByRole('button', { name: '← Tổng quan', exact: true }).click();
@@ -146,7 +146,7 @@ try {
   await untouched.context.close();
 
   const edited = await fixture({ role: 'Quản lý chung' });
-  await edited.page.getByRole('button', { name: /Nhân lực.*Thông tin/ }).click();
+  await edited.page.getByRole('button', { name: 'Nhân lực', exact: true }).click();
   await edited.page.getByRole('button', { name: 'Nhân viên văn phòng', exact: true }).click();
   await edited.page.getByRole('button', { name: 'Tùy chọn Nhân viên kiểm thử', exact: true }).click();
   await edited.page.getByRole('button', { name: 'Thay đổi', exact: true }).click();
