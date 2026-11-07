@@ -57,7 +57,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .customer-gateway__brand { min-width: 0; max-width: 100%; margin: 0; transform: none; }
 .workspace-header { z-index: 40; grid-column: 1 / -1; align-items: center; gap: 0 12px; }
 .workspace-header__back { grid-column: 2; justify-self: start; }
+.workspace-header--project { grid-template-columns: max-content max-content minmax(0, 1fr) auto; }
+.workspace-header__project { grid-column: 3; display: flex; align-items: center; min-width: 0; gap: 12px; padding-left: 12px; border-left: 1px solid var(--line); }
+.workspace-header__project strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #26364d; font-size: 16px; }
+.workspace-header__project .customer-link--topbar { flex: 0 0 auto; white-space: nowrap; }
 .customer-gateway__actions { grid-column: 3; flex-wrap: wrap; gap: 6px; padding: 0; overflow: visible; }
+.workspace-header--project .customer-gateway__actions { grid-column: 4; }
 .customer-gateway__actions:empty { display: none; }
 .customer-gateway__actions .pwa-action--login { order: -1; }
 .workspace-overview { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0; padding: 0; }
@@ -168,18 +173,12 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .sidebar-note b { color: #43516a; font-size: 11px; font-weight: 600; line-height: 1.4; }
 .sidebar-note small { color: #8b95a5; font-size: 10px; line-height: 1.5; }
 .sidebar-notes__empty { padding: 6px 10px 12px; color: #8b96a8; font-size: 11px; }
-.workspace-context-bar { position: static; z-index: auto; min-height: 48px; gap: 8px; justify-content: space-between; padding: 6px var(--workspace-gutter); border-bottom-color: var(--line); background: #fff; }
-.workspace-context-bar .customer-link--topbar { flex: 0 0 auto; min-height: 34px; white-space: nowrap; }
-.topbar__project-controls { flex-wrap: wrap; gap: 6px; }
-.workspace-breadcrumb { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px; min-width: 0; margin-right: auto; color: #627188; font-size: 12px; overflow-wrap: anywhere; }
-.workspace-breadcrumb b { color: #25344a; font-size: 14px; }
-.workspace-breadcrumb > span { color: #a2adbd; }
 .sidebar-summary-heading { display: flex; align-items: center; min-width: 0; }
 .sidebar-summary-heading .sidebar-notes__toggle { flex: 1 1 auto; min-width: 0; }
 .sidebar-summary-collapse { display: grid; flex: 0 0 auto; width: 28px; height: 28px; place-items: center; margin-right: 11px; padding: 0; border: 1px solid #e6ebf2; border-radius: 6px; background: #fff; color: #8492a6; font-size: 16px; line-height: 1; }
 .sidebar-summary-collapse:hover { border-color: #ccd5e2; background: #f6f8fb; color: #526680; }
 .activity-toggle { display: none; }
-.workflow-page, .design-workspace { min-height: calc(100dvh - var(--workspace-header-height) - 48px); padding-bottom: 24px; }
+.workflow-page, .design-workspace { min-height: calc(100dvh - var(--workspace-header-height)); padding-bottom: 24px; }
 .consulting-view { max-width: 1500px; padding: 14px var(--workspace-gutter) 28px; }
 .workflow-customer-search { max-width: none; margin: 12px var(--workspace-gutter) 0; }
 .workflow-customer-search--assigned { padding: 12px 15px; border: 1px solid var(--line); border-radius: 9px; background: #fff; color: #7c889a; font-size: 12px; }
@@ -462,6 +461,9 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
   .workspace-header { grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: max(6px, env(safe-area-inset-top)) max(var(--workspace-gutter), env(safe-area-inset-right)) 6px max(var(--workspace-gutter), env(safe-area-inset-left)); }
   .workspace-header__back { display: inline-flex; align-items: center; justify-content: center; justify-self: end; min-height: 44px; }
   .customer-gateway__brand .brand__wordmark { font-size: 16px; }
+  .workspace-header__project { grid-column: 1 / -1; grid-row: 2; justify-content: space-between; gap: 8px; min-height: 32px; padding: 4px 0 0; border-top: 1px solid var(--line); border-left: 0; }
+  .workspace-header__project strong { white-space: normal; overflow-wrap: anywhere; }
+  .workspace-header__project .customer-link--topbar { min-height: 44px; }
   .workspace-header .customer-gateway__actions { grid-column: 1 / -1; justify-content: flex-start; width: 100%; }
   .customer-gateway__actions .pwa-action { min-height: 44px; padding: 6px 9px; font-size: 12px; }
   .customer-gateway__actions .reload-drive { display: inline-block; }
@@ -490,7 +492,6 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
   :is(.sidebar, .personnel-sidebar) .nav-row--active { border-color: #efc5ce; background: #fff0f3; color: #a52637; }
   .sidebar .sidebar-notes { margin-top: 8px; padding-top: 0; }
   .sidebar .sidebar-notes__list { max-height: 170px; }
-  .workspace-context-bar .customer-link--topbar { min-height: 44px; }
   .record-detail__zalo-group .line-list-editor__actions { flex-direction: row; padding-top: 0; }
   .record-detail__zalo-group .line-list-editor__actions button, .consulting-profile-actions .more-button { min-width: 44px; min-height: 44px; }
   .record-detail__zalo-group .growing-textarea, .consulting-profile-actions .export-button { min-height: 44px; }

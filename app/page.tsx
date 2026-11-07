@@ -5828,11 +5828,16 @@ export default function Home() {
       setPersonnelSearch("");
     }
   };
+  const customerHeading = isProjectWorkspace && selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "";
   return (
     <main className={`crm-shell${isProjectWorkspace ? " crm-shell--project" : ""}`}>
-      <header className="customer-gateway__header workspace-header">
+      <header className={`customer-gateway__header workspace-header${customerHeading ? " workspace-header--project" : ""}`}>
         <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager</span></div>
         {workspaceView !== "overview" && <button type="button" className="workspace-header__back customer-context--back" onClick={returnToOverview}>← Tổng quan</button>}
+        {customerHeading && <div className="workspace-header__project">
+          <strong title={customerHeading}>{customerHeading}</strong>
+          {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
+        </div>}
         <div className="customer-gateway__actions">
           {renderUpdateAction()}
           {workspaceView === "overview" && renderOverviewActions()}
@@ -5943,11 +5948,6 @@ export default function Home() {
       </aside>
 
       <section className="workspace">
-        <header className="topbar workspace-context-bar">
-          <span className="workspace-breadcrumb"><b>{selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "Tất cả khách hàng"}</b><span aria-hidden="true">/</span>{activeFolder}</span>
-          {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
-        </header>
-
         {renderDesktopUpdateBanner()}
         {!hasActiveFolderAccess ? (
           <section className="coming-soon"><span>⌑</span><p className="eyebrow">GM Manager</p><h1>Chưa được cấp quyền</h1><p>Tài khoản <b>{loggedInEmployee?.email}</b> không có quyền truy cập mục <b>{activeFolder}</b>.</p></section>

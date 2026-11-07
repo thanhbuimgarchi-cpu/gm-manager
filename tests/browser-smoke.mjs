@@ -83,6 +83,7 @@ const workspaceHeader = page.locator('header.workspace-header');
 const overviewBack = page.getByRole('button', { name: '← Tổng quan', exact: true });
 const accountAction = () => workspaceHeader.getByRole('button', { name: /Đăng nhập|Đổi tài khoản/ });
 const notificationAction = () => workspaceHeader.getByRole('button', { name: /Bật thông báo|Thông báo đã bật/i });
+const settingsAction = page.getByRole('button', { name: /Thiết lập$/ });
 const openPersonnel = () => page.getByRole('button', { name: 'Nhân lực', exact: true }).click();
 
 async function backButtonPosition(width) {
@@ -102,6 +103,26 @@ async function backButtonPosition(width) {
 function assertSameBackPosition(project, personnel) {
   for (const coordinate of ['x', 'y', 'width', 'height']) {
     assert.ok(Math.abs(project[coordinate] - personnel[coordinate]) <= 2, `Tổng quan has the same ${coordinate} in both workspaces`);
+  }
+}
+
+async function assertProjectHeaderName(expected, width) {
+  const title = workspaceHeader.locator('.workspace-header__project strong');
+  await title.waitFor();
+  assert.equal(await title.innerText(), expected, 'the open profile is named in the workspace header');
+  assert.equal(await settingsAction.count(), 0, 'settings stay on the overview');
+  const [logo, name] = await Promise.all([
+    workspaceHeader.locator('.brand--with-logo').boundingBox(),
+    title.boundingBox(),
+  ]);
+  assert.ok(logo && name, 'the logo and profile name are both visible');
+  if (width <= 390) {
+    const gap = name.y - logo.y - logo.height;
+    assert.ok(gap >= 0 && gap <= 26, 'the profile name is directly below the logo');
+    assert.ok(Math.abs(name.x - logo.x) <= 2, 'the profile name is aligned under the logo');
+  } else {
+    assert.ok(name.x >= logo.x + logo.width, 'the profile name is to the right of the logo');
+    assert.ok(Math.abs(name.y + name.height / 2 - logo.y - logo.height / 2) <= 2, 'the profile name shares the logo row');
   }
 }
 
@@ -127,7 +148,7 @@ async function assertRestrictedCustomerActions(accountLabel) {
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
 await page.locator('.customer-result').first().waitFor();
-assert.ok(await page.getByRole('button',{name:/Thiết lập/}).isVisible(),'admin can open settings');
+assert.ok(await settingsAction.isVisible(),'admin can open settings from the overview');
 assert.ok(await accountAction().isVisible(),'account switching stays available on the overview');
 assert.ok(await notificationAction().isVisible(),'notifications can still be enabled on the overview');
 const groupedNotes=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__trigger').first();
@@ -188,6 +209,8 @@ await page.getByRole('button',{name:'Mở danh sách Tin nhắn khách'}).click(
 await page.locator('.customer-result').filter({hasText:'DV-75'}).click();
 await page.locator('.record-detail--inline').waitFor();
 const desktopProjectBack = await backButtonPosition(1440);
+await assertProjectHeaderName('DV-75', 1440);
+assert.ok(await workspaceHeader.getByRole('button', { name: /Phát hành/ }).isVisible(), 'project publishing remains accessible');
 assert.equal(await accountAction().count(),0,'the project header omits the account action');
 assert.equal(await notificationAction().count(),0,'the project header omits the notification action');
 const zaloEditor = page.getByRole('group', {name:'Tên nhóm Zalo', exact:true});
@@ -271,6 +294,7 @@ for (const width of [360,390]) {
   await page.locator('.customer-result').first().click();
   await page.locator('.record-detail--inline').waitFor();
   assertSameBackPosition(await backButtonPosition(width), personnelBack);
+  await assertProjectHeaderName('DV-75', width);
   assert.equal(await accountAction().count(),0,`the project header omits the account action at ${width}px`);
   assert.equal(await notificationAction().count(),0,`the project header omits the notification action at ${width}px`);
   assert.ok((await overflow()).body<=width,`consulting does not overflow at ${width}px`);
