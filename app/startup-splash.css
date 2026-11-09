@@ -21,8 +21,6 @@
   pointer-events: none;
 }
 
-.startup-splash__still { width: clamp(96px, 26vw, 176px); height: auto; }
-
 .startup-splash--revealing {
   animation: startup-splash-reveal 380ms cubic-bezier(.35, .05, .25, 1) both;
 }

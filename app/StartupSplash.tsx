@@ -5,7 +5,7 @@ import "./startup-splash.css";
 
 const seenKey = "gm-manager-startup-splash-v1";
 const whitePoster = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='9'%3E%3Cpath fill='white' d='M0 0h16v9H0z'/%3E%3C/svg%3E";
-type Mode = "idle" | "video" | "still";
+type Mode = "idle" | "video" | "revealing";
 
 function shouldPlaySplash() {
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
@@ -18,7 +18,6 @@ function shouldPlaySplash() {
 
 export default function StartupSplash({ children }: { children: ReactNode }) {
   const [mode, setMode] = useState<Mode>("idle");
-  const [revealing, setRevealing] = useState(false);
   const checked = useRef(false);
   const playing = useRef(false);
   const video = useRef<HTMLVideoElement>(null);
@@ -32,34 +31,32 @@ export default function StartupSplash({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (mode === "idle") return;
-    if (revealing || mode === "still") {
-      const timer = window.setTimeout(() => {
-        if (revealing) setMode("idle");
-        else setRevealing(true);
-      }, revealing ? 450 : 300);
+    if (mode === "revealing") {
+      const timer = window.setTimeout(() => setMode("idle"), 450);
       return () => window.clearTimeout(timer);
     }
     const startTimeout = window.setTimeout(() => {
-      if (!playing.current) setMode("still");
+      if (!playing.current) setMode("idle");
     }, 1200);
-    const endTimeout = window.setTimeout(() => setRevealing(true), 3500);
-    void video.current?.play().catch(() => { /* Autoplay restrictions use the timed fallback. */ });
+    const endTimeout = window.setTimeout(() => {
+      setMode((current) => current === "video" ? "revealing" : current);
+    }, 3500);
+    void video.current?.play().catch(() => { /* The start timeout handles blocked autoplay. */ });
     return () => {
       window.clearTimeout(startTimeout);
       window.clearTimeout(endTimeout);
     };
-  }, [mode, revealing]);
+  }, [mode]);
 
   return <>
     <div className="startup-splash__workspace" inert={active}>{children}</div>
-    {active && <div className={`startup-splash${revealing ? " startup-splash--revealing" : ""}`} role="status" aria-label="Đang mở GM Manager"
-      onAnimationEnd={(event) => { if (event.target === event.currentTarget && revealing) setMode("idle"); }}>
-      {mode === "video" ? <video ref={video} className="startup-splash__video" src={`${import.meta.env.BASE_URL}gm-logo-startup.mp4`}
+    {active && <div className={`startup-splash${mode === "revealing" ? " startup-splash--revealing" : ""}`} role="status" aria-label="Đang mở GM Manager"
+      onAnimationEnd={(event) => { if (event.target === event.currentTarget && mode === "revealing") setMode("idle"); }}>
+      <video ref={video} className="startup-splash__video" src={`${import.meta.env.BASE_URL}gm-logo-startup.mp4`}
         poster={whitePoster} autoPlay muted playsInline preload="auto" aria-hidden="true"
         onPlaying={() => { playing.current = true; }}
-        onEnded={() => setRevealing(true)}
-        onError={() => { if (!revealing) setMode("still"); }} />
-        : <img className="startup-splash__still" src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="" />}
+        onEnded={() => setMode("revealing")}
+        onError={() => setMode("idle")} />
     </div>}
   </>;
 }
