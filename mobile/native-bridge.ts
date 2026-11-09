@@ -78,7 +78,9 @@ export function installNativeMobileBridge() {
         await LocalNotifications.createChannel({ id: notificationChannel, name: "GM Manager", importance: 4 });
       }
       const id = notificationId(tag || crypto.randomUUID());
-      const result = await LocalNotifications.schedule({ notifications: [{ id, title, body, channelId: notificationChannel, extra: { url } }] });
+      const result = await LocalNotifications.schedule({
+        notifications: [{ id, title, body, channelId: notificationChannel, foreground: true, isExactNotification: false, extra: { url } }],
+      });
       return result.notifications.some((notification) => notification.id === id);
     },
     async postAppsScript(url, payload) {
