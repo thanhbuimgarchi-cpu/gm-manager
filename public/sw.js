@@ -1,7 +1,7 @@
 // Bump this whenever a release changes how locally cached data is handled.
 // Activating a new shell removes the older UI that used to send every work
 // note to Drive while it was being edited.
-const CACHE_NAME = "gm-crm-shell-v12";
+const CACHE_NAME = "gm-crm-shell-v13";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./gm-logo.png", "./gm-logo-192.png", "./gm-logo-512.png"];
 
 self.addEventListener("install", (event) => {
@@ -15,6 +15,9 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   // Let the browser fetch media byte ranges directly. Cache.put rejects 206 responses.
   if (event.request.method !== "GET" || event.request.headers.has("range")) return;
+  const url = new URL(event.request.url);
+  // Installer downloads stream directly without a cache copy or HTML fallback.
+  if (url.href.startsWith(new URL("downloads/", self.registration.scope).href)) return;
   // GitHub Pages serves HTML and the service worker with a short HTTP cache.
   // A navigation must nevertheless obtain the newest app shell so an installed
   // phone/desktop app cannot remain on an older note-sync implementation.
@@ -23,7 +26,7 @@ self.addEventListener("fetch", (event) => {
     : event.request;
   event.respondWith(fetch(request).then((response) => {
     const copy = response.clone();
-    if (new URL(event.request.url).origin === self.location.origin) {
+    if (url.origin === self.location.origin) {
       caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
     }
     return response;

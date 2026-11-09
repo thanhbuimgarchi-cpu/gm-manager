@@ -5,7 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_run:
-    workflows: [Build Windows installer]
+    workflows: [Build Windows installer, Build macOS installer]
     types: [completed]
     branches: [main]
 
@@ -37,13 +37,16 @@ jobs:
       - run: node scripts/write-app-version.mjs
         env:
           VITE_APP_VERSION: ${{ steps.source.outputs.version }}
-      - name: Discover the ready Windows installer
-        run: node scripts/write-desktop-version.mjs
+      - name: Stage the verified desktop installers
+        id: desktop_installer
+        run: node scripts/write-desktop-version.mjs --stage-installers
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: npm run build:github-pages
         env:
           VITE_APP_VERSION: ${{ steps.source.outputs.version }}
+          VITE_WINDOWS_INSTALLER_MIRRORED: ${{ steps.desktop_installer.outputs.windows-installer-mirrored }}
+          VITE_MACOS_INSTALLER_MIRRORED: ${{ steps.desktop_installer.outputs.macos-installer-mirrored }}
       - run: cp public/.nojekyll github-pages/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with:

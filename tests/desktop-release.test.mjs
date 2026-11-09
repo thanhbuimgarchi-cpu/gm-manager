@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { stableVersion, compareVersions, desktopManifestFromRelease, fetchDesktopManifest, writeDesktopManifest, releaseApiUrl } from '../scripts/write-desktop-version.mjs';
+import { stableVersion, compareVersions, desktopManifestFromRelease, fetchDesktopManifest, writeDesktopManifest, stageDesktopInstaller, releaseApiUrl } from '../scripts/write-desktop-version.mjs';
 
 const downloadPrefix = 'https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/';
 function installer(version = '1.2.0', extra = {}) {
@@ -12,6 +13,16 @@ function installer(version = '1.2.0', extra = {}) {
 }
 const release = (...assets) => ({ tag_name: 'desktop-latest', draft: false, assets });
 const readyResponse = (body) => ({ ok: true, status: 200, json: async () => body });
+
+async function temporaryDirectory(t) {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'gm-desktop-release-'));
+  t.after(async () => {
+    assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(temporary).startsWith('gm-desktop-release-'));
+    await rm(temporary, { recursive: true, force: true });
+  });
+  return temporary;
+}
 
 test('native release selection uses semantic version order and ignores aliases or incomplete uploads', () => {
   const selected = desktopManifestFromRelease(release(
@@ -79,12 +90,7 @@ test('unpublished releases remain unavailable and transient API failures retry w
 });
 
 test('a failed discovery preserves the existing output instead of advertising unverified bytes', async (t) => {
-  const temporary = await mkdtemp(path.join(os.tmpdir(), 'gm-desktop-release-'));
-  t.after(async () => {
-    assert.equal(path.dirname(path.resolve(temporary)), path.resolve(os.tmpdir()));
-    assert.ok(path.basename(temporary).startsWith('gm-desktop-release-'));
-    await rm(temporary, { recursive: true, force: true });
-  });
+  const temporary = await temporaryDirectory(t);
   const output = path.join(temporary, 'desktop-version.json');
   await writeFile(output, 'previous verified manifest', 'utf8');
   let attempts = 0;
@@ -93,6 +99,55 @@ test('a failed discovery preserves the existing output instead of advertising un
   assert.equal(await readFile(output, 'utf8'), 'previous verified manifest');
   const manifest = await writeDesktopManifest({ output, fetcher: async () => readyResponse(release(installer())) });
   assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), manifest);
+});
+
+test('installer mirror retries partial delivery and does not send GitHub credentials to its CDN', async (t) => {
+  const temporary = await temporaryDirectory(t);
+  const output = path.join(temporary, 'GM-CRM-Setup.exe');
+  const bytes = Buffer.from('verified installer');
+  const manifest = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const requests = [];
+  const redirects = [];
+  const delays = [];
+  const assetUrl = 'https://api.github.com/repos/thanhbuimgarchi-cpu/gm-manager/releases/assets/123';
+  const signedUrl = 'https://release-assets.githubusercontent.com/path?signature=fixture';
+  await stageDesktopInstaller({
+    manifest, assetId: 123, output, token: 'qa-token', pause: async (value) => delays.push(value),
+    fetcher: async (url, options) => {
+      if (url.startsWith(`${assetUrl}?`)) {
+        requests.push({ url, options });
+        return Response.redirect(signedUrl);
+      }
+      assert.equal(url, signedUrl);
+      redirects.push(options);
+      return redirects.length === 1 ? new Response(bytes.subarray(0, 5), { status: 206 }) : new Response(bytes);
+    },
+  });
+  assert.equal(new Set(requests.map(({ url }) => url)).size, 2);
+  assert.ok(requests.every(({ options }) => options.headers.Authorization === 'Bearer qa-token' && options.headers.Accept === 'application/octet-stream' && options.redirect === 'manual'));
+  assert.ok(redirects.every(({ headers, redirect }) => !headers?.Authorization && redirect === 'error'));
+  assert.deepEqual(delays, [1000]);
+  assert.deepEqual(await readFile(output), bytes);
+  assert.deepEqual(await readdir(temporary), ['GM-CRM-Setup.exe']);
+});
+
+test('installer mirror rejects an untrusted redirect or corrupt bytes without replacing a verified file', async (t) => {
+  const temporary = await temporaryDirectory(t);
+  const output = path.join(temporary, 'GM-CRM-macOS-x64.dmg');
+  const bytes = Buffer.from('verified installer');
+  const manifest = { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  await writeFile(output, bytes);
+  const options = { manifest, assetId: 123, output, pause: async () => {} };
+  let requests = 0;
+  await assert.rejects(stageDesktopInstaller({ ...options, fetcher: async (url) => {
+    assert.ok(url.startsWith('https://api.github.com/'));
+    requests++;
+    return Response.redirect('https://example.org/installer');
+  } }), /Invalid installer redirect/);
+  assert.equal(requests, 3);
+  await assert.rejects(stageDesktopInstaller({ ...options, fetcher: async () => new Response(Buffer.alloc(bytes.length)) }), /SHA-256 does not match/);
+  assert.deepEqual(await readFile(output), bytes);
+  assert.deepEqual(await readdir(temporary), ['GM-CRM-macOS-x64.dmg']);
 });
 
 test('release publication preserves versioned installers and refreshes Pages only from trusted successful builds', async () => {
@@ -105,10 +160,11 @@ test('release publication preserves versioned installers and refreshes Pages onl
   assert.match(windows, /\$published\[0\]\.digest -cne \$checksum/);
   assert.match(windows, /\$newerVersions\.Count -eq 0/);
   assert.match(pages, /workflow_run:/);
+  assert.match(pages, /workflows: \[Build Windows installer, Build macOS installer\]/);
   assert.match(pages, /conclusion == 'success'/);
   assert.match(pages, /head_repository\.full_name == github\.repository/);
   assert.match(pages, /ref: main/);
   assert.match(pages, /version=\$\(git rev-parse HEAD\)/);
   assert.equal((pages.match(/VITE_APP_VERSION: \$\{\{ steps\.source\.outputs\.version \}\}/g) || []).length, 2);
-  assert.match(pages, /node scripts\/write-desktop-version\.mjs/);
+  assert.match(pages, /node scripts\/write-desktop-version\.mjs --stage-installers/);
 });

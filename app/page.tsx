@@ -687,7 +687,6 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
   driveUrl: defaultDriveFolderUrl,
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
-const macInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-macOS-x64.dmg";
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
@@ -751,6 +750,13 @@ function isWindowsDesktop() {
 
 function isMacDesktop() {
   return /macintosh|mac os x/i.test(navigator.userAgent) && !isMobileDevice();
+}
+
+function downloadDesktopInstaller(fileName: string) {
+  const link = document.createElement("a");
+  link.href = `${import.meta.env.BASE_URL}downloads/${fileName}`;
+  link.download = fileName;
+  link.click();
 }
 
 function isMobileDevice() {
@@ -2873,12 +2879,16 @@ export default function Home() {
     }
     if (isWindowsDesktop()) {
       setNotice("Đang tải bộ cài GM-CRM cho Windows…");
-      window.location.assign(windowsInstallerUrl);
+      if (import.meta.env.VITE_WINDOWS_INSTALLER_MIRRORED === "true") {
+        downloadDesktopInstaller("GM-CRM-Setup.exe");
+      } else {
+        window.location.assign(windowsInstallerUrl);
+      }
       return;
     }
-    if (isMacDesktop()) {
+    if (isMacDesktop() && import.meta.env.VITE_MACOS_INSTALLER_MIRRORED === "true") {
       setNotice("Đang tải bộ cài GM-CRM cho macOS…");
-      window.location.assign(macInstallerUrl);
+      downloadDesktopInstaller("GM-CRM-macOS-x64.dmg");
       return;
     }
     if (deferredInstallPrompt) {
@@ -6593,7 +6603,7 @@ export default function Home() {
                 <li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li>
               </ol>
             )}
-            <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : mobileInstallHelp === "ios" ? "Đăng nhập và làm việc trên iOS 16 trở lên. Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
+            <p>{mobileInstallHelp === "ios" ? "Đăng nhập và làm việc trên iOS 16 trở lên. Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên." : "Biểu tượng GM Manager cho phép mở nhanh ứng dụng."}</p>
             {mobileInstallHelp !== "desktop" && <div className="dialog-actions"><button type="button" onClick={() => setMobileInstallHelp(null)}>Để sau</button><button type="button" className="add-button" onClick={() => { setMobileInstallHelp(null); promptForMobileNotifications(); }}>Đã cài xong</button></div>}
           </section>
         </div>
