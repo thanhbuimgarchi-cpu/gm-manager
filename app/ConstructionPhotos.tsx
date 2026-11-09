@@ -11,6 +11,7 @@ export type ConstructionPhoto = {
   viewUrl: string;
   downloadUrl: string;
   thumbnailUrl?: string;
+  dayFolderId?: string;
 };
 
 export type ConstructionPhotoDay = {
@@ -32,9 +33,16 @@ export type ConstructionPhotoUploadResult = Omit<ConstructionPhotoDay, "photos">
 
 type ConstructionPhotosProps = {
   canCapture: boolean;
+  cacheKey?: string;
   loadPhotos: () => Promise<ConstructionPhotoDay[]>;
   uploadPhoto: (input: ConstructionPhotoUpload) => Promise<ConstructionPhotoUploadResult>;
+  deletePhoto?: (day: ConstructionPhotoDay, photo: ConstructionPhoto) => Promise<void>;
 };
+
+type PhotoDeletion = { id: string; at: number };
+type PhotoGallery = { days: ConstructionPhotoDay[]; deletedPhotos: PhotoDeletion[] };
+type PhotoToDelete = { day: ConstructionPhotoDay; photo: ConstructionPhoto };
+const photoDeletionGraceMs = 10 * 60_000;
 
 type Position = Pick<GeolocationCoordinates, "latitude" | "longitude">;
 type WeatherStation = {
@@ -274,6 +282,38 @@ function dayOrder(a: ConstructionPhotoDay, b: ConstructionPhotoDay) {
   return key(b.date).localeCompare(key(a.date));
 }
 
+function readGallery(storageKey: string): PhotoGallery | null {
+  if (!storageKey) return null;
+  try {
+    const value = JSON.parse(window.localStorage.getItem(storageKey) || "null") as PhotoGallery | null;
+    if (value && Array.isArray(value.days) && Array.isArray(value.deletedPhotos)
+      && value.days.every((day) => typeof day?.date === "string" && Array.isArray(day.photos))) return value;
+  } catch { /* Use the server list when cached metadata is unavailable. */ }
+  return null;
+}
+
+function recentPhotoDeletions(...groups: PhotoDeletion[][]) {
+  const after = Date.now() - photoDeletionGraceMs;
+  const latest = new Map<string, PhotoDeletion>();
+  for (const deletion of groups.flat()) {
+    if (!deletion || deletion.at <= after) continue;
+    const prior = latest.get(deletion.id);
+    if (!prior || prior.at < deletion.at) latest.set(deletion.id, deletion);
+  }
+  return [...latest.values()].sort((left, right) => right.at - left.at).slice(0, 256);
+}
+
+function withoutDeletedPhotos(days: ConstructionPhotoDay[], deletions: PhotoDeletion[]) {
+  const deleted = new Set(deletions.map((deletion) => deletion.id));
+  return days.map((day) => ({ ...day, photos: day.photos.filter((photo) => !deleted.has(photo.id)) }))
+    .filter((day) => day.photos.length > 0)
+    .sort(dayOrder);
+}
+
+function photoErrorCode(error: unknown) {
+  return error instanceof Error && "code" in error ? String(error.code) : "";
+}
+
 function CameraIcon() {
   return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <path d="M3 7h4l2-3h6l2 3h4v13H3z" /><circle cx="12" cy="13" r="3.4" />
@@ -286,16 +326,23 @@ function FolderIcon() {
   </svg>;
 }
 
-export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto }: ConstructionPhotosProps) {
+export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, uploadPhoto, deletePhoto }: ConstructionPhotosProps) {
+  const storageKey = cacheKey ? `gm-manager-construction-photos-v1:${cacheKey}` : "";
   const albumId = useId();
   const cameraTitleId = useId();
+  const deleteTitleId = useId();
+  const deleteDescriptionId = useId();
   const [mobile, setMobile] = useState(false);
-  const [days, setDays] = useState<ConstructionPhotoDay[]>([]);
+  const [gallery, setGallery] = useState(() => readGallery(storageKey));
+  const days = gallery?.days ?? [];
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState("");
   const [notice, setNotice] = useState("");
+  const [toDelete, setToDelete] = useState<PhotoToDelete | null>(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [albumOpen, setAlbumOpen] = useState(true);
-  const [openDays, setOpenDays] = useState<Set<string>>(new Set());
+  const [openDays, setOpenDays] = useState(() => new Set(gallery?.days.slice(0, 1).map((day) => day.date)));
   const [phase, setPhase] = useState<CameraPhase>("closed");
   const [videoReady, setVideoReady] = useState(false);
   const [shots, setShots] = useState<PhotoJob[]>([]);
@@ -303,6 +350,8 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
   const [cameraError, setCameraError] = useState("");
   const [nativeAvailable, setNativeAvailable] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+  const deletePending = useRef(false);
   const video = useRef<HTMLVideoElement>(null);
   const nativeCamera = useRef<HTMLInputElement>(null);
   const stream = useRef<MediaStream | null>(null);
@@ -310,6 +359,8 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
   const lifetime = useRef(0);
   const listRevision = useRef(0);
   const listPending = useRef(false);
+  const galleryRef = useRef(gallery);
+  const galleryBlocked = useRef(false);
   const finishing = useRef(false);
   const pendingShots = useRef<PhotoJob[]>([]);
   const uploadTail = useRef<Promise<void>>(Promise.resolve());
@@ -318,6 +369,21 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
   const loader = useRef(loadPhotos);
   loader.current = loadPhotos;
 
+  const publishGallery = useCallback((nextDays: ConstructionPhotoDay[], deletedPhotoId?: string) => {
+    const deletedPhotos = recentPhotoDeletions(
+      galleryRef.current?.deletedPhotos ?? [], readGallery(storageKey)?.deletedPhotos ?? [],
+      deletedPhotoId ? [{ id: deletedPhotoId, at: Date.now() }] : [],
+    );
+    const next = { days: withoutDeletedPhotos(nextDays, deletedPhotos), deletedPhotos };
+    if (!galleryRef.current?.days.length && next.days[0]) setOpenDays(new Set([next.days[0].date]));
+    galleryRef.current = next;
+    setGallery(next);
+    if (storageKey) {
+      try { window.localStorage.setItem(storageKey, JSON.stringify(next)); }
+      catch { /* The current gallery stays available when storage is full or disabled. */ }
+    }
+  }, [storageKey]);
+
   const refresh = useCallback(async () => {
     const revision = ++listRevision.current;
     listPending.current = true;
@@ -325,16 +391,46 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     setListError("");
     try {
       const result = await loader.current();
-      if (revision === listRevision.current) setDays([...result].sort(dayOrder));
+      if (revision === listRevision.current) {
+        galleryBlocked.current = false;
+        publishGallery(result);
+      }
     } catch (error) {
-      if (revision === listRevision.current) setListError(error instanceof Error ? error.message : "Không tải được ảnh thi công.");
+      if (revision !== listRevision.current) return;
+      if (["AUTH_REQUIRED", "FORBIDDEN", "NOT_FOUND"].includes(photoErrorCode(error))) {
+        galleryBlocked.current = true;
+        galleryRef.current = null;
+        setGallery(null);
+        if (storageKey) {
+          try { window.localStorage.removeItem(storageKey); }
+          catch { /* Local storage can be disabled by the browser. */ }
+        }
+      }
+      setListError(error instanceof Error ? error.message : "Không tải được ảnh thi công.");
     } finally {
       if (revision === listRevision.current) {
         listPending.current = false;
         setLoading(false);
       }
     }
-  }, []);
+  }, [publishGallery, storageKey]);
+
+  useEffect(() => {
+    if (!storageKey) return;
+    function reflectDeletedPhotos(event: StorageEvent) {
+      if (event.key !== storageKey) return;
+      const saved = readGallery(storageKey);
+      const current = galleryRef.current;
+      if (!saved || !current) return;
+      const deletedPhotos = recentPhotoDeletions(current.deletedPhotos, saved.deletedPhotos);
+      if (deletedPhotos.length === current.deletedPhotos.length && deletedPhotos.every((item, index) => item.id === current.deletedPhotos[index].id && item.at === current.deletedPhotos[index].at)) return;
+      const next = { days: withoutDeletedPhotos(current.days, deletedPhotos), deletedPhotos };
+      galleryRef.current = next;
+      setGallery(next);
+    }
+    window.addEventListener("storage", reflectDeletedPhotos);
+    return () => window.removeEventListener("storage", reflectDeletedPhotos);
+  }, [storageKey]);
 
   function releaseStream() {
     stream.current?.getTracks().forEach((track) => track.stop());
@@ -370,6 +466,12 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     if (!finishing.current || pendingShots.current.length) return;
     setPhase("closed");
     if (dialog.current?.open) dialog.current.close();
+  }
+
+  function removeShot(shot: PhotoJob) {
+    if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
+    updateShots(pendingShots.current.filter((item) => item.uploadId !== shot.uploadId));
+    closeIfFinished();
   }
 
   function closeCamera() {
@@ -490,21 +592,27 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
       if (!result || revision !== lifetime.current) return;
       const { date, folderId, folderUrl, photo } = result;
       if (listPending.current) void refresh();
-      setDays((current) => {
+      if (!galleryBlocked.current) {
+        const current = galleryRef.current?.days ?? [];
         const old = current.find((day) => day.date === date);
         const photos = [photo, ...(old?.photos.filter((entry) => entry.id !== photo.id) || [])]
           .sort((left, right) => right.capturedAt.localeCompare(left.capturedAt));
-        return [...current.filter((day) => day.date !== date), { date, folderId, folderUrl, photos }].sort(dayOrder);
-      });
-      setAlbumOpen(true);
-      setOpenDays((current) => new Set([...current, date]));
+        publishGallery([...current.filter((day) => day.date !== date), { date, folderId, folderUrl, photos }]);
+        setAlbumOpen(true);
+        setOpenDays((current) => new Set([...current, date]));
+      }
       setNotice(`Đã lưu ảnh vào thư mục ${displayDay(date)}.`);
       setSavedCount((current) => current + 1);
-      if (prepared.previewUrl) URL.revokeObjectURL(prepared.previewUrl);
-      updateShots(pendingShots.current.filter((item) => item.uploadId !== shot.uploadId));
-      closeIfFinished();
+      removeShot(prepared);
     } catch (error) {
       if (revision !== lifetime.current) return;
+      if (photoErrorCode(error) === "PHOTO_DELETED") {
+        const message = "Ảnh này đã được chuyển vào thùng rác Google Drive.";
+        setNotice(message);
+        if (!finishing.current) setCameraError(message);
+        removeShot(prepared);
+        return;
+      }
       replaceShot({ ...prepared, stage: "failed", previewUrl: prepared.previewUrl || (prepared.blob ? URL.createObjectURL(prepared.blob) : undefined), error: error instanceof Error ? error.message : "Chưa lưu được ảnh lên Drive." });
     }
   }
@@ -526,6 +634,42 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     closeIfFinished();
   }
 
+  function askDeletePhoto(day: ConstructionPhotoDay, photo: ConstructionPhoto) {
+    if (!deletePhoto || deletePending.current) return;
+    setToDelete({ day, photo });
+    setDeleteError("");
+    deleteDialog.current?.showModal();
+  }
+
+  function closeDeleteDialog() {
+    if (deletePending.current) return;
+    deleteDialog.current?.close();
+    setToDelete(null);
+  }
+
+  async function confirmDeletePhoto() {
+    if (!deletePhoto || !toDelete || deletePending.current) return;
+    const revision = lifetime.current;
+    const { day, photo } = toDelete;
+    deletePending.current = true;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deletePhoto(day, photo);
+      if (revision !== lifetime.current) return;
+      if (!galleryBlocked.current) publishGallery(galleryRef.current?.days ?? [], photo.id);
+      if (listPending.current) void refresh();
+      setNotice("Đã chuyển ảnh vào thùng rác Google Drive.");
+      deletePending.current = false;
+      closeDeleteDialog();
+    } catch (error) {
+      if (revision === lifetime.current) setDeleteError(error instanceof Error ? error.message : "Chưa xóa được ảnh trên Drive.");
+    } finally {
+      deletePending.current = false;
+      if (revision === lifetime.current) setDeleting(false);
+    }
+  }
+
   const failedShots = shots.filter((shot) => shot.stage === "failed");
   const pendingCount = shots.length - failedShots.length;
   const queueFull = shots.length >= maxOutstandingPhotos;
@@ -544,9 +688,9 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     </header>
     {notice && <p className="construction-photos__status" role="status">{notice}</p>}
     <div id={albumId} hidden={!albumOpen}>
-      {listError && <p className="construction-photos__status construction-photos__error" role="alert">{listError}</p>}
-      {loading && !days.length && <p className="construction-photos__empty" role="status">Đang tải thư mục ảnh…</p>}
-      {!loading && !listError && !days.length && <p className="construction-photos__empty">Chưa có ảnh thi công.</p>}
+      {listError && <p className="construction-photos__status construction-photos__error" role="alert">{listError}{gallery && " Đang hiển thị danh sách đã lưu."}</p>}
+      {loading && !gallery && <p className="construction-photos__empty" role="status">Đang tải thư mục ảnh…</p>}
+      {gallery && !days.length && <p className="construction-photos__empty">Chưa có ảnh thi công.</p>}
       {days.length > 0 && <div className="construction-photos__days">
         {days.map((day) => <details key={day.date} open={openDays.has(day.date)} onToggle={(event) => {
           const open = event.currentTarget.open;
@@ -570,12 +714,23 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
                   </span>
                   <span className="construction-photos__filename">{photo.name}</span>
                 </a>
+                {deletePhoto && <button type="button" className="construction-photos__photo-delete" aria-label={`Xóa ảnh ${photo.name}`} onClick={() => askDeletePhoto(day, photo)}>Xóa</button>}
               </li>)}
             </ul>
           </div>}
         </details>)}
       </div>}
     </div>
+    <dialog ref={deleteDialog} className="construction-photos__dialog construction-photos__delete-dialog" aria-labelledby={deleteTitleId} aria-describedby={deleteDescriptionId}
+      onCancel={(event) => { event.preventDefault(); closeDeleteDialog(); }}>
+      <header className="construction-photos__dialog-heading"><h3 id={deleteTitleId}>Xóa ảnh thi công?</h3></header>
+      <p id={deleteDescriptionId}>Chuyển <strong>{toDelete?.photo.name}</strong> vào thùng rác Google Drive.</p>
+      {deleteError && <p className="construction-photos__status construction-photos__error" role="alert">{deleteError}</p>}
+      <div className="construction-photos__dialog-actions">
+        <button type="button" className="construction-photos__secondary" disabled={deleting} onClick={closeDeleteDialog}>Hủy</button>
+        <button type="button" className="construction-photos__primary" disabled={deleting || !deletePhoto} onClick={() => void confirmDeletePhoto()}>{deleting ? "Đang xóa…" : "Xóa ảnh"}</button>
+      </div>
+    </dialog>
     <dialog ref={dialog} className={`construction-photos__dialog${mobile ? " construction-photos__dialog--mobile" : ""}`} aria-labelledby={cameraTitleId} onCancel={(event) => { event.preventDefault(); closeCamera(); }}>
       <header className="construction-photos__dialog-heading">
         <h3 id={cameraTitleId}>{phase === "finishing" ? "Ảnh vừa chụp" : "Chụp ảnh thi công"}</h3>

@@ -167,6 +167,21 @@
   font-weight: 600;
 }
 
+.construction-photos__photo-delete {
+  min-height: 36px;
+  margin-top: 4px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #842132;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.construction-photos__photo-delete:hover { background: #fff3f4; }
+
 .construction-photos__dialog {
   position: fixed;
   box-sizing: border-box;
@@ -182,6 +197,8 @@
 }
 
 .construction-photos__dialog::backdrop { background: #12243ba6; }
+.construction-photos__delete-dialog { max-width: 420px; }
+.construction-photos__delete-dialog > p { margin: 8px 0 12px; overflow-wrap: anywhere; }
 .construction-photos__dialog--mobile[open] {
   inset: 0;
   display: flex;

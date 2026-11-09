@@ -8,6 +8,7 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.GM_TEST_PLAYWRIGHT_MODULE || 'playwright');
 const source = await readFile(new URL('../app/page.tsx', import.meta.url), 'utf8');
 const scriptUrl = source.match(/scriptUrl:\s*"(https:\/\/script\.google\.com\/[^\"]+)"/)[1];
+const driveRootId = source.match(/const defaultDriveFolderUrl = "https:\/\/drive\.google\.com\/drive\/folders\/([A-Za-z0-9_-]+)/)[1];
 const now = '2026-10-29T02:00:00.000Z';
 const token = (purpose, version) => `${Buffer.from(JSON.stringify({ version, purpose, account: 'admin', expiresAt: Date.parse('2026-11-29T02:00:00Z'), nonce: 'documents-live-qa' })).toString('base64url')}.fixture-signature`;
 const workflowToken = token('workflow', 2);
@@ -38,6 +39,7 @@ let maximumDocumentRequests = 0;
 const activeDocumentRequestsByProject = new Map();
 let nextHold = null;
 let nextThreeDHold = null;
+let nextMutationHold = null;
 const clone = value => JSON.parse(JSON.stringify(value));
 function holdNextDocuments(match = () => true) {
   let release, entered;
@@ -53,8 +55,23 @@ function holdNextThreeD() {
   nextThreeDHold = { gate, entered };
   return { release, started };
 }
+function holdNextMutation() {
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  nextMutationHold = { gate, entered };
+  return { release, started };
+}
 async function dispatch(payload) {
   requests.push(clone(payload));
+  if (payload.action === 'set-document-snapshot-lock') {
+    const held = nextMutationHold;
+    nextMutationHold = null;
+    if (held) { held.entered(); await held.gate; }
+    const snapshot = (payload.projectId === 'DOCUMENT-LIVE-B' ? [otherSnapshot] : snapshots).find(({ id }) => id === payload.snapshotId);
+    if (snapshot) snapshot.locked = payload.locked;
+    return { ok: true };
+  }
   if (payload.action === 'list-documents') {
     activeDocumentRequests++;
     activeDocumentRequestsByProject.set(payload.projectId, (activeDocumentRequestsByProject.get(payload.projectId) || 0) + 1);
@@ -105,7 +122,7 @@ addEventListener('message', async event => {
 });
 parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
 </script>` }));
-  await context.addInitScript(({ years, scriptUrl, workflowToken, adminToken, snapshots, staleFile, otherSnapshot, otherStaleFile }) => {
+  await context.addInitScript(({ years, scriptUrl, driveRootId, workflowToken, adminToken, snapshots, staleFile, otherSnapshot, otherStaleFile }) => {
     if (localStorage.getItem('document-live-qa-seeded')) return;
     localStorage.setItem('document-live-qa-seeded', '1');
     localStorage.setItem('gm-manager-consulting', JSON.stringify(years));
@@ -113,10 +130,17 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
     localStorage.setItem('gm-manager-personnel-session-email', 'admin');
     localStorage.setItem('gm-manager-admin-session-v1', JSON.stringify({ token: adminToken, scriptUrl }));
     localStorage.setItem('gm-manager-workflow-session-v1', JSON.stringify({ token: workflowToken, scriptUrl, account: 'admin' }));
-    localStorage.setItem('gm-manager-drive-cache-v1:documents-v15:2026-10-DOCUMENT-LIVE-QA-latest', JSON.stringify({ savedAt: Date.now(), value: { snapshots, activeSnapshotId: 'day-latest', files: [staleFile] } }));
-    localStorage.setItem('gm-manager-drive-cache-v1:documents-v15:2026-10-DOCUMENT-LIVE-B-latest', JSON.stringify({ savedAt: Date.now(), value: { snapshots: [otherSnapshot], activeSnapshotId: otherSnapshot.id, files: [otherStaleFile] } }));
+    const seedDocuments = (account, projectId, houseId, snapshots, snapshotId, files, root = driveRootId) => {
+      const scope = JSON.stringify([scriptUrl, root, account, 2026, 10, projectId, houseId, '']);
+      localStorage.setItem(`gm-manager-drive-cache-v1:documents-v16:${scope}:index`, JSON.stringify({ savedAt: Date.now(), value: { snapshots, latestId: snapshotId } }));
+      localStorage.setItem(`gm-manager-drive-cache-v1:documents-v16:${scope}:day:${snapshotId}`, JSON.stringify({ savedAt: Date.now(), value: files }));
+    };
+    seedDocuments('admin', 'DOCUMENT-LIVE-QA', 'QA-DOC', snapshots, 'day-latest', [staleFile]);
+    seedDocuments('admin', 'DOCUMENT-LIVE-B', 'QA-OTHER', [otherSnapshot], otherSnapshot.id, [otherStaleFile]);
+    seedDocuments('public', 'DOCUMENT-LIVE-QA', 'QA-DOC', snapshots, 'day-latest', [{ ...staleFile, name: 'Cache từ tài khoản khác.pdf' }]);
+    seedDocuments('admin', 'DOCUMENT-LIVE-QA', 'QA-DOC', snapshots, 'day-latest', [{ ...staleFile, name: 'Cache từ ổ Drive khác.pdf' }], 'former-drive-root');
     localStorage.setItem('gm-manager-drive-cache-v1:three-d-v1:2026-10-DOCUMENT-LIVE-B', JSON.stringify({ savedAt: Date.now(), value: { rootUrl: 'https://drive.google.com/drive/folders/qa-3d-other', folders: [{ key: 'architecture', name: 'Kiến trúc', folderUrl: 'https://drive.google.com/drive/folders/qa-3d-other-architecture', files: [otherStaleFile] }] } }));
-  }, { years, scriptUrl, workflowToken, adminToken, snapshots, staleFile: file('stale-cache', 'Tệp cache cũ.pdf'), otherSnapshot, otherStaleFile: file('other-cache', 'Cache cũ của khách B.pdf') });
+  }, { years, scriptUrl, driveRootId, workflowToken, adminToken, snapshots, staleFile: file('stale-cache', 'Tệp cache cũ.pdf'), otherSnapshot, otherStaleFile: file('other-cache', 'Cache cũ của khách B.pdf') });
   const page = await context.newPage();
   qaPage = page;
   page.on('pageerror', error => errors.push(error.message));
@@ -124,6 +148,7 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
   await page.clock.install({ time: new Date(now) });
   await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
   await page.locator('.customer-result').filter({ hasText: 'QA-DOC' }).click();
+  const heldEntry = holdNextDocuments(payload => payload.projectId === 'DOCUMENT-LIVE-QA' && !payload.snapshotId && !payload.metadataOnly);
   await page.getByRole('button', { name: 'Tài liệu', exact: true }).click();
   const library = page.getByLabel('Tài liệu dự án', { exact: true });
   const day = date => library.locator('.document-day').filter({ has: page.locator('.document-day__trigger', { hasText: `Ngày: ${date}` }) });
@@ -144,8 +169,15 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
     await page.locator('.customer-result').filter({ hasText: houseId }).click();
   };
 
+  await expectVisibleFile('Tệp cache cũ.pdf', 1000);
+  assert.equal(latestRequests().length, 0, 'opening a cached library does not issue a foreground request');
+  assert.equal(await page.getByRole('link', { name: 'Cache từ tài khoản khác.pdf', exact: true }).count(), 0, 'only the signed-in account cache is shown');
+  assert.equal(await page.getByRole('link', { name: 'Cache từ ổ Drive khác.pdf', exact: true }).count(), 0, 'only the configured Drive root cache is shown');
+  await waitForStart(heldEntry);
+  await expectVisibleFile('Tệp cache cũ.pdf', 1000);
+  heldEntry.release();
   await expectVisibleFile('Mặt bằng hiện tại.pdf');
-  assert.ok(latestRequests().length >= 1, 'cached entry also requests fresh latest metadata immediately');
+  assert.ok(latestRequests().length >= 1, 'cached entry revalidates latest metadata in the background');
   assert.equal(await page.getByRole('link', { name: 'Tệp cache cũ.pdf', exact: true }).count(), 0);
   assert.equal(oldContentRequests().length, 0, 'opening latest does not read historical file contents');
 
@@ -222,7 +254,13 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
   await waitForStart(heldForeground);
   assert.ok(await library.locator('.document-library__actions').getByRole('button', { name: /Nạp lại/ }).isDisabled(), 'A foreground read sets its loading flag');
   await switchCustomer('QA-OTHER');
+  const heldEntryB = holdNextDocuments(payload => payload.projectId === 'DOCUMENT-LIVE-B');
   await page.getByRole('button', { name: 'Tài liệu', exact: true }).click();
+  await expectVisibleFile('Cache cũ của khách B.pdf', 1000);
+  assert.equal(await day('27/10/2026').count(), 0, 'B never initially renders A day metadata');
+  await waitForStart(heldEntryB);
+  await expectVisibleFile('Cache cũ của khách B.pdf', 1000);
+  heldEntryB.release();
   await expectVisibleFile('Tài liệu mới của khách B.pdf');
   files.get('day-other').push(file('other-after-switch', 'Tệp B cập nhật khi A còn chờ.pdf'));
   await expectVisibleFile('Tệp B cập nhật khi A còn chờ.pdf');
@@ -231,6 +269,27 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   assert.equal(await page.getByRole('link', { name: 'Tệp phản hồi chậm của khách A.pdf', exact: true }).count(), 0, 'late foreground A response never paints B');
   await expectVisibleFile('Tệp B cập nhật khi A còn chờ.pdf');
+
+  // A document mutation completes after switching to a different customer.
+  // Its old snapshots and loading state must not write into B's cache/view.
+  await switchCustomer('QA-DOC');
+  await page.getByRole('button', { name: 'Tài liệu', exact: true }).click();
+  await expectVisibleFile('Ngày mới tự xuất hiện.pdf', 1000);
+  const lateLock = holdNextMutation();
+  await day('31/10/2026').getByRole('button', { name: 'Khóa ngày 31/10/2026' }).click();
+  await waitForStart(lateLock);
+  await switchCustomer('QA-OTHER');
+  await page.getByRole('button', { name: 'Tài liệu', exact: true }).click();
+  await expectVisibleFile('Tệp B cập nhật khi A còn chờ.pdf', 1000);
+  lateLock.release();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await day('31/10/2026').count(), 0, 'A lock response cannot paint A days in B');
+  await expectVisibleFile('Tệp B cập nhật khi A còn chờ.pdf');
+  await page.reload();
+  await page.locator('.customer-result').filter({ hasText: 'QA-OTHER' }).click();
+  await page.getByRole('button', { name: 'Tài liệu', exact: true }).click();
+  await expectVisibleFile('Tệp B cập nhật khi A còn chờ.pdf', 1000);
+  assert.equal(await day('31/10/2026').count(), 0, 'reloading B restores only B cache');
 
   // Repeat the foreground/cached scope change for the separate 3D library.
   await switchCustomer('QA-DOC');
@@ -261,5 +320,6 @@ parent.postMessage({ channel:'gm-manager-apps-script-ready' }, '*');
 } finally {
   nextHold = null;
   nextThreeDHold = null;
+  nextMutationHold = null;
   await browser.close();
 }

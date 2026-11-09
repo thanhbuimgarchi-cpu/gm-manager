@@ -9,20 +9,27 @@ const origin = new URL(baseUrl).origin;
 const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const scriptUrl = source.match(/scriptUrl:\s*"(https:\/\/script\.google\.com\/[^"]+)"/)[1];
 const account = "cong-trinh@example.com";
+const managerAccount = "quan-ly@example.com";
 const personnel = {
-  construction: [{ id: "construction-qa", name: "Nhân viên kiểm thử", loginCode: "111111", email: account, status: "Có", role: "Nhân công", permissions: ["Thi công"] }],
+  construction: [
+    { id: "construction-qa", name: "Nhân viên kiểm thử", loginCode: "111111", email: account, status: "Có", role: "Nhân công", permissions: ["Thi công"] },
+    { id: "construction-manager-qa", name: "Quản lý kiểm thử", loginCode: "222222", email: managerAccount, status: "Có", role: "Quản lý chung", permissions: ["Thi công"] },
+  ],
 };
-const token = Buffer.from(JSON.stringify({
+const sessionToken = (account) => Buffer.from(JSON.stringify({
   version: 2,
   purpose: "workflow",
   account,
   nonce: "construction-qa",
   expiresAt: Date.parse("2026-12-09T00:00:00Z"),
 })).toString("base64url") + ".fixture-signature";
+const token = sessionToken(account);
+const managerToken = sessionToken(managerAccount);
 const project = { id: "construction-qa-house", name: "Công trình kiểm thử", houseId: "QA-ANH", projectId: "CONSTRUCTION-QA", driveFolderId: "qa-folder", createdAt: "05/11/2026", isHydrated: true, progressHydrated: true, details: { HVT: "Công trình kiểm thử" } };
 const years = [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => ({ label: "T" + (index + 1), records: index === 10 ? [project] : [] })) }];
 const captureTimes = ["2026-11-07T16:59:59.000Z", "2026-11-07T17:00:05.000Z", "2026-11-07T17:00:06.000Z"];
 const captureDates = ["07-11-2026", "08-11-2026", "08-11-2026"];
+const trashedUploadTime = "2026-11-07T17:00:07.000Z";
 const expectedPhotos = captureTimes.map((capturedAt, index) => ({
   id: `fixture-photo-${index + 1}`,
   name: `Anh-thi-cong-${index + 1}.jpg`,
@@ -30,9 +37,12 @@ const expectedPhotos = captureTimes.map((capturedAt, index) => ({
   capturedAt,
   viewUrl: `https://drive.google.com/file/d/fixture-photo-${index + 1}/view`,
   downloadUrl: `https://drive.google.com/uc?export=download&id=fixture-photo-${index + 1}`,
+  dayFolderId: index === 2 ? "alternate-same-day-folder" : `fixture-day-${captureDates[index]}`,
 }));
 const savedDays = new Map();
 const uploads = [];
+const deletions = [];
+const listOverrides = new Map();
 const weather = [];
 const pageErrors = [];
 let releaseFirstUpload;
@@ -48,11 +58,14 @@ async function dispatch(payload) {
   if (payload.action === "load-customer-messages") return { ok: true, messages: [], configured: true };
   if (payload.action === "list-construction-photos") {
     assert.equal(payload.projectId, project.projectId);
-    assert.equal(payload.workflowSessionToken, token);
+    assert.ok([token, managerToken].includes(payload.workflowSessionToken));
+    const override = listOverrides.get(payload.workflowSessionToken);
+    if (override) return override();
     return { ok: true, days: [...savedDays.values()] };
   }
   if (payload.action === "upload-construction-photo") {
     uploads.push(payload);
+    if (payload.capturedAt === trashedUploadTime) return { ok: false, code: "PHOTO_DELETED", error: "Ảnh đã nằm trong thùng rác." };
     if (uploads.length === 1) {
       observeFirstUpload();
       await firstUploadGate;
@@ -68,6 +81,18 @@ async function dispatch(payload) {
     savedDays.set(date, { date, folderId, folderUrl, photos });
     return { ok: true, date, folderId, folderUrl, photo };
   }
+  if (payload.action === "delete-construction-photo") {
+    assert.equal(payload.workflowSessionToken, managerToken);
+    assert.equal(payload.projectId, project.projectId);
+    assert.equal(payload.photoId, expectedPhotos[2].id);
+    assert.equal(payload.date, captureDates[2]);
+    assert.equal(payload.dayFolderId, expectedPhotos[2].dayFolderId);
+    deletions.push(payload);
+    if (deletions.length === 1) return { ok: false, error: "Drive chưa xóa được ảnh." };
+    const group = savedDays.get(payload.date);
+    savedDays.set(payload.date, { ...group, photos: group.photos.filter((item) => item.id !== payload.photoId) });
+    return { ok: true, deleted: true, trashed: true };
+  }
   return { ok: true };
 }
 
@@ -77,13 +102,22 @@ const browser = await chromium.launch({
   ...(process.env.GM_TEST_BROWSER_PATH ? { executablePath: process.env.GM_TEST_BROWSER_PATH } : {}),
 });
 
-async function openProject({ mobile = true, denyCamera = false } = {}) {
+async function enterGallery(page) {
+  await page.locator(".customer-result").filter({ hasText: project.houseId }).click();
+  await page.getByRole("button", { name: "Thi công", exact: true }).click();
+  const photos = page.getByRole("region", { name: "Ảnh thi công", exact: true });
+  await photos.waitFor();
+  return photos;
+}
+
+async function openProject({ mobile = true, denyCamera = false, manager = false, storageState } = {}) {
   const context = await browser.newContext({
     ...(mobile ? devices["Pixel 8"] : { viewport: { width: 1280, height: 900 } }),
     serviceWorkers: "block",
     geolocation: { latitude: 21.02851, longitude: 105.85417, accuracy: 10 },
     permissions: ["camera", "geolocation"],
     timezoneId: "Asia/Ho_Chi_Minh",
+    storageState,
   });
   await context.exposeBinding("constructionDispatch", (_source, payload) => dispatch(payload));
   await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin }) => {
@@ -106,7 +140,7 @@ async function openProject({ mobile = true, denyCamera = false } = {}) {
       window.constructionCameraTest.tracks.push(...stream.getTracks());
       return stream;
     };
-  }, { account, personnel, years, token, scriptUrl, denyCamera, origin });
+  }, { account: manager ? managerAccount : account, personnel, years, token: manager ? managerToken : token, scriptUrl, denyCamera, origin });
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
     if (url.origin === origin) return route.continue();
@@ -138,10 +172,7 @@ async function openProject({ mobile = true, denyCamera = false } = {}) {
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.clock.setFixedTime(new Date(captureTimes[0]));
   await page.goto(baseUrl);
-  await page.locator(".customer-result").filter({ hasText: project.houseId }).click();
-  await page.getByRole("button", { name: "Thi công", exact: true }).click();
-  const photos = page.getByRole("region", { name: "Ảnh thi công", exact: true });
-  await photos.waitFor();
+  const photos = await enterGallery(page);
   return { context, page, photos };
 }
 
@@ -201,6 +232,27 @@ try {
     assert.equal(upload.file.mimeType, "image/jpeg");
     assert.match(upload.file.data, /^\/9j\//);
   }
+
+  await page.clock.setFixedTime(new Date(trashedUploadTime));
+  await photos.getByRole("button", { name: "Chụp ảnh", exact: true }).tap();
+  await shutter.tap();
+  await camera.getByText("Ảnh này đã được chuyển vào thùng rác Google Drive.").waitFor();
+  assert.equal(await camera.getByRole("button", { name: "Thử lưu lại" }).count(), 0);
+  await camera.getByRole("button", { name: "Đóng camera" }).tap();
+  await camera.waitFor({ state: "hidden" });
+
+  let failOfflineList;
+  listOverrides.set(token, () => new Promise((resolve) => { failOfflineList = resolve; }));
+  await page.reload();
+  const remembered = await enterGallery(page);
+  const recentPhoto = remembered.getByRole("link", { name: expectedPhotos[2].name });
+  await recentPhoto.waitFor();
+  assert.equal(await remembered.getByRole("button", { name: /Xóa ảnh/ }).count(), 0);
+  assert.ok(failOfflineList, "The background Drive request started while cached photos were visible");
+  failOfflineList({ ok: false, error: "Không kết nối được Drive." });
+  await remembered.getByText(/Đang hiển thị danh sách đã lưu/).waitFor();
+  await recentPhoto.waitFor();
+  listOverrides.delete(token);
   await context.close();
 
   const denied = await openProject({ denyCamera: true });
@@ -216,13 +268,80 @@ try {
   await album.click();
   await day.waitFor({ state: "hidden" });
   await album.click();
-  await day.click();
   assert.equal(await desktop.photos.getByRole("button", { name: "Chụp ảnh", exact: true }).count(), 0);
   await desktop.photos.getByRole("link", { name: expectedPhotos[2].name }).waitFor();
   await desktop.context.close();
 
+  const manager = await openProject({ manager: true, mobile: false });
+  const deleteButton = manager.photos.getByRole("button", { name: `Xóa ảnh ${expectedPhotos[2].name}` });
+  const confirmDialog = manager.page.getByRole("dialog", { name: "Xóa ảnh thi công?" });
+  const confirmButton = confirmDialog.getByRole("button", { name: "Xóa ảnh", exact: true });
+  const cancelButton = confirmDialog.getByRole("button", { name: "Hủy", exact: true });
+  const deletePhotoLink = manager.photos.getByRole("link", { name: expectedPhotos[2].name });
+  const reloadAlbum = manager.photos.getByRole("button", { name: "Nạp lại", exact: true });
+  await deleteButton.click();
+  await confirmDialog.getByText(/vào thùng rác Google Drive/).waitFor();
+  await cancelButton.click();
+  assert.equal(deletions.length, 0);
+  await deleteButton.click();
+  await confirmButton.click();
+  await confirmDialog.getByText("Drive chưa xóa được ảnh.").waitFor();
+  await cancelButton.click();
+  await deletePhotoLink.waitFor();
+
+  const staleSnapshot = structuredClone([...savedDays.values()]);
+  let releaseStale;
+  let observeStale;
+  const staleGate = new Promise((resolve) => { releaseStale = resolve; });
+  const staleStarted = new Promise((resolve) => { observeStale = resolve; });
+  let staleCalls = 0;
+  listOverrides.set(managerToken, async () => {
+    if (++staleCalls === 1) { observeStale(); await staleGate; }
+    return { ok: true, days: staleSnapshot };
+  });
+  await reloadAlbum.click();
+  await staleStarted;
+  await deleteButton.click();
+  await confirmButton.click();
+  await manager.photos.getByText("Đã chuyển ảnh vào thùng rác Google Drive.").waitFor();
+  releaseStale();
+  await manager.page.waitForFunction(() => !Array.from(document.querySelectorAll(".construction-photos button")).find((button) => button.textContent === "Nạp lại")?.disabled);
+  assert.equal(staleCalls, 2);
+  assert.equal(await deletePhotoLink.count(), 0);
+  await manager.photos.getByRole("link", { name: expectedPhotos[1].name }).waitFor();
+  const managerStorage = await manager.context.storageState();
+  const photoCache = managerStorage.origins.find((item) => item.origin === origin).localStorage.find((item) => item.name.startsWith("gm-manager-construction-photos-v1:"));
+  assert.ok(photoCache.name.includes(managerAccount));
+  assert.equal(JSON.parse(photoCache.value).days.flatMap((day) => day.photos).some((photo) => photo.id === expectedPhotos[2].id), false);
+
+  let releaseStaffList;
+  listOverrides.set(token, () => new Promise((resolve) => { releaseStaffList = resolve; }));
+  const staff = await openProject({ mobile: false, storageState: managerStorage });
+  await staff.photos.getByText("Đang tải thư mục ảnh…").waitFor();
+  assert.equal(await staff.photos.getByRole("link", { name: expectedPhotos[1].name }).count(), 0);
+  releaseStaffList?.({ ok: true, days: [] });
+  listOverrides.delete(token);
+  await staff.context.close();
+
+  await manager.page.reload();
+  const afterDeletion = await enterGallery(manager.page);
+  await afterDeletion.getByRole("link", { name: expectedPhotos[1].name }).waitFor();
+  assert.equal(await afterDeletion.getByRole("link", { name: expectedPhotos[2].name }).count(), 0);
+
+  // Drive can restore a trashed file. A later fresh read must show it once the grace expires.
+  await manager.page.clock.setFixedTime(new Date(Date.parse(captureTimes[0]) + 11 * 60_000));
+  await reloadAlbum.click();
+  await deletePhotoLink.waitFor();
+
+  listOverrides.set(managerToken, () => ({ ok: false, code: "FORBIDDEN", error: "Không có quyền xem ảnh thi công." }));
+  await reloadAlbum.click();
+  await manager.photos.getByText("Không có quyền xem ảnh thi công.").waitFor();
+  assert.equal(await manager.photos.getByRole("link", { name: expectedPhotos[1].name }).count(), 0);
+  assert.equal(await manager.page.evaluate((key) => localStorage.getItem(key), photoCache.name), null);
+  await manager.context.close();
+
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraReleasedBeforeUploadsFinish: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true }));
+  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraReleasedBeforeUploadsFinish: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true, offlineMetadata: true, accountIsolation: true, managerDeleteAndConfirm: true, staleReadProtection: true, restoreFromDrive: true }));
 } finally {
   await browser.close();
 }

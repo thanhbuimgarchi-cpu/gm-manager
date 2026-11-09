@@ -434,6 +434,21 @@ test("document listing never creates a new day by itself", () => {
   assert.equal(result.activeSnapshotId, "old");
 });
 
+test("a known document project folder ID selects only the exact customer in its Drive period", () => {
+  const f = customerMutationFixture();
+  const firstDocuments = f.makeFolder("Tài liệu", "first-docs-folder-id");
+  f.target.children.push(firstDocuments);
+  const exactDocuments = f.makeFolder("Tài liệu", "exact-docs-folder-id");
+  const exact = f.makeFolder("HP-587", "exact-customer-folder-id", [exactDocuments]);
+  f.month.children.push(exact);
+  const scope = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587" };
+  assert.equal(f.context.documentsFolderForPayload_({ ...scope, folderId: exact.getId() }, false), exactDocuments);
+  assert.equal(f.context.documentsFolderForPayload_(scope, false), firstDocuments, "older clients can still use a house code without a folder ID");
+  assert.throws(() => f.context.documentsFolderForPayload_({ ...scope, folderId: f.otherMonthTarget.getId() }, false), /Không tìm thấy đúng thư mục/);
+  assert.throws(() => f.context.documentsFolderForPayload_({ ...scope, folderId: "missing-customer-id" }, true), /Không tìm thấy đúng thư mục/);
+  assert.equal(f.createdCount(), 0);
+});
+
 test("new-day command creates only one snapshot for the real current date", () => {
   const context = loadContext({ Utilities: { formatDate: () => "26-08-2026" } });
   let snapshots = [];
@@ -941,12 +956,18 @@ function constructionPhotosFixture() {
   const fixture = customerMutationFixture();
   const { context } = fixture;
   const events = [];
+  const driveFiles = new Map();
   let driveReads = 0;
   let serial = 0;
   let now = Date.now();
   context.Date = class extends Date { static now() { return now; } };
   const getFolderById = context.DriveApp.getFolderById;
   context.DriveApp.getFolderById = (id) => { driveReads += 1; return getFolderById(id); };
+  context.DriveApp.getFileById = (id) => {
+    driveReads += 1;
+    if (!driveFiles.has(id)) throw new Error("file missing");
+    return driveFiles.get(id);
+  };
   context.LockService.getScriptLock = () => ({ waitLock: () => events.push("lock"), releaseLock: () => events.push("unlock") });
   context.json_ = (value) => ({ getContent: () => JSON.stringify(value) });
   const formatDate = context.Utilities.formatDate;
@@ -956,8 +977,8 @@ function constructionPhotosFixture() {
   context.Utilities.base64Decode = (value) => Array.from(Buffer.from(value, "base64"), (byte) => byte > 127 ? byte - 256 : byte);
   const addPhotoFolderBehavior = (folder) => {
     const files = [];
-    folder.getFiles = () => iterator(files);
-    folder.getFilesByName = (name) => iterator(files.filter((file) => file.getName() === name));
+    folder.getFiles = () => iterator(files.filter((file) => !file.isTrashed()));
+    folder.getFilesByName = (name) => iterator(files.filter((file) => !file.isTrashed() && file.getName() === name));
     folder.createFolder = (name) => {
       const child = addPhotoFolderBehavior(fixture.makeFolder(name, `construction-folder-${++serial}`));
       folder.children.push(child);
@@ -967,7 +988,18 @@ function constructionPhotosFixture() {
     folder.createFile = (blob) => {
       const id = `construction-file-${++serial}`;
       const createdAt = now;
-      const file = { getId: () => id, getName: () => blob.name, getMimeType: () => blob.mimeType, isTrashed: () => false, getDateCreated: () => new Date(createdAt) };
+      const file = {
+        trashed: false,
+        parents: [folder],
+        getId: () => id,
+        getName: () => blob.name,
+        getMimeType: () => blob.mimeType,
+        isTrashed() { return this.trashed; },
+        getParents() { return iterator(this.trashed ? [] : this.parents); },
+        getDateCreated: () => new Date(createdAt),
+        setTrashed(value) { this.trashed = value; events.push(`trash:${id}`); },
+      };
+      driveFiles.set(id, file);
       files.push(file);
       events.push(`file:${blob.name}`);
       return file;
@@ -986,7 +1018,7 @@ function constructionPhotosFixture() {
     uploadId: "test-construction-shot",
     file: { mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7/8AAAAASUVORK5CYII=" },
   };
-  return { ...fixture, events, scope, photo, staff, other, manager, staffToken: login(staff), otherToken: login(other), managerToken: login(manager), driveReads: () => driveReads, advanceTime: (milliseconds) => { now += milliseconds; } };
+  return { ...fixture, events, driveFiles, scope, photo, staff, other, manager, staffToken: login(staff), otherToken: login(other), managerToken: login(manager), driveReads: () => driveReads, advanceTime: (milliseconds) => { now += milliseconds; } };
 }
 
 test("construction photo API authenticates before Drive and rejects invalid data without making folders", () => {
@@ -1047,6 +1079,82 @@ test("construction photo uploads group by Vietnamese capture date and reuse an e
   assert.deepEqual(Array.from(result.days[0].photos, (photo) => photo.id), [later.photo.id, uploaded.photo.id]);
   assert.equal(result.days[0].photos[1].capturedAt, f.photo.capturedAt, "the stored filename preserves capture time instead of the later upload time");
   assert.equal(result.days[1].photos[0].id, earlier.photo.id);
+});
+
+test("only signed managers may trash the exact scoped construction photo and old upload retries stay deleted", () => {
+  const f = constructionPhotosFixture();
+  f.context.savePersonnelCache_({ staff: [f.staff, { ...f.other, permissions: ["Ảnh thi công"] }, f.manager] });
+  const post = (action, payload = {}) => f.context.bridgeDispatch({ ...f.scope, action, ...payload });
+  const uploadRequest = { ...f.photo, workflowSessionToken: f.staffToken };
+  const uploaded = post("upload-construction-photo", uploadRequest);
+  const other = post("upload-construction-photo", { ...uploadRequest, uploadId: "construction-other-date", capturedAt: "2026-11-09T16:58:12.100Z" });
+  const gallery = f.target.children[0].children[0];
+  const originalDay = gallery.children.find((folder) => folder.getId() === uploaded.folderId);
+  const duplicateDay = gallery.createFolder(uploaded.date);
+  const duplicateDayPhoto = duplicateDay.createFile({ name: "other-photo.jpg", mimeType: "image/jpeg" });
+  const nonImage = originalDay.createFile({ name: "notes.pdf", mimeType: "application/pdf" });
+  const listed = post("list-construction-photos", { workflowSessionToken: f.staffToken });
+  assert.equal(listed.days[0].photos.find((photo) => photo.id === duplicateDayPhoto.getId()).dayFolderId, duplicateDay.getId());
+  assert.equal(uploaded.photo.dayFolderId, uploaded.folderId);
+  const request = { date: uploaded.date, dayFolderId: uploaded.photo.dayFolderId, photoId: uploaded.photo.id };
+  const reads = f.driveReads();
+  assert.equal(post("delete-construction-photo", { ...request, email: "admin" }).code, "AUTH_REQUIRED");
+  assert.equal(post("delete-construction-photo", { ...request, workflowSessionToken: f.staffToken, role: "Quản lý chung" }).code, "FORBIDDEN");
+  assert.equal(f.driveReads(), reads);
+  const manage = { ...request, workflowSessionToken: f.managerToken };
+  assert.equal(post("delete-construction-photo", { ...manage, date: "31-11-2026" }).code, "VALIDATION");
+  assert.equal(post("delete-construction-photo", { ...manage, date: other.date }).code, "NOT_FOUND");
+  assert.equal(post("delete-construction-photo", { ...manage, dayFolderId: duplicateDay.getId() }).code, "NOT_FOUND");
+  assert.equal(post("delete-construction-photo", { ...manage, photoId: nonImage.getId() }).code, "NOT_FOUND");
+  assert.equal(post("delete-construction-photo", { ...manage, month: 8, folderId: f.otherMonthTarget.getId() }).ok, false);
+  const target = f.driveFiles.get(uploaded.photo.id);
+  target.parents.push(duplicateDay);
+  assert.equal(post("delete-construction-photo", manage).code, "NOT_FOUND");
+  target.parents.pop();
+  assert.equal(f.events.filter((event) => event.startsWith("trash:")).length, 0);
+  const deleted = post("delete-construction-photo", manage);
+  assert.equal(deleted.trashed, true);
+  assert.equal(deleted.photoId, uploaded.photo.id);
+  assert.equal(target.isTrashed(), true);
+  assert.equal(f.driveFiles.get(other.photo.id).isTrashed(), false);
+  assert.equal(duplicateDayPhoto.isTrashed(), false);
+  assert.equal(nonImage.isTrashed(), false);
+  assert.equal(post("delete-construction-photo", manage).repeated, true);
+  assert.equal(f.events.filter((event) => event === `trash:${uploaded.photo.id}`).length, 1);
+  assert.equal(post("upload-construction-photo", uploadRequest).code, "PHOTO_DELETED");
+  const feed = post("load-construction-photo-notifications", { workflowSessionToken: f.otherToken });
+  assert.deepEqual(Array.from(feed.events, (event) => event.fileId), [other.photo.id]);
+  assert.equal(post("upload-construction-photo", { ...uploadRequest, uploadId: "new-photo-in-duplicate-day" }).ok, true);
+  assert.equal(duplicateDay.isTrashed(), false, "ordinary uploads do not merge or trash duplicate day folders");
+  assert.equal(duplicateDayPhoto.isTrashed(), false);
+  assert.equal(post("delete-construction-photo", { date: uploaded.date, photoId: duplicateDayPhoto.getId(), adminSessionToken: f.adminSessionToken }).trashed, true);
+  assert.equal(duplicateDayPhoto.isTrashed(), true);
+});
+
+test("interrupted photo deletion keeps the upload receipt and finalizes on retry without another trash write", () => {
+  const f = constructionPhotosFixture();
+  const post = (action, payload = {}) => f.context.bridgeDispatch({ ...f.scope, action, ...payload });
+  f.context.savePersonnelCache_({ staff: [f.staff, { ...f.other, permissions: ["Ảnh thi công"] }, f.manager] });
+  const uploadRequest = { ...f.photo, workflowSessionToken: f.staffToken };
+  const uploaded = post("upload-construction-photo", uploadRequest);
+  const eventKey = "gmcrm-construction-photo-events-v1";
+  const originalWrite = f.context.writePropertyJson_;
+  let failOnce = true;
+  f.context.writePropertyJson_ = (key, state) => {
+    if (key === eventKey && failOnce && state.removals?.some((entry) => entry.photoId === uploaded.photo.id && entry.confirmed)) {
+      failOnce = false;
+      throw new Error("temporary Properties failure after Drive trash");
+    }
+    return originalWrite(key, state);
+  };
+  const deleteRequest = { date: uploaded.date, photoId: uploaded.photo.id, dayFolderId: uploaded.folderId, workflowSessionToken: f.managerToken };
+  assert.equal(post("delete-construction-photo", deleteRequest).code, "RETRYABLE");
+  assert.equal(f.driveFiles.get(uploaded.photo.id).isTrashed(), true);
+  assert.equal(post("upload-construction-photo", uploadRequest).code, "PHOTO_DELETED");
+  assert.equal(post("load-construction-photo-notifications", { workflowSessionToken: f.otherToken }).events.length, 0);
+  assert.equal(post("delete-construction-photo", deleteRequest).repeated, true);
+  assert.equal(f.events.filter((event) => event.startsWith("file:")).length, 1);
+  assert.equal(f.events.filter((event) => event.startsWith("trash:")).length, 1);
 });
 
 test("photo notification feed delivers only new successful saves to checked staff, including a checked uploader", () => {

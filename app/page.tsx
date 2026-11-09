@@ -285,6 +285,17 @@ type DocumentSnapshot = {
   locked?: boolean;
 };
 
+type DocumentIndexCache = { snapshots: DocumentSnapshot[]; latestId: string };
+type DocumentLibraryState = DocumentIndexCache & {
+  loaded: boolean;
+  selectedId: string;
+  expandedId: string;
+  filesByDay: Record<string, DocumentFile[]>;
+  loading: boolean;
+  actionId: string | null;
+  error: string;
+};
+
 type ThreeDLibraryFolder = {
   key: "architecture" | "interior";
   name: "Kiến trúc" | "Nội thất";
@@ -1921,6 +1932,18 @@ function clearDriveClientCache() {
   }
 }
 
+const documentIndexKey = (scope: string) => `documents-v16:${scope}:index`;
+const documentDayKey = (scope: string, snapshotId: string) => `documents-v16:${scope}:day:${encodeURIComponent(snapshotId)}`;
+const documentWorkKey = (scope: string, snapshotId: string) => `documents-v16:${scope}:work:${encodeURIComponent(snapshotId)}`;
+
+function restoreDocumentLibrary(scope: string): DocumentLibraryState {
+  const saved = scope ? readDriveCache<DocumentIndexCache>(documentIndexKey(scope), DRIVE_DOCUMENT_CACHE_MS) : null;
+  const index = Array.isArray(saved?.snapshots) && typeof saved.latestId === "string" ? saved : null;
+  const latestId = index?.latestId ?? "";
+  const files = latestId ? readDriveCache<DocumentFile[]>(documentDayKey(scope, latestId), DRIVE_DOCUMENT_CACHE_MS) : null;
+  return { snapshots: index?.snapshots ?? [], latestId, loaded: index !== null, selectedId: latestId, expandedId: latestId, filesByDay: Array.isArray(files) ? { [latestId]: files } : {}, loading: false, actionId: null, error: "" };
+}
+
 function isDriveCacheFresh(key: string, maxAgeMs: number) {
   try {
     const raw = window.localStorage.getItem(`${driveCachePrefix}${key}`);
@@ -2171,15 +2194,7 @@ export default function Home() {
   const [pendingDesignTaskCompletion, setPendingDesignTaskCompletion] = useState<{ kind: DesignProgressKind; rowId: string } | null>(null);
   const [completionFeedback, setCompletionFeedback] = useState<{ target: CompletionReviewTarget; dueDate: string; comment: string } | null>(null);
   const [completionReviewOpen, setCompletionReviewOpen] = useState(true);
-  const [documentSnapshots, setDocumentSnapshots] = useState<DocumentSnapshot[]>([]);
-  const [selectedDocumentSnapshotId, setSelectedDocumentSnapshotId] = useState("");
-  const [expandedDocumentSnapshotId, setExpandedDocumentSnapshotId] = useState("");
-  const [loadedDocumentSnapshotId, setLoadedDocumentSnapshotId] = useState("");
-  const [documentFiles, setDocumentFiles] = useState<DocumentFile[]>([]);
-  const [documentFilesBySnapshotId, setDocumentFilesBySnapshotId] = useState<Record<string, DocumentFile[]>>({});
-  const [loadingDocuments, setLoadingDocuments] = useState(false);
-  const [documentSnapshotActionId, setDocumentSnapshotActionId] = useState<string | null>(null);
-  const [documentsError, setDocumentsError] = useState("");
+  const [, renderDocumentRevision] = useState(0);
   const [threeDLibrary, setThreeDLibrary] = useState<{ rootUrl: string; folders: ThreeDLibraryFolder[] }>({ rootUrl: "", folders: [] });
   const [loadingThreeDLibrary, setLoadingThreeDLibrary] = useState(false);
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
@@ -2263,8 +2278,10 @@ export default function Home() {
   workflowView.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, activeFolder, account: loggedInEmployeeEmail, scriptUrl: driveScriptUrl };
   const personnelLoadRevision = useRef(0);
   const pendingPersonnelCache = useRef<Record<string, PersonnelMember[]> | null>(null);
-  const documentViewContext = useRef({ projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() });
-  documentViewContext.current = { projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, snapshotId: selectedDocumentSnapshotId, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
+  const documentLibraries = useRef(new Map<string, DocumentLibraryState>());
+  const documentMutationRevisions = useRef(new Map<string, number>());
+  const documentWorkMutations = useRef(new Map<string, number>());
+  const documentWorkMutationSequence = useRef(0);
   const documentReadInFlight = useRef(new Map<string, Promise<void>>());
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
@@ -2657,6 +2674,36 @@ export default function Home() {
     year === selectedYear && month === selectedMonth &&
     (record.projectId === selectedCustomerProjectId || (record.houseId && record.houseId === selectedCustomerProjectId))
   ) ?? (virtualPancakeLocation?.record.projectId === selectedCustomerProjectId ? virtualPancakeLocation : null);
+  const documentScope = selectedCustomerLocation && driveScriptUrl.trim() ? JSON.stringify([
+    driveScriptUrl.trim(), driveFolderIdFromUrl(driveLinkUrl) || driveLinkUrl.trim(), currentWorkflowToken ? loggedInEmployeeEmail : "public",
+    selectedCustomerLocation.year, selectedCustomerLocation.month, selectedCustomerLocation.record.projectId,
+    selectedCustomerLocation.record.houseId || "", selectedCustomerLocation.record.driveFolderId || "",
+  ]) : "";
+  const canReadDocuments = !loggedInEmployee || employeePermissions.includes("Tài liệu");
+  const restoredDocuments = useMemo(() => restoreDocumentLibrary(documentScope), [documentScope]);
+  const documentLibrary = documentLibraries.current.get(documentScope) ?? restoredDocuments;
+  const { snapshots: documentSnapshots, selectedId: selectedDocumentSnapshotId, expandedId: expandedDocumentSnapshotId, loading: loadingDocuments, actionId: documentSnapshotActionId, error: documentsError } = documentLibrary;
+  const documentViewContext = useRef({ scope: documentScope, projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() });
+  documentViewContext.current = { scope: documentScope, projectId: selectedCustomerProjectId, year: selectedYear, month: selectedMonth, scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
+  const currentDocumentLibrary = (scope: string) => documentLibraries.current.get(scope) ?? (scope === documentScope ? restoredDocuments : restoreDocumentLibrary(scope));
+  const updateDocumentLibrary = (scope: string, update: (state: DocumentLibraryState) => DocumentLibraryState) => {
+    if (!scope || documentViewContext.current.scope !== scope) return;
+    const next = update(currentDocumentLibrary(scope));
+    documentLibraries.current.delete(scope);
+    documentLibraries.current.set(scope, next);
+    if (documentLibraries.current.size > 20) documentLibraries.current.delete(documentLibraries.current.keys().next().value!);
+    renderDocumentRevision((revision) => revision + 1);
+  };
+  const constructionPhotoScope = selectedCustomerLocation ? JSON.stringify([
+    driveScriptUrl.trim(),
+    driveFolderIdFromUrl(driveLinkUrl) || driveLinkUrl.trim(),
+    loggedInEmployeeEmail,
+    selectedCustomerLocation.year,
+    selectedCustomerLocation.month,
+    selectedCustomerLocation.record.projectId,
+    selectedCustomerLocation.record.houseId ?? "",
+    selectedCustomerLocation.record.driveFolderId ?? "",
+  ]) : undefined;
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
     setVirtualPancakeLocation(null);
     setSelectedCustomerProjectId(record.projectId);
@@ -2669,13 +2716,6 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
-    setDocumentSnapshots([]);
-    setSelectedDocumentSnapshotId("");
-    setExpandedDocumentSnapshotId("");
-    setLoadedDocumentSnapshotId("");
-    setDocumentFiles([]);
-    setDocumentFilesBySnapshotId({});
-    setDocumentsError("");
   };
 
   const selectCustomerForWorkflow = ({ record, year, month }: CustomerLocation, targetFolder = "Tư vấn") => {
@@ -2689,13 +2729,6 @@ export default function Home() {
     setSearch("");
     setConsultingSearch("");
     setWorkflowSearch("");
-    setDocumentSnapshots([]);
-    setSelectedDocumentSnapshotId("");
-    setExpandedDocumentSnapshotId("");
-    setLoadedDocumentSnapshotId("");
-    setDocumentFiles([]);
-    setDocumentFilesBySnapshotId({});
-    setDocumentsError("");
     setActiveFolder(targetFolder);
   };
 
@@ -3611,8 +3644,8 @@ export default function Home() {
       setLoadingCustomerMessages(false);
     }
   };
-  const requestConstructionPhotos = async <T,>(location: CustomerLocation, action: "list-construction-photos" | "upload-construction-photo", upload?: ConstructionPhotoUpload) => {
-    const { response, result } = await postToAppsScript<T & { ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+  const requestConstructionPhotos = async <T,>(location: CustomerLocation, action: "list-construction-photos" | "upload-construction-photo" | "delete-construction-photo", details?: ConstructionPhotoUpload | { date: string; dayFolderId?: string; photoId: string }) => {
+    const { response, result } = await postToAppsScript<T & { ok?: boolean; error?: string; code?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
       action,
       workflowSessionToken: currentWorkflowToken,
       adminSessionToken: currentWorkflowToken,
@@ -3621,9 +3654,11 @@ export default function Home() {
       projectId: location.record.projectId,
       houseId: location.record.houseId,
       folderId: location.record.driveFolderId,
-      ...upload,
+      ...details,
     });
-    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ảnh thi công với Drive.");
+    if (!response.ok || !result.ok) {
+      throw Object.assign(new Error(result.error || "Không thể đồng bộ ảnh thi công với Drive."), { code: result.code });
+    }
     return result;
   };
   const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
@@ -3865,140 +3900,127 @@ export default function Home() {
   // could retain a deleted day in local cache after a background refresh.
   // A clean generation prevents an obsolete “Chưa gắn” override from an older
   // device from replacing the assignment that the user has just selected.
-  const documentCacheKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `documents-v15:${location.year}-${location.month}-${location.record.projectId}-${snapshotId || "latest"}` : "";
-  const documentMetadataOverrideKey = (snapshotId = selectedDocumentSnapshotId, location = selectedCustomerLocation) => location ? `document-metadata-v3:${location.year}-${location.month}-${location.record.projectId}-${snapshotId}` : "";
-  const mergeDocumentMetadataOverrides = (files: DocumentFile[], snapshotId: string, location = selectedCustomerLocation) => {
-    const cacheKey = documentMetadataOverrideKey(snapshotId, location);
-    const overrides = cacheKey ? readDriveCache<Record<string, Pick<DocumentFile, "work">>>(cacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {} : {};
+  const documentTarget = () => {
+    if (!selectedCustomerLocation || !documentScope || !canReadDocuments) return null;
+    const { year, month, record } = selectedCustomerLocation;
+    return {
+      scope: documentScope, scriptUrl: driveScriptUrl.trim(),
+      payload: { ...workflowAuthorization.current, year, month, projectId: record.projectId, houseId: record.houseId, folderId: record.driveFolderId },
+    };
+  };
+  const isCurrentDocumentScope = (scope: string) => documentViewContext.current.scope === scope;
+  const finishDocumentBusy = (scope: string, patch: Pick<Partial<DocumentLibraryState>, "loading" | "actionId">) => {
+    if (isCurrentDocumentScope(scope)) updateDocumentLibrary(scope, (state) => ({ ...state, ...patch }));
+    else {
+      const previous = documentLibraries.current.get(scope);
+      if (previous) documentLibraries.current.set(scope, { ...previous, ...patch });
+    }
+  };
+  const writeDocumentIndex = (scope: string, index: DocumentIndexCache) => {
+    writeDriveCache(documentIndexKey(scope), { snapshots: index.snapshots, latestId: index.latestId });
+  };
+  const documentFilesForDay = (scope: string, state: DocumentLibraryState, day: string) =>
+    state.filesByDay[day] ?? (day ? readDriveCache<DocumentFile[]>(documentDayKey(scope, day), DRIVE_DOCUMENT_CACHE_MS) ?? undefined : undefined);
+  const mergeDocumentMetadataOverrides = (scope: string, snapshotId: string, files: DocumentFile[]) => {
+    const overrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(documentWorkKey(scope, snapshotId), DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
     return files.map((file) => overrides[file.id] ? { ...file, ...overrides[file.id] } : file);
   };
+  const setDocumentDay = (scope: string, snapshotId: string, expand = true) => {
+    updateDocumentLibrary(scope, (state) => {
+      const files = documentFilesForDay(scope, state, snapshotId);
+      return { ...state, selectedId: snapshotId, expandedId: expand ? snapshotId : "", filesByDay: files ? { ...state.filesByDay, [snapshotId]: files } : state.filesByDay, error: "" };
+    });
+  };
+  const bumpDocumentMutation = (scope: string) => {
+    documentMutationRevisions.current.set(scope, (documentMutationRevisions.current.get(scope) ?? 0) + 1);
+  };
+
   const loadDocuments = async (snapshotId?: string, refresh = false, activateLatest = false, quietly = false, metadataOnly = false): Promise<void> => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    const requestedLocation = selectedCustomerLocation;
-    const viewAtStart = { ...documentViewContext.current };
-    const viewedSnapshotAtStart = viewAtStart.snapshotId;
-    const requestedSnapshotId = snapshotId || "";
-    const cacheKey = documentCacheKey(requestedSnapshotId);
-    const requestKey = JSON.stringify([viewAtStart.scriptUrl, viewAtStart.driveUrl, requestedLocation.year, requestedLocation.month, requestedLocation.record.projectId]);
-    const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(cacheKey, DRIVE_DOCUMENT_CACHE_MS);
-    if (cached && !refresh) {
-      setDocumentSnapshots(cached.snapshots);
-      const activeId = requestedSnapshotId || cached.activeSnapshotId;
-      const files = mergeDocumentMetadataOverrides(cached.files, activeId);
-      setDocumentFiles(files);
-      if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: files }));
-      setSelectedDocumentSnapshotId(activeId);
-      setLoadedDocumentSnapshotId(activeId);
-      setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
+    const target = documentTarget();
+    if (!target) return;
+    const { scope, scriptUrl, payload } = target;
+    const initial = currentDocumentLibrary(scope);
+    if (activateLatest && !refresh && initial.latestId) setDocumentDay(scope, initial.latestId);
+    const before = currentDocumentLibrary(scope);
+    const requestedId = snapshotId || "";
+    if (before.actionId || (before.loading && !documentReadInFlight.current.has(scope))) return;
+    if (!refresh && before.loaded && (!before.latestId || documentFilesForDay(scope, before, requestedId || before.latestId) !== undefined)) return;
+    if (navigator.onLine === false) {
+      if (!before.loaded) updateDocumentLibrary(scope, (state) => ({ ...state, error: "Thiết bị đang ngoại tuyến." }));
       return;
     }
-    const pending = documentReadInFlight.current.get(requestKey);
+    const pending = documentReadInFlight.current.get(scope);
     if (pending) {
       await pending;
-      if (quietly) return;
-      const view = documentViewContext.current;
-      if (view.projectId !== requestedLocation.record.projectId || view.year !== requestedLocation.year || view.month !== requestedLocation.month || view.scriptUrl !== viewAtStart.scriptUrl || view.driveUrl !== viewAtStart.driveUrl || (requestedSnapshotId && view.snapshotId !== requestedSnapshotId && view.snapshotId !== viewedSnapshotAtStart)) return;
+      if (quietly || !isCurrentDocumentScope(scope)) return;
+      const selected = currentDocumentLibrary(scope).selectedId;
+      if (requestedId && selected !== requestedId && selected !== before.selectedId) return;
       return loadDocuments(snapshotId, refresh, activateLatest, quietly, metadataOnly);
     }
+    const revision = documentMutationRevisions.current.get(scope) ?? 0;
     const request = (async () => {
-      if (!quietly) { setLoadingDocuments(true); setDocumentsError(""); }
+      if (!quietly) updateDocumentLibrary(scope, (state) => ({ ...state, loading: true, error: "" }));
       try {
-        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; latestSnapshotId?: string; files?: DocumentFile[]; metadataOnly?: boolean }>({ scriptUrl: viewAtStart.scriptUrl }, {
-          action: "list-documents",
-          year: selectedCustomerLocation.year,
-          month: selectedCustomerLocation.month,
-          projectId: selectedCustomerLocation.record.projectId,
-          houseId: selectedCustomerLocation.record.houseId,
-          snapshotId: requestedSnapshotId || undefined,
-          latest: !requestedSnapshotId,
-          metadataOnly,
-          refresh,
+        const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshots?: DocumentSnapshot[]; activeSnapshotId?: string; latestSnapshotId?: string; files?: DocumentFile[]; metadataOnly?: boolean }>({ scriptUrl }, {
+          action: "list-documents", ...payload, snapshotId: requestedId || undefined, latest: !requestedId, metadataOnly, refresh,
         });
-        if (!response.ok || !result.ok || !result.files || !result.snapshots) throw new Error(result.error || "Không thể nạp Tài liệu.");
-        const currentView = documentViewContext.current;
-        if (currentView.projectId !== requestedLocation.record.projectId || currentView.year !== requestedLocation.year || currentView.month !== requestedLocation.month || currentView.scriptUrl !== viewAtStart.scriptUrl || currentView.driveUrl !== viewAtStart.driveUrl) return;
-        // A delayed latest response may refresh its cache, but must never move
-        // the user away from a different day selected while it was in flight.
-        const activeId = result.activeSnapshotId || (result.snapshots.some((snapshot) => snapshot.id === requestedSnapshotId) ? requestedSnapshotId : "");
-        const hydratedFromCache = !viewedSnapshotAtStart && currentView.snapshotId === (cached?.activeSnapshotId || activeId);
-        const sameDay = hydratedFromCache || currentView.snapshotId === viewedSnapshotAtStart || Boolean(requestedSnapshotId && currentView.snapshotId === requestedSnapshotId);
-        if (metadataOnly || result.metadataOnly) {
-          setDocumentSnapshots(result.snapshots);
-          const latest = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(""), DRIVE_DOCUMENT_CACHE_MS);
-          if (latest && latest.activeSnapshotId === (result.latestSnapshotId ?? result.snapshots[0]?.id ?? "")) writeDriveCache(documentCacheKey(""), { ...latest, snapshots: result.snapshots });
-          else try { window.localStorage.removeItem(`${driveCachePrefix}${documentCacheKey("")}`); } catch { /* Optional index cache. */ }
-          return;
-        }
-        const next = { snapshots: result.snapshots, activeSnapshotId: result.activeSnapshotId ?? "", files: mergeDocumentMetadataOverrides(result.files, activeId) };
-        writeDriveCache(cacheKey, next);
-        if (activeId && cacheKey !== documentCacheKey(activeId)) writeDriveCache(documentCacheKey(activeId), { ...next, activeSnapshotId: activeId });
-        if (!sameDay) return;
-        setDocumentSnapshots(next.snapshots);
-        setDocumentsError("");
-        setDocumentFiles(next.files);
-        if (activeId) setDocumentFilesBySnapshotId((current) => ({ ...current, [activeId]: next.files }));
-        setSelectedDocumentSnapshotId(activeId);
-        setLoadedDocumentSnapshotId(activeId);
-        setExpandedDocumentSnapshotId((current) => activateLatest || (quietly && current === viewedSnapshotAtStart && activeId !== viewedSnapshotAtStart) ? activeId : current || activeId);
+        if (!isCurrentDocumentScope(scope) || revision !== (documentMutationRevisions.current.get(scope) ?? 0)) return;
+        if (!response.ok || !result.ok || !Array.isArray(result.files) || !Array.isArray(result.snapshots)) throw new Error(result.error || "Không thể nạp Tài liệu.");
+        const index = { snapshots: result.snapshots, latestId: result.latestSnapshotId ?? result.snapshots[0]?.id ?? "" };
+        const activeId = result.activeSnapshotId || (!requestedId ? index.latestId : "");
+        const files = !metadataOnly && !result.metadataOnly && activeId ? mergeDocumentMetadataOverrides(scope, activeId, result.files) : undefined;
+        writeDocumentIndex(scope, index);
+        if (files) writeDriveCache(documentDayKey(scope, activeId), files);
+        updateDocumentLibrary(scope, (state) => {
+          const ids = new Set(index.snapshots.map(({ id }) => id));
+          const filesByDay = Object.fromEntries(Object.entries(state.filesByDay).filter(([id]) => ids.has(id)));
+          if (files && ids.has(activeId)) filesByDay[activeId] = files;
+          // A late reply may refresh this project's cache without changing
+          // the historical day picked while the request was in flight.
+          const canFollow = Boolean(files && ids.has(activeId) && (state.selectedId === before.selectedId || state.selectedId === requestedId));
+          const selectedId = canFollow ? activeId : ids.has(state.selectedId) ? state.selectedId : index.latestId;
+          const followExpansion = canFollow && (activateLatest || !before.selectedId || state.expandedId === before.selectedId || state.expandedId === requestedId);
+          const expandedId = followExpansion ? activeId : ids.has(state.expandedId) ? state.expandedId : state.expandedId ? selectedId : "";
+          return { ...state, ...index, loaded: true, filesByDay, selectedId, expandedId, error: "" };
+        });
       } catch (error) {
+        if (!isCurrentDocumentScope(scope)) return;
         const message = error instanceof Error ? error.message : "Không thể nạp Tài liệu.";
-        const view = documentViewContext.current;
-        if (view.projectId === viewAtStart.projectId && view.scriptUrl === viewAtStart.scriptUrl && view.driveUrl === viewAtStart.driveUrl) {
-          if (!cached && !quietly) setDocumentsError(message);
-          if (refresh && !quietly) setNotice(message);
-        }
+        if (!quietly) updateDocumentLibrary(scope, (state) => ({ ...state, error: message }));
+        if (refresh && !quietly) setNotice(message);
       } finally {
-        documentReadInFlight.current.delete(requestKey);
-        const view = documentViewContext.current;
-        if (!quietly && view.projectId === viewAtStart.projectId && view.scriptUrl === viewAtStart.scriptUrl && view.driveUrl === viewAtStart.driveUrl) setLoadingDocuments(false);
+        documentReadInFlight.current.delete(scope);
+        if (!quietly) finishDocumentBusy(scope, { loading: false });
       }
     })();
-    documentReadInFlight.current.set(requestKey, request);
+    documentReadInFlight.current.set(scope, request);
     await request;
   };
 
   const createDocumentSnapshot = async () => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    setLoadingDocuments(true);
+    const target = documentTarget();
+    if (!target) return;
+    const { scope, scriptUrl, payload } = target;
+    if (currentDocumentLibrary(scope).loading || currentDocumentLibrary(scope).actionId) return;
+    bumpDocumentMutation(scope);
+    updateDocumentLibrary(scope, (state) => ({ ...state, loading: true, error: "" }));
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; alreadyExists?: boolean; copiedCount?: number; files?: DocumentFile[] }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "create-document-snapshot",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-      });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; snapshot?: DocumentSnapshot; alreadyExists?: boolean; copiedCount?: number; files?: DocumentFile[] }>({ scriptUrl }, { action: "create-document-snapshot", ...payload });
+      if (!isCurrentDocumentScope(scope)) return;
       if (!response.ok || !result.ok || !result.snapshot) throw new Error(result.error || "Không thể tạo bản Tài liệu hôm nay.");
-      const nextSnapshots = [result.snapshot, ...documentSnapshots.filter((snapshot) => snapshot.id !== result.snapshot?.id)];
-      setSelectedDocumentSnapshotId(result.snapshot.id);
-      setExpandedDocumentSnapshotId(result.snapshot.id);
-      setDocumentSnapshots(nextSnapshots);
-      if (result.alreadyExists) {
-        const cached = readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(result.snapshot.id), DRIVE_DOCUMENT_CACHE_MS);
-        if (cached) {
-          const files = mergeDocumentMetadataOverrides(cached.files, result.snapshot.id);
-          setDocumentFiles(files);
-          setDocumentFilesBySnapshotId((current) => ({ ...current, [result.snapshot.id]: files }));
-          setLoadedDocumentSnapshotId(result.snapshot.id);
-        } else {
-          setDocumentFiles([]);
-          setLoadedDocumentSnapshotId("");
-        }
-        setNotice(`Bản ngày ${result.snapshot.date} đã có.`);
-      } else {
-        const copiedFiles = mergeDocumentMetadataOverrides(result.files ?? [], result.snapshot.id);
-        const next = { snapshots: nextSnapshots, activeSnapshotId: result.snapshot.id, files: copiedFiles };
-        setDocumentFiles(copiedFiles);
-        setDocumentFilesBySnapshotId((current) => ({ ...current, [result.snapshot.id]: copiedFiles }));
-        setLoadedDocumentSnapshotId(result.snapshot.id);
-        writeDriveCache(documentCacheKey(result.snapshot.id), next);
-        writeDriveCache(documentCacheKey(""), next);
-        setNotice(result.copiedCount ? `Đã tạo bản ngày ${result.snapshot.date} và sao chép ${result.copiedCount} tệp từ ngày gần nhất.` : `Đã tạo bản ngày ${result.snapshot.date}.`);
-      }
+      const snapshot = result.snapshot;
+      const previous = currentDocumentLibrary(scope);
+      const index = { snapshots: [snapshot, ...previous.snapshots.filter((item) => item.id !== snapshot.id)], latestId: snapshot.id };
+      const files = result.alreadyExists ? documentFilesForDay(scope, previous, snapshot.id) : mergeDocumentMetadataOverrides(scope, snapshot.id, result.files ?? []);
+      writeDocumentIndex(scope, index);
+      if (files) writeDriveCache(documentDayKey(scope, snapshot.id), files);
+      updateDocumentLibrary(scope, (state) => ({ ...state, ...index, loaded: true, selectedId: snapshot.id, expandedId: snapshot.id, filesByDay: files ? { ...state.filesByDay, [snapshot.id]: files } : state.filesByDay }));
+      setNotice(result.alreadyExists ? `Bản ngày ${snapshot.date} đã có.` : result.copiedCount ? `Đã tạo bản ngày ${snapshot.date} và sao chép ${result.copiedCount} tệp từ ngày gần nhất.` : `Đã tạo bản ngày ${snapshot.date}.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
+      if (isCurrentDocumentScope(scope)) setNotice(error instanceof Error ? error.message : "Không thể tạo bản Tài liệu hôm nay.");
     } finally {
-      setLoadingDocuments(false);
+      bumpDocumentMutation(scope);
+      finishDocumentBusy(scope, { loading: false });
     }
   };
 
@@ -4039,121 +4061,122 @@ export default function Home() {
     }
   };
 
-  const updateDocumentMetadata = async (fileId: string, patch: Partial<Pick<DocumentFile, "work">>) => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim() || !selectedDocumentSnapshotId) return;
-    const before = documentFiles;
-    const nextFiles = documentFiles.map((file) => file.id === fileId ? { ...file, ...patch } : file);
-    const changedFile = nextFiles.find((file) => file.id === fileId);
-    if (!changedFile) return;
-    const metadataCacheKey = documentMetadataOverrideKey(selectedDocumentSnapshotId);
-    const currentOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(metadataCacheKey, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
-    writeDriveCache(metadataCacheKey, { ...currentOverrides, [fileId]: { work: changedFile.work } });
-    setDocumentFiles(nextFiles);
-    setDocumentFilesBySnapshotId((current) => ({ ...current, [selectedDocumentSnapshotId]: nextFiles }));
+  const updateDocumentMetadata = async (snapshotId: string, fileId: string, patch: Partial<Pick<DocumentFile, "work">>) => {
+    const target = documentTarget();
+    if (!target || !snapshotId) return;
+    const { scope, scriptUrl, payload } = target;
+    const before = currentDocumentLibrary(scope).filesByDay[snapshotId]?.find((file) => file.id === fileId);
+    if (!before || !patch.work || before.work === patch.work) return;
+    const key = documentWorkKey(scope, snapshotId);
+    const changeKey = JSON.stringify([scope, snapshotId, fileId]);
+    const revision = ++documentWorkMutationSequence.current;
+    documentWorkMutations.current.set(changeKey, revision);
+    const overrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(key, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
+    const previousOverride = overrides[fileId];
+    writeDriveCache(key, { ...overrides, [fileId]: { work: patch.work } });
+    const applyWork = (work: string) => updateDocumentLibrary(scope, (state) => {
+      const files = state.filesByDay[snapshotId];
+      return files ? { ...state, filesByDay: { ...state.filesByDay, [snapshotId]: files.map((file) => file.id === fileId ? { ...file, work } : file) } } : state;
+    });
+    applyWork(patch.work);
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "update-document-metadata",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-        snapshotId: selectedDocumentSnapshotId,
-        fileId,
-        work: changedFile.work,
-      });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl }, { action: "update-document-metadata", ...payload, snapshotId, fileId, work: patch.work });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật phân loại tệp.");
-      writeDriveCache(documentCacheKey(), { snapshots: documentSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: nextFiles });
+      if (isCurrentDocumentScope(scope) && documentWorkMutations.current.get(changeKey) === revision) {
+        const files = currentDocumentLibrary(scope).filesByDay[snapshotId];
+        if (files) writeDriveCache(documentDayKey(scope, snapshotId), files);
+      }
     } catch (error) {
-      setDocumentFiles(before);
-      setDocumentFilesBySnapshotId((current) => ({ ...current, [selectedDocumentSnapshotId]: before }));
-      setNotice(error instanceof Error ? error.message : "Không thể cập nhật phân loại tệp.");
+      if (documentWorkMutations.current.get(changeKey) !== revision) return;
+      const nextOverrides = readDriveCache<Record<string, Pick<DocumentFile, "work">>>(key, DRIVE_DOCUMENT_METADATA_CACHE_MS) ?? {};
+      if (previousOverride) nextOverrides[fileId] = previousOverride;
+      else delete nextOverrides[fileId];
+      writeDriveCache(key, nextOverrides);
+      const cached = readDriveCache<DocumentFile[]>(documentDayKey(scope, snapshotId), DRIVE_DOCUMENT_CACHE_MS);
+      if (Array.isArray(cached)) writeDriveCache(documentDayKey(scope, snapshotId), cached.map((file) => file.id === fileId ? { ...file, work: before.work } : file));
+      if (isCurrentDocumentScope(scope)) {
+        applyWork(before.work);
+        setNotice(error instanceof Error ? error.message : "Không thể cập nhật phân loại tệp.");
+      } else {
+        const previous = documentLibraries.current.get(scope);
+        if (previous?.filesByDay[snapshotId]) documentLibraries.current.set(scope, { ...previous, filesByDay: { ...previous.filesByDay, [snapshotId]: previous.filesByDay[snapshotId].map((file) => file.id === fileId ? { ...file, work: before.work } : file) } });
+      }
+    } finally {
+      if (documentWorkMutations.current.get(changeKey) === revision) documentWorkMutations.current.delete(changeKey);
     }
   };
 
   const updateDocumentSnapshotLock = async (snapshot: DocumentSnapshot, locked: boolean, passcode = "") => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim()) return;
-    setDocumentSnapshotActionId(snapshot.id);
+    const target = documentTarget();
+    if (!target) return;
+    const { scope, scriptUrl, payload } = target;
+    if (currentDocumentLibrary(scope).actionId) return;
+    bumpDocumentMutation(scope);
+    updateDocumentLibrary(scope, (state) => ({ ...state, actionId: snapshot.id }));
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "set-document-snapshot-lock",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-        snapshotId: snapshot.id,
-        locked,
-        passcode,
-      });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl }, { action: "set-document-snapshot-lock", ...payload, snapshotId: snapshot.id, locked, passcode });
+      if (!isCurrentDocumentScope(scope)) return;
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể cập nhật khóa bản ngày.");
-      const nextSnapshots = documentSnapshots.map((item) => item.id === snapshot.id ? { ...item, locked } : item);
-      setDocumentSnapshots(nextSnapshots);
-      writeDriveCache(documentCacheKey(), { snapshots: nextSnapshots, activeSnapshotId: selectedDocumentSnapshotId, files: documentFiles });
+      const previous = currentDocumentLibrary(scope);
+      const snapshots = previous.snapshots.map((item) => item.id === snapshot.id ? { ...item, locked } : item);
+      writeDocumentIndex(scope, { snapshots, latestId: previous.latestId });
+      updateDocumentLibrary(scope, (state) => ({ ...state, snapshots }));
       setNotice(locked ? `Đã khóa bản ngày ${snapshot.date}.` : `Đã mở khóa bản ngày ${snapshot.date}.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể cập nhật khóa bản ngày.");
+      if (isCurrentDocumentScope(scope)) setNotice(error instanceof Error ? error.message : "Không thể cập nhật khóa bản ngày.");
     } finally {
-      setDocumentSnapshotActionId(null);
+      bumpDocumentMutation(scope);
+      finishDocumentBusy(scope, { actionId: null });
     }
   };
 
   const toggleDocumentSnapshotLock = (snapshot: DocumentSnapshot) => {
-    if (!snapshot.locked) {
-      void updateDocumentSnapshotLock(snapshot, true);
-      return;
-    }
+    if (!snapshot.locked) { void updateDocumentSnapshotLock(snapshot, true); return; }
     const passcode = window.prompt(`Nhập mã để mở khóa bản ngày ${snapshot.date}:`);
-    if (passcode === null) return;
-    void updateDocumentSnapshotLock(snapshot, false, passcode);
+    if (passcode !== null) void updateDocumentSnapshotLock(snapshot, false, passcode);
   };
 
   const deleteDocumentSnapshot = async (snapshot: DocumentSnapshot) => {
-    if (!selectedCustomerLocation || !driveScriptUrl.trim() || snapshot.locked) return;
+    const target = documentTarget();
+    if (!target || snapshot.locked || currentDocumentLibrary(target.scope).actionId) return;
     if (!window.confirm(`Xóa bản Tài liệu ngày ${snapshot.date}? Các tệp Theo ngày nằm trong bản này cũng sẽ bị xóa.`)) return;
-    setDocumentSnapshotActionId(snapshot.id);
+    const { scope, scriptUrl, payload } = target;
+    bumpDocumentMutation(scope);
+    updateDocumentLibrary(scope, (state) => ({ ...state, actionId: snapshot.id }));
     try {
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
-        action: "delete-document-snapshot",
-        year: selectedCustomerLocation.year,
-        month: selectedCustomerLocation.month,
-        projectId: selectedCustomerLocation.record.projectId,
-        houseId: selectedCustomerLocation.record.houseId,
-        snapshotId: snapshot.id,
-      });
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>({ scriptUrl }, { action: "delete-document-snapshot", ...payload, snapshotId: snapshot.id });
+      if (!isCurrentDocumentScope(scope)) return;
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể xóa bản ngày.");
-      const nextSnapshots = documentSnapshots.filter((item) => item.id !== snapshot.id);
-      const nextSelectedId = selectedDocumentSnapshotId === snapshot.id ? (nextSnapshots[0]?.id ?? "") : selectedDocumentSnapshotId;
-      const nextCached = nextSelectedId ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(nextSelectedId), DRIVE_DOCUMENT_CACHE_MS) : null;
-      const nextFiles = nextCached ? mergeDocumentMetadataOverrides(nextCached.files, nextSelectedId) : [];
-      removeDriveCache(documentCacheKey(snapshot.id));
-      removeDriveCache(documentMetadataOverrideKey(snapshot.id));
-      writeDriveCache(documentCacheKey(""), { snapshots: nextSnapshots, activeSnapshotId: nextSelectedId, files: nextFiles });
-      setDocumentSnapshots(nextSnapshots);
-      setSelectedDocumentSnapshotId(nextSelectedId);
-      setDocumentFiles(nextFiles);
-      setDocumentFilesBySnapshotId((current) => {
-        const { [snapshot.id]: _removed, ...remaining } = current;
-        return nextCached && nextSelectedId ? { ...remaining, [nextSelectedId]: nextFiles } : remaining;
+      const previous = currentDocumentLibrary(scope);
+      const snapshots = previous.snapshots.filter((item) => item.id !== snapshot.id);
+      const latestId = snapshots[0]?.id ?? "";
+      removeDriveCache(documentDayKey(scope, snapshot.id));
+      removeDriveCache(documentWorkKey(scope, snapshot.id));
+      writeDocumentIndex(scope, { snapshots, latestId });
+      updateDocumentLibrary(scope, (state) => {
+        const filesByDay = { ...state.filesByDay };
+        delete filesByDay[snapshot.id];
+        const selectedId = state.selectedId === snapshot.id ? latestId : state.selectedId;
+        const expandedId = state.expandedId === snapshot.id ? selectedId : state.expandedId;
+        const files = documentFilesForDay(scope, state, expandedId);
+        if (expandedId && files) filesByDay[expandedId] = files;
+        return { ...state, snapshots, latestId, selectedId, expandedId, filesByDay, error: "" };
       });
-      setLoadedDocumentSnapshotId(nextCached ? nextSelectedId : "");
-      setDocumentsError("");
-      if (expandedDocumentSnapshotId === snapshot.id) setExpandedDocumentSnapshotId("");
       setNotice(`Đã xóa bản ngày ${snapshot.date}.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");
+      if (isCurrentDocumentScope(scope)) setNotice(error instanceof Error ? error.message : "Không thể xóa bản ngày.");
     } finally {
-      setDocumentSnapshotActionId(null);
+      bumpDocumentMutation(scope);
+      finishDocumentBusy(scope, { actionId: null });
     }
   };
 
   useEffect(() => {
-    // A read still finishing for another customer/connection must not leave
-    // the new library's buttons or live refresh blocked by its loading flag.
-    setLoadingDocuments(false);
     setLoadingThreeDLibrary(false);
   }, [selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
 
   useEffect(() => {
-    if (activeFolder === "Tài liệu" && selectedCustomerLocation) {
+    if (activeFolder === "Tài liệu" && documentScope && canReadDocuments) {
       // Returning to Tài liệu always prioritizes the newest day. Older days
       // remain on demand, while a day that was already loaded stays in cache.
       void loadDocuments(undefined, false, true);
@@ -4161,21 +4184,21 @@ export default function Home() {
     if (activeFolder === "3D" && selectedCustomerLocation) {
       void loadThreeDLibrary();
     }
-  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
+  }, [activeFolder, documentScope, canReadDocuments]);
 
   // Read the current render through a ref. Capturing loadingDocuments in the
   // timer's initial closure previously left some libraries permanently stale.
   refreshVisibleFiles.current = async () => {
     if (documentSnapshotActionId || loadingDocuments || loadingThreeDLibrary) return;
     if (activeFolder === "Tài liệu") {
-      const viewingOlder = Boolean(selectedDocumentSnapshotId && documentSnapshots.some((snapshot) => snapshot.id === selectedDocumentSnapshotId) && documentSnapshots[0]?.id !== selectedDocumentSnapshotId);
+      const viewingOlder = Boolean(selectedDocumentSnapshotId && documentSnapshots.some((snapshot) => snapshot.id === selectedDocumentSnapshotId) && documentLibrary.latestId !== selectedDocumentSnapshotId);
       // Discover new dates without loading the contents of historical days.
       await loadDocuments(undefined, true, false, true, viewingOlder);
     } else if (activeFolder === "3D") await loadThreeDLibrary(true, true);
   };
 
   useEffect(() => {
-    if (!["Tài liệu", "3D"].includes(activeFolder) || !selectedCustomerLocation || !driveScriptUrl.trim()) return;
+    if (!["Tài liệu", "3D"].includes(activeFolder) || !documentScope || (activeFolder === "Tài liệu" && !canReadDocuments)) return;
     let stopped = false;
     let running = false;
     let lastStarted = -Infinity;
@@ -4197,7 +4220,8 @@ export default function Home() {
       }
     };
     const wake = () => { void refresh(); };
-    void refresh();
+    if (activeFolder === "Tài liệu") timer = window.setTimeout(wake, 3_000);
+    else void refresh();
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("focus", wake);
     window.addEventListener("online", wake);
@@ -4208,7 +4232,7 @@ export default function Home() {
       window.removeEventListener("focus", wake);
       window.removeEventListener("online", wake);
     };
-  }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
+  }, [activeFolder, documentScope, canReadDocuments]);
 
   const searchCustomersOnDrive = (value: string) => {
     const query = value.trim().replace(/\s+/g, " ");
@@ -5789,35 +5813,9 @@ export default function Home() {
     </section>;
   };
   const renderDocumentLibrary = () => {
-    const visibleDocumentFiles = documentFiles.filter((file) => !isHiddenDocumentFile(file.name) && !isSpreadsheetFile(file));
-    const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
-      title,
-      files: visibleDocumentFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
-    })).filter((group) => group.files.length);
-    const toggleDocumentSnapshot = (snapshotId: string) => {
-      if (expandedDocumentSnapshotId === snapshotId) {
-        setExpandedDocumentSnapshotId("");
-        return;
-      }
-      setExpandedDocumentSnapshotId(snapshotId);
-      setSelectedDocumentSnapshotId(snapshotId);
-      setDocumentsError("");
-      const rememberedFiles = documentFilesBySnapshotId[snapshotId];
-      const cached = rememberedFiles === undefined ? readDriveCache<{ snapshots: DocumentSnapshot[]; activeSnapshotId: string; files: DocumentFile[] }>(documentCacheKey(snapshotId), DRIVE_DOCUMENT_CACHE_MS) : null;
-      if (rememberedFiles !== undefined || cached) {
-        const files = rememberedFiles ?? mergeDocumentMetadataOverrides(cached!.files, snapshotId);
-        setDocumentFiles(files);
-        if (rememberedFiles === undefined) setDocumentFilesBySnapshotId((current) => ({ ...current, [snapshotId]: files }));
-        setLoadedDocumentSnapshotId(snapshotId);
-      } else {
-        setDocumentFiles([]);
-        setLoadedDocumentSnapshotId("");
-      }
-    };
+    const toggleDocumentSnapshot = (snapshotId: string) => setDocumentDay(documentScope, snapshotId, expandedDocumentSnapshotId !== snapshotId);
     const refreshDocumentSnapshot = (snapshotId: string) => {
-      setExpandedDocumentSnapshotId(snapshotId);
-      setSelectedDocumentSnapshotId(snapshotId);
-      setDocumentsError("");
+      setDocumentDay(documentScope, snapshotId);
       void loadDocuments(snapshotId, true);
     };
     return <section className="document-library" aria-label="Tài liệu dự án">
@@ -5828,20 +5826,23 @@ export default function Home() {
       <div className="document-library__days">
         {documentSnapshots.length ? documentSnapshots.map((snapshot) => {
           const expanded = expandedDocumentSnapshotId === snapshot.id;
-          const contentReady = loadedDocumentSnapshotId === snapshot.id;
+          const files = expanded ? documentLibrary.filesByDay[snapshot.id] : undefined;
+          const visibleFiles = (files ?? []).filter((file) => !isHiddenDocumentFile(file.name) && !isSpreadsheetFile(file));
+          const documentGroups = ["Tư vấn", "Thiết kế", "Dự toán", "Thi công", "Nghiệm thu", "Bảo hành", "Chưa xác định"].map((title) => ({
+            title, files: visibleFiles.filter((file) => title === "Chưa xác định" ? file.work === "Chưa gắn" : file.work === title),
+          })).filter((group) => group.files.length);
           const isActing = documentSnapshotActionId === snapshot.id;
           return <article key={snapshot.id} className={`document-day ${expanded ? "document-day--expanded" : ""}`}>
             <header className="document-day__header"><button type="button" className="document-day__trigger" onClick={() => toggleDocumentSnapshot(snapshot.id)} aria-expanded={expanded}>
               <span><b>Ngày: {snapshot.date || "Chưa xác định"}</b><small>{snapshot.name}</small></span><em>{expanded ? "−" : "+"}</em>
             </button><div className="document-day__actions"><button type="button" className={snapshot.locked ? "document-day__lock document-day__lock--locked" : "document-day__lock"} onClick={() => toggleDocumentSnapshotLock(snapshot)} disabled={isActing || loadingDocuments} title={snapshot.locked ? "Mở khóa" : "Khóa để không cho xóa"} aria-label={snapshot.locked ? `Mở khóa ngày ${snapshot.date}` : `Khóa ngày ${snapshot.date}`}>{snapshot.locked ? "🔒" : "🔓"}</button><button type="button" className="document-day__refresh" onClick={() => refreshDocumentSnapshot(snapshot.id)} disabled={isActing || loadingDocuments} title="Cập nhật tệp từ Drive" aria-label={`Cập nhật ngày ${snapshot.date}`}>{loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? "…" : "↻"}</button><button type="button" className="document-day__delete" onClick={() => void deleteDocumentSnapshot(snapshot)} disabled={snapshot.locked || isActing || loadingDocuments} title={snapshot.locked ? "Cần mở khóa trước khi xóa" : "Xóa bản ngày"} aria-label={`Xóa ngày ${snapshot.date}`}>🗑</button></div></header>
             {expanded && <div className="document-day__content">
-              {loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
-                : !contentReady ? <p className="document-library__empty">Tệp của ngày này chưa được nạp. <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
-                : documentsError ? <p className="document-library__empty">Chưa thể nạp Tài liệu: {documentsError}</p>
-                  : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} title={isMobileDevice() ? "Mở bằng ứng dụng đọc tài liệu trên điện thoại" : "Mở thư mục chứa tài liệu trên máy tính"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
+              {files === undefined ? loadingDocuments && selectedDocumentSnapshotId === snapshot.id ? <p className="document-library__empty">Đang nạp tệp của ngày này…</p>
+                : <p className="document-library__empty">{documentsError ? `Chưa thể nạp Tài liệu: ${documentsError}` : "Tệp của ngày này chưa được nạp."} <button type="button" className="document-library__load-day" onClick={() => void loadDocuments(snapshot.id, true)}>Nạp tệp</button></p>
+                : documentGroups.length ? documentGroups.map((group) => <section className="document-work-group" key={group.title}><h2>{group.title}</h2><div className="document-library__table-wrap"><table className="document-library__table"><thead><tr><th>Công việc</th><th>Tên tệp</th><th>Ngày chỉnh sửa</th><th>Mở</th></tr></thead><tbody>{group.files.map((file) => <tr key={file.id}><td><select value={file.work} onChange={(event) => void updateDocumentMetadata(snapshot.id, file.id, { work: event.target.value })} aria-label={`Công việc của ${file.name}`}>{documentWorkOptions.map((work) => <option key={work} value={work}>{work}</option>)}</select></td><td><a href={isPreviewableFile(file) ? filePreviewUrl(file) : file.downloadUrl} {...(isPreviewableFile(file) ? { target: "_blank", rel: "noreferrer" } : { download: file.name })}>{file.name}</a></td><td>{file.updatedAt}</td><td><button type="button" className="document-library__open-file" onClick={() => void openDesktopDocumentFile(file, snapshot)} title={isMobileDevice() ? "Mở bằng ứng dụng đọc tài liệu trên điện thoại" : "Mở thư mục chứa tài liệu trên máy tính"}>Mở</button></td></tr>)}</tbody></table></div></section>) : <p className="document-library__empty">Chưa có tệp trong bản ngày này.</p>}
             </div>}
           </article>;
-        }) : <p className="document-library__empty">Chưa có bản Tài liệu nào.</p>}
+        }) : <p className="document-library__empty">{documentsError ? `Chưa thể nạp Tài liệu: ${documentsError}` : documentScope && !documentLibrary.loaded ? "Đang nạp danh sách bản Tài liệu…" : "Chưa có bản Tài liệu nào."}</p>}
       </div>
     </section>;
   };
@@ -6353,10 +6354,19 @@ export default function Home() {
             {renderWorkflowCustomerSearch()}
             {selectedCustomerLocation && (loggedInEmployee && currentWorkflowToken
               ? <ConstructionPhotos
-                  key={`${projectWorkflowScope(selectedCustomerLocation)}:${loggedInEmployeeEmail}:${driveScriptUrl}:${driveLinkUrl}`}
+                  key={constructionPhotoScope}
+                  cacheKey={constructionPhotoScope}
                   canCapture
                   loadPhotos={() => requestConstructionPhotos<{ days?: ConstructionPhotoDay[] }>(selectedCustomerLocation, "list-construction-photos").then((result) => result.days ?? [])}
                   uploadPhoto={(input) => requestConstructionPhotos<ConstructionPhotoUploadResult>(selectedCustomerLocation, "upload-construction-photo", input)}
+                  deletePhoto={canManageCustomerWorkflows ? async (day, photo) => {
+                    const result = await requestConstructionPhotos<{ deleted?: boolean; trashed?: boolean }>(selectedCustomerLocation, "delete-construction-photo", {
+                      date: day.date,
+                      dayFolderId: photo.dayFolderId,
+                      photoId: photo.id,
+                    });
+                    if (!result.deleted || !result.trashed) throw new Error("Drive chưa xác nhận đã xóa ảnh.");
+                  } : undefined}
                 />
               : <section className="coming-soon"><h1>Ảnh thi công</h1><p>Đăng nhập để xem và lưu ảnh của hồ sơ.</p><button className="add-button" type="button" onClick={() => openEmployeeLogin()}>Đăng nhập</button></section>)}
           </section>

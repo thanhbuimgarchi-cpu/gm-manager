@@ -459,6 +459,7 @@ function doPost(event) {
       if (payload.action === "workflow-command") return json_(workflowCommand_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "upload-construction-photo") return json_(uploadConstructionPhoto_(payload));
+      if (payload.action === "delete-construction-photo") return json_(deleteConstructionPhoto_(payload));
       if (["save-personnel-cache", "export-personnel", "sync-personnel"].indexOf(payload.action) >= 0 && !workflowActor_(payload).manager) {
         throw workflowError_("FORBIDDEN", "Chỉ admin và quản lý được sửa hoặc xuất danh sách nhân lực.");
       }
@@ -1748,8 +1749,7 @@ const CONSTRUCTION_PHOTOS_TIME_ZONE = "Asia/Ho_Chi_Minh";
 const CONSTRUCTION_PHOTO_MAX_BYTES = 12 * 1024 * 1024;
 const CONSTRUCTION_PHOTO_EXTENSIONS = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
 
-function constructionPhotoProject_(payload) {
-  const actor = workflowActor_(payload);
+function constructionPhotoProject_(payload, actor = workflowActor_(payload)) {
   workflowMayUse_(actor, CONSTRUCTION_WORKFLOW_FOLDER);
   const year = Number(payload.year);
   const month = Number(payload.month);
@@ -1775,7 +1775,7 @@ function constructionPhotoDayKey_(folderName) {
   return Number.isFinite(utcDate.getTime()) && utcDate.toISOString().slice(0, 10) === key ? key : "";
 }
 
-function constructionPhotoMetadata_(file, dayKey, capturedAt) {
+function constructionPhotoMetadata_(file, dayKey, capturedAt, dayFolderId) {
   const id = file.getId();
   const name = file.getName();
   if (!capturedAt) {
@@ -1788,6 +1788,7 @@ function constructionPhotoMetadata_(file, dayKey, capturedAt) {
   return {
     id: id,
     name: name,
+    dayFolderId: dayFolderId,
     mimeType: file.getMimeType(),
     capturedAt: capturedAt,
     viewUrl: driveFileViewUrl_(id),
@@ -1816,7 +1817,7 @@ function listConstructionPhotos_(payload) {
     const files = folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
-      if (!file.isTrashed() && /^image\//.test(file.getMimeType())) day.photos.push(constructionPhotoMetadata_(file, dayKey));
+      if (!file.isTrashed() && /^image\//.test(file.getMimeType())) day.photos.push(constructionPhotoMetadata_(file, dayKey, null, folder.getId()));
     }
   }
   return { ok: true, days: Array.from(days.keys()).filter(function(key) { return days.get(key).photos.length > 0; }).sort().reverse().map(function(key) {
@@ -1864,9 +1865,17 @@ function uploadConstructionPhoto_(payload) {
   const clock = Utilities.formatDate(capture, CONSTRUCTION_PHOTOS_TIME_ZONE, "HH-mm-ss-SSS");
   const name = CONSTRUCTION_PHOTOS_FOLDER + " " + clock + "-" + uploadId + CONSTRUCTION_PHOTO_EXTENSIONS[file.mimeType];
   const customer = constructionCustomerFolder_(project);
-  const workflow = getOrCreateFolder_(customer, CONSTRUCTION_WORKFLOW_FOLDER);
-  const photosFolder = getOrCreateFolder_(workflow, CONSTRUCTION_PHOTOS_FOLDER);
-  const dayFolder = getOrCreateFolder_(photosFolder, date);
+  const state = constructionPhotoEvents_();
+  const rootId = configuredRootFolderId_();
+  const customerFolderId = customer.getId();
+  if (constructionPhotoRemovals_(state).some(function(removal) {
+    return removal.rootId === rootId && removal.customerFolderId === customerFolderId && (removal.uploadId === uploadId || (removal.date === date && removal.fileName === name));
+  })) throw workflowError_("PHOTO_DELETED", "Ảnh này đã có yêu cầu xóa, không thể tải lại.");
+  // Reuse existing folders without merging duplicates. A regular upload
+  // must never trash an existing photo while consolidating Drive folders.
+  const workflow = findFolder_(customer, CONSTRUCTION_WORKFLOW_FOLDER) || customer.createFolder(CONSTRUCTION_WORKFLOW_FOLDER);
+  const photosFolder = findFolder_(workflow, CONSTRUCTION_PHOTOS_FOLDER) || workflow.createFolder(CONSTRUCTION_PHOTOS_FOLDER);
+  const dayFolder = findFolder_(photosFolder, date) || photosFolder.createFolder(date);
   // The same immutable shot keeps its name across retries, even if the first
   // response was lost after Drive finished writing it.
   const existing = dayFolder.getFilesByName(name);
@@ -1877,10 +1886,85 @@ function uploadConstructionPhoto_(payload) {
   }
   const repeated = Boolean(stored);
   if (!stored) stored = dayFolder.createFile(Utilities.newBlob(bytes, file.mimeType, name));
-  const photo = constructionPhotoMetadata_(stored, constructionPhotoDayKey_(date), capture.toISOString());
-  try { recordConstructionPhotoNotification_(project, stored, photo, uploadId, repeated); }
+  const photo = constructionPhotoMetadata_(stored, constructionPhotoDayKey_(date), capture.toISOString(), dayFolder.getId());
+  try { recordConstructionPhotoNotification_(project, stored, photo, uploadId, repeated, state, rootId); }
   catch (error) { throw workflowError_("RETRYABLE", "Ảnh đã lưu trên Drive. Hãy thử lại để hoàn tất gửi thông báo."); }
   return { ok: true, date: date, folderId: dayFolder.getId(), folderUrl: dayFolder.getUrl(), photo: photo, repeated: repeated };
+}
+
+function deleteConstructionPhoto_(payload) {
+  const actor = workflowActor_(payload);
+  if (!actor.manager) throw workflowError_("FORBIDDEN", "Chỉ admin và Quản lý chung được xóa ảnh thi công.");
+  const project = constructionPhotoProject_(payload, actor);
+  const date = String(payload.date || "").trim();
+  const photoId = String(payload.photoId || "").trim();
+  const dayFolderId = String(payload.dayFolderId || "").trim();
+  const validId = /^[A-Za-z0-9_-]{8,160}$/;
+  if (!constructionPhotoDayKey_(date) || !validId.test(photoId) || (dayFolderId && !validId.test(dayFolderId))) {
+    throw workflowError_("VALIDATION", "Ngày chụp hoặc mã ảnh thi công không hợp lệ.");
+  }
+  const customer = constructionCustomerFolder_(project);
+  const rootId = configuredRootFolderId_();
+  const customerFolderId = customer.getId();
+  const state = constructionPhotoEvents_();
+  const removals = constructionPhotoRemovals_(state);
+  let removal = removals.find(function(entry) {
+    return entry.rootId === rootId && entry.customerFolderId === customerFolderId && entry.date === date && entry.photoId === photoId && (!dayFolderId || entry.dayFolderId === dayFolderId);
+  });
+  const done = { ok: true, deleted: true, trashed: true, photoId: photoId, date: date };
+  const missing = function() { return workflowError_("NOT_FOUND", "Không tìm thấy ảnh trong đúng ngày chụp của hồ sơ này."); };
+
+  const workflow = findFolder_(customer, CONSTRUCTION_WORKFLOW_FOLDER);
+  const photosFolder = workflow && findFolder_(workflow, CONSTRUCTION_PHOTOS_FOLDER);
+  const dayFolders = photosFolder ? findFolders_(photosFolder, date) : [];
+  const allowedParents = new Set(dayFolders.filter(function(folder) {
+    return folder.getName() === date && !folder.isTrashed() && (!dayFolderId || folder.getId() === dayFolderId);
+  }).map(function(folder) { return folder.getId(); }));
+  if (!allowedParents.size && !removal) throw missing();
+
+  let photo;
+  try { photo = DriveApp.getFileById(photoId); }
+  catch (error) {
+    if (removal && removal.confirmed) return { ...done, repeated: true };
+    throw missing();
+  }
+  if (!/^image\//.test(photo.getMimeType())) throw missing();
+  const alreadyTrashed = photo.isTrashed();
+  // A validated receipt proves the original parent of a photo already in
+  // trash. An active file must still be a child of the requested day folder.
+  let actualDayId = alreadyTrashed && removal ? removal.dayFolderId : "";
+  if (!actualDayId) {
+    const parents = photo.getParents();
+    while (parents.hasNext()) {
+      const parentId = parents.next().getId();
+      if (!allowedParents.has(parentId) || (actualDayId && actualDayId !== parentId)) throw missing();
+      actualDayId = parentId;
+    }
+  }
+  if (!actualDayId) throw missing();
+  if (alreadyTrashed && removal && removal.confirmed) return { ...done, repeated: true };
+
+  if (!removal) {
+    const event = state.events.find(function(entry) { return entry.rootId === rootId && entry.fileId === photoId; });
+    const fileName = photo.getName();
+    const uploadName = /^Ảnh thi công \d{2}-\d{2}-\d{2}-\d{3}-([A-Za-z0-9_-]{8,96})\.(?:jpg|png|webp)$/.exec(fileName);
+    removal = {
+      rootId: rootId, customerFolderId: customerFolderId, date: date, dayFolderId: actualDayId, photoId: photoId,
+      fileName: fileName, uploadId: event ? event.uploadId : uploadName ? uploadName[1] : "", requestedAt: Date.now(), confirmed: false,
+    };
+    state.removals = boundedConstructionPhotoRemovals_(removals.concat(removal));
+    // Commit intent first so an upload replay cannot recreate the file if
+    // Drive succeeds but this request is interrupted before cache cleanup.
+    writePropertyJson_(CONSTRUCTION_PHOTO_EVENTS_KEY, state);
+  }
+  if (!alreadyTrashed) photo.setTrashed(true);
+  removal.confirmed = true;
+  removal.requestedAt = Date.now();
+  state.removals = boundedConstructionPhotoRemovals_(constructionPhotoRemovals_(state));
+  state.events = state.events.filter(function(event) { return event.rootId !== rootId || event.fileId !== photoId; });
+  try { writePropertyJson_(CONSTRUCTION_PHOTO_EVENTS_KEY, state); }
+  catch (error) { throw workflowError_("RETRYABLE", "Ảnh đã được đưa vào thùng rác Drive. Hãy thử lại để hoàn tất đồng bộ."); }
+  return { ...done, repeated: alreadyTrashed };
 }
 
 const CONSTRUCTION_PHOTO_PERMISSION = "Ảnh thi công";
@@ -1888,6 +1972,29 @@ const CONSTRUCTION_PHOTO_EVENTS_KEY = "gmcrm-construction-photo-events-v1";
 const CONSTRUCTION_PHOTO_EVENT_TTL = 24 * 60 * 60 * 1000;
 const CONSTRUCTION_PHOTO_EVENT_LIMIT = 100;
 const CONSTRUCTION_PHOTO_EVENT_BYTE_LIMIT = 48000;
+const CONSTRUCTION_PHOTO_REMOVAL_TTL = 30 * CONSTRUCTION_PHOTO_EVENT_TTL;
+const CONSTRUCTION_PHOTO_REMOVAL_LIMIT = 100;
+const CONSTRUCTION_PHOTO_REMOVAL_BYTE_LIMIT = 18000;
+
+function constructionPhotoRemovals_(state) {
+  const cutoff = Date.now() - CONSTRUCTION_PHOTO_REMOVAL_TTL;
+  return (Array.isArray(state.removals) ? state.removals : []).filter(function(removal) { return removal.requestedAt >= cutoff; });
+}
+
+function constructionPhotoRecordBytes_(record) {
+  return encodeURIComponent(JSON.stringify(record)).replace(/%[0-9A-F]{2}/g, "x").length + 1;
+}
+
+function boundedConstructionPhotoRemovals_(removals) {
+  const recent = removals.slice(-CONSTRUCTION_PHOTO_REMOVAL_LIMIT);
+  const sizes = recent.map(constructionPhotoRecordBytes_);
+  let bytes = sizes.reduce(function(total, size) { return total + size; }, 2);
+  while (recent.length > 1 && bytes > CONSTRUCTION_PHOTO_REMOVAL_BYTE_LIMIT) {
+    recent.shift();
+    bytes -= sizes.shift();
+  }
+  return recent;
+}
 
 function constructionPhotoSubscriber_(member) {
   const account = personnelAssignmentKey_(member);
@@ -1901,14 +2008,12 @@ function constructionPhotoEvents_() {
   return state;
 }
 
-function recordConstructionPhotoNotification_(project, file, photo, uploadId, repeated) {
+function recordConstructionPhotoNotification_(project, file, photo, uploadId, repeated, state, rootId) {
   const uploadedAt = file.getDateCreated();
   const uploadedAtMillis = uploadedAt.getTime();
   const now = Date.now();
   const cutoff = now - CONSTRUCTION_PHOTO_EVENT_TTL;
   if (uploadedAtMillis <= cutoff) return;
-  const rootId = configuredRootFolderId_();
-  const state = constructionPhotoEvents_();
   if (repeated && uploadedAtMillis <= state.prunedThrough) return;
   const id = "construction-photo:" + photo.id;
   const isSameShot = function(event) {
@@ -1934,9 +2039,8 @@ function recordConstructionPhotoNotification_(project, file, photo, uploadId, re
   };
   state.events = state.events.filter(function(existing) { return Date.parse(existing.uploadedAt) > cutoff; });
   state.events.push(event);
-  const sizes = state.events.map(function(existing) {
-    return encodeURIComponent(JSON.stringify(existing)).replace(/%[0-9A-F]{2}/g, "x").length + 1;
-  });
+  state.removals = constructionPhotoRemovals_(state);
+  const sizes = state.events.map(constructionPhotoRecordBytes_);
   let bytes = sizes.reduce(function(total, size) { return total + size; }, 2);
   while (state.events.length > CONSTRUCTION_PHOTO_EVENT_LIMIT || (state.events.length > 1 && bytes > CONSTRUCTION_PHOTO_EVENT_BYTE_LIMIT)) {
     const removed = state.events.shift();
@@ -1958,8 +2062,9 @@ function loadConstructionPhotoNotifications_(payload) {
   const afterSubscription = Math.max(after, Number(actor.member.constructionPhotoSubscriptionAfter || 0));
   const rootId = configuredRootFolderId_();
   const cutoff = Math.max(Date.now() - CONSTRUCTION_PHOTO_EVENT_TTL, Number(actor.member.constructionPhotoSubscriptionAt || 0));
+  const removed = new Set(constructionPhotoRemovals_(state).filter(function(removal) { return removal.rootId === rootId; }).map(function(removal) { return removal.photoId; }));
   const events = state.events.filter(function(event) {
-    return event.rootId === rootId && event.sequence > afterSubscription && Date.parse(event.uploadedAt) >= cutoff;
+    return event.rootId === rootId && event.sequence > afterSubscription && Date.parse(event.uploadedAt) >= cutoff && !removed.has(event.fileId);
   }).map(function(event) {
     const { rootId, uploadId, ...photo } = event;
     return photo;
@@ -3894,9 +3999,12 @@ function documentsFolderForProject_(year, month, projectId, createMissing) {
 }
 
 function documentsFolderForPayload_(payload, createMissing) {
-  // Keep the original helper as the compatibility seam for older clients and
-  // unit tests that only provide the internal project id. New clients send a
-  // houseId and use the house-code aware lookup below.
+  if (String(payload.folderId || "").trim()) {
+    const customer = existingCustomerMutationFolder_(payload, customerMutationMonthFolder_(payload));
+    return documentsFolderForCustomerFolder_(customer, createMissing);
+  }
+  // Older clients without a known folder ID still resolve by house code or
+  // their internal project ID.
   if (!String(payload && payload.houseId || "").trim()) return documentsFolderForProject_(Number(payload.year), Number(payload.month), String(payload.projectId || "").trim(), createMissing);
   return documentsFolderForCustomerFolder_(customerFolderForPayload_(payload, createMissing), createMissing);
 }
