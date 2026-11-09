@@ -48,14 +48,18 @@ type WeatherStation = {
   sky_cover_1: string | null;
   sky_cover_2: string | null;
 };
-type PhotoDraft = {
-  url: string;
-  blob: Blob;
+type PhotoJob = {
   uploadId: string;
-  capturedAt: string;
-  weatherStation?: string;
+  capturedAt: Date;
+  position: Promise<Position | null>;
+  frame?: HTMLCanvasElement | File;
+  blob?: Blob;
+  previewUrl?: string;
+  error?: string;
+  stage: "preparing" | "uploading" | "failed";
 };
-type CameraPhase = "closed" | "starting" | "live" | "processing" | "preview" | "failed";
+type CameraPhase = "closed" | "starting" | "live" | "failed" | "finishing";
+const maxOutstandingPhotos = 8;
 
 const vietnamTimeZone = "Asia/Ho_Chi_Minh";
 const photoDate = new Intl.DateTimeFormat("vi-VN", { timeZone: vietnamTimeZone, day: "2-digit", month: "2-digit", year: "numeric" });
@@ -180,6 +184,16 @@ function copyFrame(source: CanvasImageSource, width: number, height: number) {
   return canvas;
 }
 
+async function decodeCapture(file: File) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await readImage(url);
+    return copyFrame(image, image.naturalWidth, image.naturalHeight);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function stampPhoto(canvas: HTMLCanvasElement, capturedAt: Date, position: Position | null) {
   const [logo, weather] = await Promise.all([
     readImage(`${import.meta.env.BASE_URL}gm-logo-192.png`),
@@ -228,7 +242,7 @@ async function stampPhoto(canvas: HTMLCanvasElement, capturedAt: Date, position:
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Không thể lưu ảnh đã chụp.")), "image/jpeg", 0.88);
   });
-  return { blob, weatherStation: weather?.station };
+  return blob;
 }
 
 function blobData(blob: Blob) {
@@ -284,19 +298,21 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
   const [openDays, setOpenDays] = useState<Set<string>>(new Set());
   const [phase, setPhase] = useState<CameraPhase>("closed");
   const [videoReady, setVideoReady] = useState(false);
-  const [draft, setDraft] = useState<PhotoDraft | null>(null);
+  const [shots, setShots] = useState<PhotoJob[]>([]);
+  const [savedCount, setSavedCount] = useState(0);
   const [cameraError, setCameraError] = useState("");
   const [nativeAvailable, setNativeAvailable] = useState(false);
-  const [saving, setSaving] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const nativeCamera = useRef<HTMLInputElement>(null);
   const stream = useRef<MediaStream | null>(null);
-  const previewUrl = useRef("");
   const cameraRevision = useRef(0);
+  const lifetime = useRef(0);
   const listRevision = useRef(0);
   const listPending = useRef(false);
-  const savingRef = useRef(false);
+  const finishing = useRef(false);
+  const pendingShots = useRef<PhotoJob[]>([]);
+  const uploadTail = useRef<Promise<void>>(Promise.resolve());
   const locationRequest = useRef<{ startedAt: number; result: Promise<Position | null> } | null>(null);
   const nativeOpenedAt = useRef(0);
   const loader = useRef(loadPhotos);
@@ -326,34 +342,44 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     if (video.current) video.current.srcObject = null;
   }
 
-  function revokePreview() {
-    if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
-    previewUrl.current = "";
-  }
-
   useEffect(() => {
     setMobile(onMobile());
     void refresh();
     return () => {
       listRevision.current++;
       cameraRevision.current++;
+      lifetime.current++;
       stream.current?.getTracks().forEach((track) => track.stop());
       stream.current = null;
-      if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
-      previewUrl.current = "";
+      pendingShots.current.forEach((shot) => {
+        if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
+      });
     };
   }, [refresh]);
 
-  function closeCamera() {
-    if (savingRef.current) return;
-    cameraRevision.current++;
-    releaseStream();
-    revokePreview();
-    locationRequest.current = null;
-    setDraft(null);
-    setSaving(false);
+  function updateShots(next: PhotoJob[]) {
+    pendingShots.current = next;
+    setShots(next);
+  }
+
+  function replaceShot(shot: PhotoJob) {
+    updateShots(pendingShots.current.map((item) => item.uploadId === shot.uploadId ? shot : item));
+  }
+
+  function closeIfFinished() {
+    if (!finishing.current || pendingShots.current.length) return;
     setPhase("closed");
     if (dialog.current?.open) dialog.current.close();
+  }
+
+  function closeCamera() {
+    cameraRevision.current++;
+    releaseStream();
+    locationRequest.current = null;
+    setCameraError("");
+    finishing.current = true;
+    setPhase("finishing");
+    closeIfFinished();
   }
 
   function requestPosition() {
@@ -366,16 +392,18 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
   }
 
   async function startCamera() {
-    if (!canCapture || !mobile || savingRef.current) return;
+    if (!canCapture || !mobile) return;
     const revision = ++cameraRevision.current;
+    finishing.current = false;
     releaseStream();
-    revokePreview();
-    setDraft(null);
     setCameraError("");
     setNativeAvailable(false);
     setVideoReady(false);
     setPhase("starting");
-    if (!dialog.current?.open) dialog.current?.showModal();
+    if (!dialog.current?.open) {
+      setSavedCount(0);
+      dialog.current?.showModal();
+    }
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error("Camera API không khả dụng.");
       const media = await navigator.mediaDevices.getUserMedia({
@@ -400,78 +428,67 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
     }
   }
 
-  async function preparePhoto(canvas: HTMLCanvasElement, capturedAt: Date, revision: number) {
-    const position = await requestPosition();
-    if (revision !== cameraRevision.current) return;
-    const { blob, weatherStation } = await stampPhoto(canvas, capturedAt, position);
-    if (revision !== cameraRevision.current) return;
-    revokePreview();
-    const url = URL.createObjectURL(blob);
-    previewUrl.current = url;
-    const shot = { url, blob, capturedAt: capturedAt.toISOString(), uploadId: crypto.randomUUID(), weatherStation };
-    setDraft(shot);
-    setPhase("preview");
-    await savePhoto(shot);
+  function queuePhoto(frame: HTMLCanvasElement | File, capturedAt: Date) {
+    const shot: PhotoJob = { uploadId: crypto.randomUUID(), capturedAt, frame, position: requestPosition(), stage: "preparing" };
+    updateShots([...pendingShots.current, shot]);
+    void processShot(shot);
   }
 
-  async function takePhoto() {
-    if (!video.current || !stream.current || phase !== "live") return;
-    const revision = ++cameraRevision.current;
+  function takePhoto() {
+    const viewfinder = video.current;
+    if (!viewfinder || !stream.current || phase !== "live" || pendingShots.current.length >= maxOutstandingPhotos) return;
     const capturedAt = new Date();
     try {
-      const canvas = copyFrame(video.current, video.current.videoWidth, video.current.videoHeight);
-      releaseStream();
-      setPhase("processing");
-      await preparePhoto(canvas, capturedAt, revision);
+      const frame = copyFrame(viewfinder, viewfinder.videoWidth, viewfinder.videoHeight);
+      setCameraError("");
+      queuePhoto(frame, capturedAt);
     } catch (error) {
-      if (revision !== cameraRevision.current) return;
-      releaseStream();
       setCameraError(error instanceof Error ? error.message : "Không thể chụp ảnh.");
-      setPhase("failed");
     }
   }
 
-  async function readNativeCapture(event: ChangeEvent<HTMLInputElement>) {
+  function readNativeCapture(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
-    if (!file) return;
+    if (!file || phase !== "failed" || finishing.current || pendingShots.current.length >= maxOutstandingPhotos) return;
     const capturedAt = new Date(file.lastModified);
     const time = capturedAt.getTime();
     if (!Number.isFinite(time) || time < nativeOpenedAt.current - 120_000 || time > Date.now() + 10_000) {
       setCameraError("Hãy chụp một ảnh mới bằng camera.");
       return;
     }
-    const revision = ++cameraRevision.current;
     setCameraError("");
-    setPhase("processing");
-    const url = URL.createObjectURL(file);
-    try {
-      const image = await readImage(url);
-      await preparePhoto(copyFrame(image, image.naturalWidth, image.naturalHeight), capturedAt, revision);
-    } catch (error) {
-      if (revision !== cameraRevision.current) return;
-      setCameraError(error instanceof Error ? error.message : "Không thể đọc ảnh vừa chụp.");
-      setPhase("failed");
-    } finally {
-      URL.revokeObjectURL(url);
-    }
+    queuePhoto(file, capturedAt);
   }
 
-  async function savePhoto(shot: PhotoDraft) {
-    if (savingRef.current || !canCapture) return;
-    const revision = cameraRevision.current;
-    savingRef.current = true;
-    setSaving(true);
-    setCameraError("");
+  async function processShot(shot: PhotoJob) {
+    const revision = lifetime.current;
+    let prepared = shot;
     try {
-      const data = await blobData(shot.blob);
-      if (revision !== cameraRevision.current) return;
-      const { date, folderId, folderUrl, photo } = await uploadPhoto({
-        uploadId: shot.uploadId,
-        capturedAt: shot.capturedAt,
-        file: { mimeType: "image/jpeg", data },
+      let blob = shot.blob;
+      if (!blob) {
+        const position = await shot.position;
+        if (revision !== lifetime.current) return;
+        const frame = shot.frame instanceof File ? await decodeCapture(shot.frame) : shot.frame;
+        if (!frame) throw new Error("Không thể đọc ảnh vừa chụp.");
+        if (revision !== lifetime.current) return;
+        blob = await stampPhoto(frame, shot.capturedAt, position);
+        frame.width = 0;
+      }
+      if (revision !== lifetime.current) return;
+      prepared = { ...shot, frame: undefined, blob, stage: "uploading", error: undefined };
+      replaceShot(prepared);
+      // Each frame is taken immediately. Keep Drive writes sequential because they share a server-side lock.
+      const transfer = uploadTail.current.then(async () => {
+        if (revision !== lifetime.current) return null;
+        const data = await blobData(blob);
+        if (revision !== lifetime.current) return null;
+        return uploadPhoto({ uploadId: shot.uploadId, capturedAt: shot.capturedAt.toISOString(), file: { mimeType: "image/jpeg", data } });
       });
-      if (revision !== cameraRevision.current) return;
+      uploadTail.current = transfer.then(() => undefined, () => undefined);
+      const result = await transfer;
+      if (!result || revision !== lifetime.current) return;
+      const { date, folderId, folderUrl, photo } = result;
       if (listPending.current) void refresh();
       setDays((current) => {
         const old = current.find((day) => day.date === date);
@@ -482,15 +499,36 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
       setAlbumOpen(true);
       setOpenDays((current) => new Set([...current, date]));
       setNotice(`Đã lưu ảnh vào thư mục ${displayDay(date)}.`);
-      savingRef.current = false;
-      closeCamera();
+      setSavedCount((current) => current + 1);
+      if (prepared.previewUrl) URL.revokeObjectURL(prepared.previewUrl);
+      updateShots(pendingShots.current.filter((item) => item.uploadId !== shot.uploadId));
+      closeIfFinished();
     } catch (error) {
-      if (revision === cameraRevision.current) setCameraError(error instanceof Error ? error.message : "Chưa lưu được ảnh lên Drive.");
-    } finally {
-      savingRef.current = false;
-      if (revision === cameraRevision.current) setSaving(false);
+      if (revision !== lifetime.current) return;
+      replaceShot({ ...prepared, stage: "failed", previewUrl: prepared.previewUrl || (prepared.blob ? URL.createObjectURL(prepared.blob) : undefined), error: error instanceof Error ? error.message : "Chưa lưu được ảnh lên Drive." });
     }
   }
+
+  function retryShot(uploadId: string) {
+    const shot = pendingShots.current.find((item) => item.uploadId === uploadId);
+    if (!canCapture || shot?.stage !== "failed") return;
+    const retry: PhotoJob = { ...shot, stage: shot.blob ? "uploading" : "preparing", error: undefined };
+    replaceShot(retry);
+    void processShot(retry);
+  }
+
+  function discardFailedShots() {
+    if (pendingShots.current.some((shot) => shot.stage !== "failed")) return;
+    pendingShots.current.forEach((shot) => {
+      if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
+    });
+    updateShots([]);
+    closeIfFinished();
+  }
+
+  const failedShots = shots.filter((shot) => shot.stage === "failed");
+  const pendingCount = shots.length - failedShots.length;
+  const queueFull = shots.length >= maxOutstandingPhotos;
 
   return <section className="construction-photos" aria-label="Ảnh thi công">
     <header className="construction-photos__header">
@@ -538,38 +576,47 @@ export default function ConstructionPhotos({ canCapture, loadPhotos, uploadPhoto
         </details>)}
       </div>}
     </div>
-    <dialog ref={dialog} className="construction-photos__dialog" aria-labelledby={cameraTitleId} onCancel={(event) => { event.preventDefault(); closeCamera(); }}>
+    <dialog ref={dialog} className={`construction-photos__dialog${mobile ? " construction-photos__dialog--mobile" : ""}`} aria-labelledby={cameraTitleId} onCancel={(event) => { event.preventDefault(); closeCamera(); }}>
       <header className="construction-photos__dialog-heading">
-        <h3 id={cameraTitleId}>{phase === "preview" ? "Ảnh vừa chụp" : "Chụp ảnh thi công"}</h3>
-        <button type="button" aria-label="Đóng camera" disabled={saving} onClick={closeCamera}>×</button>
+        <h3 id={cameraTitleId}>{phase === "finishing" ? "Ảnh vừa chụp" : "Chụp ảnh thi công"}</h3>
+        {phase !== "finishing" && <button type="button" aria-label="Đóng camera" onClick={closeCamera}>×</button>}
       </header>
       <video ref={video} className="construction-photos__camera" hidden={phase !== "starting" && phase !== "live"} muted autoPlay playsInline
         onCanPlay={(event) => setVideoReady(Boolean(event.currentTarget.videoWidth))} />
       {phase === "starting" && <p className="construction-photos__status" role="status">Đang mở camera…</p>}
-      {phase === "processing" && <p className="construction-photos__status" role="status">Đang ghi ngày, giờ, thời tiết và vị trí vào ảnh…</p>}
-      {phase === "preview" && draft && <>
-        <img className="construction-photos__preview" src={draft.url} alt="Ảnh vừa chụp có ngày, giờ, thời tiết và địa điểm" />
-        {draft.weatherStation && <p className="construction-photos__source">
-          Thời tiết tham khảo từ <a href={weatherAttribution} target="_blank" rel="noreferrer">trạm {draft.weatherStation} trên NOAA Aviation Weather Center</a>.
-        </p>}
-        {saving && <p className="construction-photos__status" role="status">Đang lưu ảnh lên Drive…</p>}
-      </>}
+      {(phase === "live" || pendingCount > 0 || savedCount > 0 || failedShots.length > 0) && <div className="construction-photos__capture-status">
+        <p className="construction-photos__status" role="status">
+          Đã lưu {savedCount} ảnh{pendingCount > 0 && ` · Đang lưu ${pendingCount} ảnh`}{failedShots.length > 0 && ` · ${failedShots.length} ảnh chưa lưu`}
+        </p>
+        <a className="construction-photos__source" href={weatherAttribution} target="_blank" rel="noreferrer">Thời tiết NOAA</a>
+      </div>}
       {cameraError && <p className="construction-photos__status construction-photos__error" role="alert">{cameraError}</p>}
+      {queueFull && phase !== "finishing" && <p className="construction-photos__status" role="status">Đã đủ ảnh chờ lưu. Chờ ảnh tải lên hoặc thử lưu lại ảnh lỗi để chụp tiếp.</p>}
+      {failedShots.length > 0 && <ul className="construction-photos__failed-shots">
+        {failedShots.map((shot) => <li key={shot.uploadId}>
+          {shot.previewUrl && <img className="construction-photos__failed-preview" src={shot.previewUrl} alt={`Ảnh chụp lúc ${photoTime.format(shot.capturedAt)}`} />}
+          <div><strong>Ảnh lúc {photoTime.format(shot.capturedAt)}</strong><p role="alert">{shot.error}</p></div>
+          <button type="button" className="construction-photos__secondary" disabled={!canCapture} onClick={() => retryShot(shot.uploadId)}>Thử lưu lại</button>
+        </li>)}
+      </ul>}
       <div className="construction-photos__dialog-actions">
-        {phase === "live" && <button type="button" className="construction-photos__primary" disabled={!videoReady} onClick={() => void takePhoto()}>
+        {phase === "live" && <button type="button" className="construction-photos__primary construction-photos__shutter" disabled={!videoReady || queueFull} onClick={takePhoto}>
           <CameraIcon /> Chụp
         </button>}
-        {phase === "preview" && draft && cameraError && !saving && <button type="button" className="construction-photos__primary" disabled={!canCapture} onClick={() => void savePhoto(draft)}>Thử lưu lại</button>}
         {phase === "failed" && <>
           <button type="button" className="construction-photos__secondary" onClick={() => void startCamera()}>Thử lại</button>
-          {nativeAvailable && <button type="button" className="construction-photos__primary" onClick={() => {
+          {nativeAvailable && <button type="button" className="construction-photos__primary" disabled={queueFull} onClick={() => {
             nativeOpenedAt.current = Date.now();
             nativeCamera.current?.click();
             void requestPosition();
           }}>Mở camera của thiết bị</button>}
         </>}
+        {phase === "finishing" && <>
+          {pendingCount === 0 && failedShots.length > 0 && <button type="button" className="construction-photos__secondary" onClick={discardFailedShots}>Bỏ ảnh chưa lưu</button>}
+          <button type="button" className="construction-photos__primary" disabled={!canCapture} onClick={() => void startCamera()}>Chụp tiếp</button>
+        </>}
       </div>
-      <input ref={nativeCamera} type="file" accept="image/*" capture="environment" hidden onChange={(event) => void readNativeCapture(event)} />
+      <input ref={nativeCamera} type="file" accept="image/*" capture="environment" hidden onChange={readNativeCapture} />
     </dialog>
   </section>;
 }

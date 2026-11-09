@@ -109,6 +109,14 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .customer-search > .workspace-icon { color: #8d99aa; }
 .search-clear { display: grid; flex: 0 0 auto; width: 30px; height: 30px; place-items: center; padding: 0; border: 0; border-radius: 6px; background: #f1f4f8; color: #8995a8; font-size: 20px; }
 .search-clear:hover { background: #e7ecf4; color: #4f627e; }
+.customer-search-suggestions { margin-top: 5px; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: var(--gm-shadow); }
+.customer-search-suggestions ul { max-height: min(40vh, 300px); margin: 0; padding: 0; overflow: auto; list-style: none; }
+.customer-search-suggestions li + li { border-top: 1px solid #edf0f5; }
+.customer-search-suggestions button { display: grid; grid-template-columns: 17px minmax(0, 1fr) auto 16px; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 13px; border: 0; background: transparent; color: #495871; text-align: left; }
+.customer-search-suggestions button:hover, .customer-search-suggestions button:focus-visible { outline-offset: -3px; background: #faf4f5; }
+.customer-search-suggestions button b { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.customer-search-suggestions button span, .customer-search-suggestions button svg { color: #776571; font-size: 11px; }
+.customer-search-suggestions p { margin: 0; padding: 12px 13px; color: #647186; font-size: 12px; }
 .customer-period { gap: 12px; margin-top: 8px; padding: 8px 12px; border-color: var(--line); border-radius: 10px; background: #fff; }
 .customer-period label { gap: 5px; color: #6b778b; font-size: 11px; font-weight: 500; }
 .customer-period select { min-width: 112px; height: 36px; border-color: #dfe4ec; border-radius: 7px; background: #fafbfd; color: #425067; font-size: 12px; }

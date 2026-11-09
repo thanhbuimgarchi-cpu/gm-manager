@@ -943,6 +943,8 @@ function constructionPhotosFixture() {
   const events = [];
   let driveReads = 0;
   let serial = 0;
+  let now = Date.now();
+  context.Date = class extends Date { static now() { return now; } };
   const getFolderById = context.DriveApp.getFolderById;
   context.DriveApp.getFolderById = (id) => { driveReads += 1; return getFolderById(id); };
   context.LockService.getScriptLock = () => ({ waitLock: () => events.push("lock"), releaseLock: () => events.push("unlock") });
@@ -964,7 +966,8 @@ function constructionPhotosFixture() {
     };
     folder.createFile = (blob) => {
       const id = `construction-file-${++serial}`;
-      const file = { getId: () => id, getName: () => blob.name, getMimeType: () => blob.mimeType, isTrashed: () => false, getDateCreated: () => new Date("2026-11-12T18:00:00.000Z") };
+      const createdAt = now;
+      const file = { getId: () => id, getName: () => blob.name, getMimeType: () => blob.mimeType, isTrashed: () => false, getDateCreated: () => new Date(createdAt) };
       files.push(file);
       events.push(`file:${blob.name}`);
       return file;
@@ -974,7 +977,8 @@ function constructionPhotosFixture() {
   addPhotoFolderBehavior(fixture.target);
   const staff = { name: "Hà Công Trình", email: "construction@example.com", loginCode: "field-code", status: "Có", permissions: ["Thi công"] };
   const other = { ...staff, name: "Hà Thiết Kế", email: "design@example.com", permissions: ["Thiết kế"] };
-  context.loadPersonnel_ = () => ({ personnel: { staff: [staff, other] } });
+  const manager = { ...staff, name: "Hà Quản Lý", email: "manager@example.com", role: "Quản lý chung", loginCode: "manager-code", permissions: [] };
+  context.savePersonnelCache_({ staff: [staff, other, manager] });
   const login = (member) => context.verifyEmployeeLogin_({ name: member.name, loginCode: member.loginCode }).workflowSessionToken;
   const scope = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: fixture.target.getId() };
   const photo = {
@@ -982,7 +986,7 @@ function constructionPhotosFixture() {
     uploadId: "test-construction-shot",
     file: { mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7/8AAAAASUVORK5CYII=" },
   };
-  return { ...fixture, events, scope, photo, staff, staffToken: login(staff), otherToken: login(other), driveReads: () => driveReads };
+  return { ...fixture, events, scope, photo, staff, other, manager, staffToken: login(staff), otherToken: login(other), managerToken: login(manager), driveReads: () => driveReads, advanceTime: (milliseconds) => { now += milliseconds; } };
 }
 
 test("construction photo API authenticates before Drive and rejects invalid data without making folders", () => {
@@ -1043,4 +1047,104 @@ test("construction photo uploads group by Vietnamese capture date and reuse an e
   assert.deepEqual(Array.from(result.days[0].photos, (photo) => photo.id), [later.photo.id, uploaded.photo.id]);
   assert.equal(result.days[0].photos[1].capturedAt, f.photo.capturedAt, "the stored filename preserves capture time instead of the later upload time");
   assert.equal(result.days[1].photos[0].id, earlier.photo.id);
+});
+
+test("photo notification feed delivers only new successful saves to checked staff, including a checked uploader", () => {
+  const f = constructionPhotosFixture();
+  const feed = (token, after = 0) => f.context.bridgeDispatch({ action: "load-construction-photo-notifications", workflowSessionToken: token, after });
+  const upload = (uploadId) => f.context.bridgeDispatch({ action: "upload-construction-photo", ...f.scope, ...f.photo, uploadId, workflowSessionToken: f.staffToken });
+  const savePermissions = (staffChecked, otherChecked) => f.context.bridgeDispatch({ action: "save-personnel-cache", workflowSessionToken: f.managerToken, personnel: { staff: [
+    { ...f.staff, permissions: [...f.staff.permissions, ...(staffChecked ? ["Ảnh thi công"] : [])], constructionPhotoSubscriptionAfter: 0, constructionPhotoSubscriptionAt: 0 },
+    { ...f.other, permissions: [...f.other.permissions, ...(otherChecked ? ["Ảnh thi công"] : [])] },
+    f.manager,
+  ] } });
+  assert.equal(feed("").code, "AUTH_REQUIRED");
+  assert.equal(upload("photo-before-check").ok, true);
+  assert.equal(feed(f.staffToken).enabled, false);
+  assert.equal(savePermissions(true, true).ok, true);
+  assert.equal(feed(f.staffToken).events.length, 0, "a first check starts after retained pre-check photos");
+  const saved = upload("photo-while-checked");
+  assert.equal(saved.ok, true);
+  const uploaderFeed = feed(f.staffToken);
+  const recipientFeed = feed(f.otherToken);
+  assert.equal(uploaderFeed.enabled, true);
+  assert.equal(uploaderFeed.events.length, 1);
+  assert.equal(recipientFeed.events.length, 1);
+  const notice = recipientFeed.events[0];
+  assert.equal(notice.id, `construction-photo:${saved.photo.id}`);
+  assert.equal(notice.sequence, recipientFeed.cursor);
+  assert.equal(notice.actorName, f.staff.name);
+  assert.equal(notice.projectId, f.scope.projectId);
+  assert.equal(notice.houseId, f.scope.houseId);
+  assert.equal(notice.capturedAt, f.photo.capturedAt);
+  assert.equal(notice.viewUrl, saved.photo.viewUrl);
+  assert.equal(Object.hasOwn(notice, "rootId"), false);
+  assert.equal(feed(f.managerToken).enabled, false, "manager role does not subscribe implicitly");
+  assert.equal(upload("photo-while-checked").repeated, true);
+  assert.equal(feed(f.otherToken).events.length, 1, "a retried photo only produces one notice");
+  assert.equal(feed(f.otherToken, recipientFeed.cursor).events.length, 0);
+  assert.equal(savePermissions(true, false).ok, true);
+  assert.equal(upload("photo-while-unchecked").ok, true);
+  assert.equal(feed(f.otherToken).enabled, false);
+  assert.equal(savePermissions(true, true).ok, true);
+  assert.equal(feed(f.otherToken).events.length, 0, "re-enabling starts a fresh subscription window");
+  assert.equal(feed(f.staffToken).events.length, 2, "unchanged checkbox keeps its previous cursor boundary");
+  assert.equal(upload("photo-after-recheck").ok, true);
+  assert.equal(feed(f.otherToken).events.length, 1);
+  f.advanceTime(25 * 60 * 60 * 1000);
+  assert.equal(feed(f.otherToken).events.length, 0, "events expire after the retention window");
+});
+
+test("retrying a photo whose notification write failed records it once without alerting a later subscriber", () => {
+  const f = constructionPhotosFixture();
+  const eventKey = "gmcrm-construction-photo-events-v1";
+  const originalWrite = f.context.writePropertyJson_;
+  let rejectNotice = true;
+  f.context.writePropertyJson_ = (key, value) => {
+    if (key === eventKey && rejectNotice) { rejectNotice = false; throw new Error("temporary Properties failure"); }
+    return originalWrite(key, value);
+  };
+  f.context.savePersonnelCache_({ staff: [{ ...f.staff, permissions: ["Thi công", "Ảnh thi công"] }, f.other, f.manager] });
+  const request = { ...f.scope, ...f.photo, workflowSessionToken: f.staffToken, action: "upload-construction-photo" };
+  const saved = f.context.bridgeDispatch(request);
+  assert.equal(saved.code, "RETRYABLE");
+  assert.match(saved.error, /Ảnh đã lưu trên Drive/);
+  assert.equal(f.events.filter((event) => event.startsWith("file:")).length, 1);
+  f.advanceTime(500);
+  f.context.savePersonnelCache_({ staff: [{ ...f.staff, permissions: ["Thi công", "Ảnh thi công"] }, { ...f.other, permissions: ["Ảnh thi công"] }, f.manager] });
+  assert.equal(f.context.bridgeDispatch(request).repeated, true);
+  assert.equal(f.events.filter((event) => event.startsWith("file:")).length, 1);
+  assert.equal(f.context.bridgeDispatch({ action: "load-construction-photo-notifications", workflowSessionToken: f.staffToken }).events.length, 1);
+  assert.equal(f.context.bridgeDispatch({ action: "load-construction-photo-notifications", workflowSessionToken: f.otherToken }).events.length, 0);
+});
+
+test("only signed managers may change or export personnel and view the roster login codes", () => {
+  const f = constructionPhotosFixture();
+  const personnel = { staff: [{ ...f.staff, permissions: ["Thi công", "Ảnh thi công"], loginCode: "changed-code" }, f.other, f.manager] };
+  const post = (action, payload = {}) => f.context.bridgeDispatch({ action, ...payload });
+  const before = [...f.values];
+  for (const action of ["save-personnel-cache", "export-personnel", "sync-personnel"]) {
+    assert.equal(post(action, { personnel, email: "admin" }).code, "AUTH_REQUIRED");
+    assert.equal(post(action, { personnel, workflowSessionToken: f.staffToken }).code, "FORBIDDEN");
+  }
+  assert.deepEqual([...f.values], before);
+  assert.equal(f.driveReads(), 0);
+  assert.equal(post("load-personnel").personnel.staff[0].loginCode, undefined);
+  assert.equal(post("load-personnel", { workflowSessionToken: f.staffToken }).personnel.staff[0].loginCode, undefined);
+  assert.equal(post("load-personnel", { workflowSessionToken: f.managerToken }).personnel.staff[0].loginCode, f.staff.loginCode);
+  assert.equal(post("save-personnel-cache", { personnel, workflowSessionToken: f.managerToken }).ok, true);
+  const saved = post("load-personnel", { workflowSessionToken: f.managerToken }).personnel.staff[0];
+  assert.equal(saved.loginCode, "changed-code");
+  assert.equal(saved.permissions.includes("Ảnh thi công"), true);
+  assert.equal(Object.hasOwn(saved, "constructionPhotoSubscriptionAfter"), false);
+  assert.equal(Object.hasOwn(saved, "constructionPhotoSubscriptionAt"), false);
+  const managerRoster = post("load-personnel", { workflowSessionToken: f.managerToken }).personnel;
+  managerRoster.staff[0].loginCode = " ";
+  delete managerRoster.staff[1].loginCode;
+  managerRoster.staff[0].status = "Ngưng";
+  assert.equal(post("save-personnel-cache", { personnel: managerRoster, workflowSessionToken: f.managerToken }).ok, true);
+  const preserved = post("load-personnel", { workflowSessionToken: f.managerToken }).personnel.staff;
+  assert.equal(preserved[0].status, "Ngưng");
+  assert.equal(preserved[0].loginCode, "changed-code");
+  assert.equal(preserved[1].loginCode, f.other.loginCode);
 });

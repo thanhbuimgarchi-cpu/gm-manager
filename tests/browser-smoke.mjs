@@ -153,7 +153,7 @@ async function assertRestrictedCustomerActions(accountLabel) {
   if(manager){const projectMenu=consulting.locator('.more-button');await projectMenu.click();assert.equal(await page.getByRole('button',{name:'Xóa hồ sơ',exact:true}).count(),0);assert.ok(await page.getByRole('button',{name:'Sửa thông tin',exact:true}).isVisible());await projectMenu.click();}
   else {assert.ok(await consulting.getByLabel('Tên khách hàng',{exact:true}).isDisabled());assert.equal(await consulting.getByRole('button',{name:'Export Excel'}).count(),0);assert.ok(await consulting.getByText('Chỉ xem · Quản lý cập nhật thông tin tư vấn',{exact:true}).isVisible());}
   await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
-  await page.getByLabel('Tìm khách hàng',{exact:true}).fill('no-such-test-house');await page.locator('.customer-search-empty').waitFor();
+  await page.getByLabel('Tìm khách hàng',{exact:true}).fill('no-such-test-house');await page.getByRole('region',{name:'Gợi ý hồ sơ',exact:true}).getByText('Không tìm thấy khách hàng phù hợp.',{exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'Tạo khách hàng mới',exact:true}).count(),0);await page.getByLabel('Tìm khách hàng',{exact:true}).fill('');
 }
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');

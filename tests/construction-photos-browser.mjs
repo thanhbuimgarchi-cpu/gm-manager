@@ -21,21 +21,26 @@ const token = Buffer.from(JSON.stringify({
 })).toString("base64url") + ".fixture-signature";
 const project = { id: "construction-qa-house", name: "Công trình kiểm thử", houseId: "QA-ANH", projectId: "CONSTRUCTION-QA", driveFolderId: "qa-folder", createdAt: "05/11/2026", isHydrated: true, progressHydrated: true, details: { HVT: "Công trình kiểm thử" } };
 const years = [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => ({ label: "T" + (index + 1), records: index === 10 ? [project] : [] })) }];
-const photo = {
-  id: "fixture-photo",
-  name: "Anh-thi-cong-000005.jpg",
+const captureTimes = ["2026-11-07T16:59:59.000Z", "2026-11-07T17:00:05.000Z", "2026-11-07T17:00:06.000Z"];
+const captureDates = ["07-11-2026", "08-11-2026", "08-11-2026"];
+const expectedPhotos = captureTimes.map((capturedAt, index) => ({
+  id: `fixture-photo-${index + 1}`,
+  name: `Anh-thi-cong-${index + 1}.jpg`,
   mimeType: "image/jpeg",
-  capturedAt: "2026-11-07T17:00:05.000Z",
-  viewUrl: "https://drive.google.com/file/d/fixture-photo/view",
-  downloadUrl: "https://drive.google.com/uc?export=download&id=fixture-photo",
-};
-const group = { date: "08-11-2026", folderId: "fixture-day-folder", folderUrl: "https://drive.google.com/drive/folders/fixture-day-folder", photos: [photo] };
+  capturedAt,
+  viewUrl: `https://drive.google.com/file/d/fixture-photo-${index + 1}/view`,
+  downloadUrl: `https://drive.google.com/uc?export=download&id=fixture-photo-${index + 1}`,
+}));
+const savedDays = new Map();
 const uploads = [];
 const weather = [];
 const pageErrors = [];
-let saved = false;
+let releaseFirstUpload;
+const firstUploadGate = new Promise((resolve) => { releaseFirstUpload = resolve; });
+let observeFirstUpload;
+const firstUploadStarted = new Promise((resolve) => { observeFirstUpload = resolve; });
 
-function dispatch(payload) {
+async function dispatch(payload) {
   if (payload.action === "load-consulting" || payload.action === "load-workspace-cache") return { ok: true, years, record: project };
   if (payload.action === "load-personnel") return { ok: true, personnel };
   if (payload.action === "load-assigned-work-notes") return { ok: true, notes: [], projectRevisions: [] };
@@ -44,13 +49,24 @@ function dispatch(payload) {
   if (payload.action === "list-construction-photos") {
     assert.equal(payload.projectId, project.projectId);
     assert.equal(payload.workflowSessionToken, token);
-    return { ok: true, days: saved ? [group] : [] };
+    return { ok: true, days: [...savedDays.values()] };
   }
   if (payload.action === "upload-construction-photo") {
     uploads.push(payload);
-    if (uploads.length === 1) return { ok: false, error: "Drive chưa lưu được ảnh. Hãy thử lại." };
-    saved = true;
-    return { ok: true, date: group.date, folderId: group.folderId, folderUrl: group.folderUrl, photo };
+    if (uploads.length === 1) {
+      observeFirstUpload();
+      await firstUploadGate;
+      return { ok: false, error: "Drive chưa lưu được ảnh. Hãy thử lại." };
+    }
+    const index = captureTimes.indexOf(payload.capturedAt);
+    assert.ok(index >= 0);
+    const date = captureDates[index];
+    const photo = expectedPhotos[index];
+    const folderId = `fixture-day-${date}`;
+    const folderUrl = `https://drive.google.com/drive/folders/${folderId}`;
+    const photos = [photo, ...(savedDays.get(date)?.photos || []).filter((item) => item.id !== photo.id)];
+    savedDays.set(date, { date, folderId, folderUrl, photos });
+    return { ok: true, date, folderId, folderUrl, photo };
   }
   return { ok: true };
 }
@@ -70,8 +86,8 @@ async function openProject({ mobile = true, denyCamera = false } = {}) {
     timezoneId: "Asia/Ho_Chi_Minh",
   });
   await context.exposeBinding("constructionDispatch", (_source, payload) => dispatch(payload));
-  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera }) => {
-    if (location.protocol !== "http:") return;
+  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin }) => {
+    if (location.origin !== origin) return;
     localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
     localStorage.setItem("gm-manager-personnel-v1", JSON.stringify(personnel));
     localStorage.setItem("gm-manager-personnel-session-email", account);
@@ -90,7 +106,7 @@ async function openProject({ mobile = true, denyCamera = false } = {}) {
       window.constructionCameraTest.tracks.push(...stream.getTracks());
       return stream;
     };
-  }, { account, personnel, years, token, scriptUrl, denyCamera });
+  }, { account, personnel, years, token, scriptUrl, denyCamera, origin });
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
     if (url.origin === origin) return route.continue();
@@ -120,7 +136,7 @@ async function openProject({ mobile = true, denyCamera = false } = {}) {
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  await page.clock.setFixedTime(new Date(photo.capturedAt));
+  await page.clock.setFixedTime(new Date(captureTimes[0]));
   await page.goto(baseUrl);
   await page.locator(".customer-result").filter({ hasText: project.houseId }).click();
   await page.getByRole("button", { name: "Thi công", exact: true }).click();
@@ -134,31 +150,57 @@ try {
   await photos.getByText("Chưa có ảnh thi công.").waitFor();
   assert.equal(await page.evaluate(() => window.constructionCameraTest.calls), 0);
   await photos.getByRole("button", { name: "Chụp ảnh", exact: true }).click();
-  const shutter = page.getByRole("dialog").getByRole("button", { name: "Chụp", exact: true });
-  await shutter.click();
-  const preview = page.getByRole("dialog", { name: "Ảnh vừa chụp" });
-  await preview.getByRole("img", { name: /Ảnh vừa chụp/ }).waitFor();
-  await preview.getByText(/Drive chưa lưu được ảnh/).waitFor();
+  const camera = page.getByRole("dialog", { name: "Chụp ảnh thi công" });
+  const shutter = camera.getByRole("button", { name: "Chụp", exact: true });
+  const frame = await camera.locator("video").boundingBox();
+  const shutterBounds = await shutter.boundingBox();
+  const viewport = page.viewportSize();
+  assert.ok(frame.width >= viewport.width - 24 && frame.height >= viewport.height * 0.72, `Small viewfinder ${JSON.stringify(frame)}`);
+  assert.ok(shutterBounds.y + shutterBounds.height <= viewport.height, `Off-screen shutter ${JSON.stringify(shutterBounds)}`);
+  await shutter.tap();
+  await firstUploadStarted;
+  await page.clock.setFixedTime(new Date(captureTimes[1]));
+  await shutter.tap();
+  await page.clock.setFixedTime(new Date(captureTimes[2]));
+  await shutter.tap();
+  await camera.getByText("Đã lưu 0 ảnh · Đang lưu 3 ảnh", { exact: true }).waitFor();
   assert.equal(uploads.length, 1);
-  assert.deepEqual(await page.evaluate(() => window.constructionCameraTest.lines), [
-    "Ngày: 08/11/2026",
-    "Giờ: 00:00:05",
+  assert.deepEqual(await page.evaluate(() => ({ calls: window.constructionCameraTest.calls, tracks: window.constructionCameraTest.tracks.map((track) => track.readyState) })), { calls: 1, tracks: ["live"] });
+  await camera.getByRole("button", { name: "Đóng camera" }).tap();
+  const preview = page.getByRole("dialog", { name: "Ảnh vừa chụp" });
+  await preview.getByText("Đã lưu 0 ảnh · Đang lưu 3 ảnh", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[0]?.readyState), "ended");
+  releaseFirstUpload();
+  await preview.getByRole("img", { name: "Ảnh chụp lúc 23:59:59" }).waitFor();
+  await preview.getByText(/Drive chưa lưu được ảnh/).waitFor();
+  await preview.getByText("Đã lưu 2 ảnh · 1 ảnh chưa lưu", { exact: true }).waitFor();
+  const stamps = await page.evaluate(() => window.constructionCameraTest.lines);
+  const stampedPhotos = Array.from({ length: 3 }, (_, index) => stamps.slice(index * 4, index * 4 + 4)).sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
+  assert.deepEqual(stampedPhotos, [
+    ["Ngày: 07/11/2026", "Giờ: 23:59:59"],
+    ["Ngày: 08/11/2026", "Giờ: 00:00:05"],
+    ["Ngày: 08/11/2026", "Giờ: 00:00:06"],
+  ].map((dateTime) => [...dateTime,
     "Thời tiết: 19°C · Mưa nhẹ (trạm VVNB)",
     "Địa điểm: 21.02851, 105.85417",
-  ]);
-  assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[0]?.readyState), "ended");
+  ]));
   assert.equal(weather.length, 1);
   assert.ok(!weather[0].searchParams.get("geometry").includes("21.02851"));
-  await preview.getByRole("button", { name: "Thử lưu lại" }).click();
+  await preview.getByRole("button", { name: "Thử lưu lại" }).tap();
   await preview.waitFor({ state: "hidden" });
-  await photos.getByText("Đã lưu ảnh vào thư mục 08/11/2026.").waitFor();
-  await photos.getByRole("link", { name: photo.name }).waitFor();
-  assert.equal(await photos.getByRole("link", { name: /Mở thư mục trên Drive/ }).getAttribute("href"), group.folderUrl);
-  assert.equal(uploads.length, 2);
-  assert.equal(uploads[0].uploadId, uploads[1].uploadId);
-  assert.equal(uploads[0].capturedAt, photo.capturedAt);
-  assert.equal(uploads[0].file.mimeType, "image/jpeg");
-  assert.match(uploads[0].file.data, /^\/9j\//);
+  await photos.getByText("Đã lưu ảnh vào thư mục 07/11/2026.").waitFor();
+  for (const photo of expectedPhotos) await photos.getByRole("link", { name: photo.name }).waitFor();
+  const dayLinks = await photos.getByRole("link", { name: /Mở thư mục trên Drive/ }).evaluateAll((links) => links.map((link) => link.href));
+  assert.deepEqual(dayLinks, [savedDays.get("08-11-2026").folderUrl, savedDays.get("07-11-2026").folderUrl]);
+  assert.equal(uploads.length, 4);
+  assert.equal(new Set(uploads.map((upload) => upload.uploadId)).size, 3);
+  assert.equal(uploads[0].uploadId, uploads[3].uploadId);
+  assert.equal(uploads[0].capturedAt, uploads[3].capturedAt);
+  assert.equal(uploads[0].file.data, uploads[3].file.data);
+  for (const upload of uploads) {
+    assert.equal(upload.file.mimeType, "image/jpeg");
+    assert.match(upload.file.data, /^\/9j\//);
+  }
   await context.close();
 
   const denied = await openProject({ denyCamera: true });
@@ -176,11 +218,11 @@ try {
   await album.click();
   await day.click();
   assert.equal(await desktop.photos.getByRole("button", { name: "Chụp ảnh", exact: true }).count(), 0);
-  await desktop.photos.getByRole("link", { name: photo.name }).waitFor();
+  await desktop.photos.getByRole("link", { name: expectedPhotos[2].name }).waitFor();
   await desktop.context.close();
 
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, cameraReleased: true, shutterAutoSaves: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true }));
+  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraReleasedBeforeUploadsFinish: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true }));
 } finally {
   await browser.close();
 }

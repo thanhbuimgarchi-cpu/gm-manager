@@ -438,6 +438,7 @@ function doPost(event) {
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
     if (payload.action === "list-construction-photos") return json_(listConstructionPhotos_(payload));
+    if (payload.action === "load-construction-photo-notifications") return json_(loadConstructionPhotoNotifications_(payload));
     if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
     if (payload.action === "load-customer-messages") return json_(loadCustomerMessages_(payload));
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
@@ -445,7 +446,7 @@ function doPost(event) {
     if (payload.action === "load-workspace-cache") return json_(loadWorkspaceCache_(payload));
     if (payload.action === "list-documents") return json_(listDocuments_(payload));
     if (payload.action === "list-3d-files") return json_(list3DFiles_(payload));
-    if (payload.action === "load-personnel") return json_(loadPersonnel_(payload));
+    if (payload.action === "load-personnel") return json_(loadPersonnelForClient_(payload));
     if (payload.action === "verify-employee-login") return json_(verifyEmployeeLogin_(payload));
     if (payload.action === "load-consulting") return json_(loadConsultingWorkspace_(payload));
     if (payload.action === "customer-portal-share") return json_(customerPortalShare_(payload));
@@ -458,6 +459,9 @@ function doPost(event) {
       if (payload.action === "workflow-command") return json_(workflowCommand_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
       if (payload.action === "upload-construction-photo") return json_(uploadConstructionPhoto_(payload));
+      if (["save-personnel-cache", "export-personnel", "sync-personnel"].indexOf(payload.action) >= 0 && !workflowActor_(payload).manager) {
+        throw workflowError_("FORBIDDEN", "Chỉ admin và quản lý được sửa hoặc xuất danh sách nhân lực.");
+      }
       if (payload.action === "save-personnel-cache") return json_(savePersonnelCache_(payload.personnel || {}));
       if (payload.action === "export-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
@@ -1745,7 +1749,8 @@ const CONSTRUCTION_PHOTO_MAX_BYTES = 12 * 1024 * 1024;
 const CONSTRUCTION_PHOTO_EXTENSIONS = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
 
 function constructionPhotoProject_(payload) {
-  workflowMayUse_(workflowActor_(payload), CONSTRUCTION_WORKFLOW_FOLDER);
+  const actor = workflowActor_(payload);
+  workflowMayUse_(actor, CONSTRUCTION_WORKFLOW_FOLDER);
   const year = Number(payload.year);
   const month = Number(payload.month);
   const projectId = String(payload.projectId || "").trim();
@@ -1754,7 +1759,7 @@ function constructionPhotoProject_(payload) {
   if (!/^\d{4}$/.test(String(year)) || !Number.isInteger(month) || month < 1 || month > 12 || !validCustomerFolderKey_(projectId) || (houseId && !validCustomerFolderKey_(houseId))) {
     throw workflowError_("VALIDATION", "Thiếu thông tin hồ sơ công trình hợp lệ.");
   }
-  return { year: year, month: month, projectId: projectId, houseId: houseId, folderId: folderId, driveFolderId: folderId };
+  return { year: year, month: month, projectId: projectId, houseId: houseId, folderId: folderId, driveFolderId: folderId, actor: actor };
 }
 
 function constructionCustomerFolder_(project) {
@@ -1872,7 +1877,94 @@ function uploadConstructionPhoto_(payload) {
   }
   const repeated = Boolean(stored);
   if (!stored) stored = dayFolder.createFile(Utilities.newBlob(bytes, file.mimeType, name));
-  return { ok: true, date: date, folderId: dayFolder.getId(), folderUrl: dayFolder.getUrl(), photo: constructionPhotoMetadata_(stored, constructionPhotoDayKey_(date), capture.toISOString()), repeated: repeated };
+  const photo = constructionPhotoMetadata_(stored, constructionPhotoDayKey_(date), capture.toISOString());
+  try { recordConstructionPhotoNotification_(project, stored, photo, uploadId, repeated); }
+  catch (error) { throw workflowError_("RETRYABLE", "Ảnh đã lưu trên Drive. Hãy thử lại để hoàn tất gửi thông báo."); }
+  return { ok: true, date: date, folderId: dayFolder.getId(), folderUrl: dayFolder.getUrl(), photo: photo, repeated: repeated };
+}
+
+const CONSTRUCTION_PHOTO_PERMISSION = "Ảnh thi công";
+const CONSTRUCTION_PHOTO_EVENTS_KEY = "gmcrm-construction-photo-events-v1";
+const CONSTRUCTION_PHOTO_EVENT_TTL = 24 * 60 * 60 * 1000;
+const CONSTRUCTION_PHOTO_EVENT_LIMIT = 100;
+const CONSTRUCTION_PHOTO_EVENT_BYTE_LIMIT = 48000;
+
+function constructionPhotoSubscriber_(member) {
+  const account = personnelAssignmentKey_(member);
+  return Boolean(account && account !== "admin" && String(member.status || "Có") === "Có" && Array.isArray(member.permissions) && member.permissions.indexOf(CONSTRUCTION_PHOTO_PERMISSION) >= 0);
+}
+
+function constructionPhotoEvents_() {
+  const state = readPropertyJson_(CONSTRUCTION_PHOTO_EVENTS_KEY);
+  if (!state) return { cursor: 0, prunedThrough: 0, events: [] };
+  if (!Number.isSafeInteger(state.cursor) || state.cursor < 0 || !Array.isArray(state.events)) throw workflowError_("STORAGE_CORRUPT", "Không thể đọc thông báo ảnh thi công.");
+  return state;
+}
+
+function recordConstructionPhotoNotification_(project, file, photo, uploadId, repeated) {
+  const uploadedAt = file.getDateCreated();
+  const uploadedAtMillis = uploadedAt.getTime();
+  const now = Date.now();
+  const cutoff = now - CONSTRUCTION_PHOTO_EVENT_TTL;
+  if (uploadedAtMillis <= cutoff) return;
+  const rootId = configuredRootFolderId_();
+  const state = constructionPhotoEvents_();
+  if (repeated && uploadedAtMillis <= state.prunedThrough) return;
+  const id = "construction-photo:" + photo.id;
+  const isSameShot = function(event) {
+    return event.rootId === rootId && (event.id === id || (event.year === project.year && event.month === project.month && event.projectId === project.projectId && event.uploadId === uploadId));
+  };
+  if (state.events.some(isSameShot)) return;
+  state.cursor += 1;
+  const event = {
+    id: id,
+    sequence: state.cursor,
+    rootId: rootId,
+    uploadId: uploadId,
+    year: project.year,
+    month: project.month,
+    projectId: project.projectId,
+    houseId: project.houseId,
+    fileId: photo.id,
+    fileName: photo.name,
+    capturedAt: photo.capturedAt,
+    uploadedAt: uploadedAt.toISOString(),
+    actorName: project.actor.name,
+    viewUrl: photo.viewUrl,
+  };
+  state.events = state.events.filter(function(existing) { return Date.parse(existing.uploadedAt) > cutoff; });
+  state.events.push(event);
+  const sizes = state.events.map(function(existing) {
+    return encodeURIComponent(JSON.stringify(existing)).replace(/%[0-9A-F]{2}/g, "x").length + 1;
+  });
+  let bytes = sizes.reduce(function(total, size) { return total + size; }, 2);
+  while (state.events.length > CONSTRUCTION_PHOTO_EVENT_LIMIT || (state.events.length > 1 && bytes > CONSTRUCTION_PHOTO_EVENT_BYTE_LIMIT)) {
+    const removed = state.events.shift();
+    bytes -= sizes.shift();
+    state.prunedThrough = Math.max(state.prunedThrough, Date.parse(removed.uploadedAt));
+  }
+  writePropertyJson_(CONSTRUCTION_PHOTO_EVENTS_KEY, state);
+}
+
+function loadConstructionPhotoNotifications_(payload) {
+  const actor = workflowActor_(payload);
+  const after = payload.after === undefined ? 0 : Number(payload.after);
+  if (!Number.isSafeInteger(after) || after < 0) throw workflowError_("VALIDATION", "Mốc đồng bộ thông báo không hợp lệ.");
+  const state = constructionPhotoEvents_();
+  if (!constructionPhotoSubscriber_(actor.member)) return { ok: true, enabled: false, cursor: state.cursor, events: [] };
+  // The server records the grant boundary in the roster. This avoids storing
+  // a copy of every recipient on every event, and a new grant does not replay
+  // photos saved before the person subscribed or while they were opted out.
+  const afterSubscription = Math.max(after, Number(actor.member.constructionPhotoSubscriptionAfter || 0));
+  const rootId = configuredRootFolderId_();
+  const cutoff = Math.max(Date.now() - CONSTRUCTION_PHOTO_EVENT_TTL, Number(actor.member.constructionPhotoSubscriptionAt || 0));
+  const events = state.events.filter(function(event) {
+    return event.rootId === rootId && event.sequence > afterSubscription && Date.parse(event.uploadedAt) >= cutoff;
+  }).map(function(event) {
+    const { rootId, uploadId, ...photo } = event;
+    return photo;
+  });
+  return { ok: true, enabled: true, cursor: state.cursor, events: events };
 }
 
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";
@@ -4227,19 +4319,52 @@ function personnelIsManager_(member) {
 // was changed. New reads/writes never depend on this folder.
 const LEGACY_PERSONNEL_ROOT_FOLDER_ID = "1Z8Vj55v7LFgXEaCuusd25NC77RcQKmX4";
 
-function savePersonnelCache_(personnel) {
+function normalizePersonnelCache_(personnel, previous) {
   const value = personnel && typeof personnel === "object" && !Array.isArray(personnel) ? personnel : {};
+  const previousById = new Map();
+  const previousByAccount = new Map();
+  Object.keys(previous || {}).forEach(function(category) {
+    (Array.isArray(previous[category]) ? previous[category] : []).forEach(function(member) {
+      if (!member || typeof member !== "object") return;
+      const id = String(member.id || "").trim();
+      const account = personnelAssignmentKey_(member);
+      if (id) previousById.set(id, member);
+      if (account) previousByAccount.set(account, member);
+    });
+  });
+  let subscriptionCursor;
+  const subscriptionAt = Date.now();
   const normalized = {};
   Object.keys(value).forEach(function(category) {
     normalized[category] = (Array.isArray(value[category]) ? value[category] : []).map(function(member) {
       if (!member || typeof member !== "object" || Array.isArray(member)) return member;
       const result = Object.assign({}, member);
-      if (Object.prototype.hasOwnProperty.call(member, "loginCode")) result.loginCode = employeeLoginCode_(member.loginCode);
+      const priorAccount = previousByAccount.get(personnelAssignmentKey_(member));
+      const priorRecord = previousById.get(String(member.id || "").trim()) || priorAccount;
+      const loginCode = employeeLoginCode_(member.loginCode) || employeeLoginCode_(priorRecord && priorRecord.loginCode);
+      if (loginCode || Object.prototype.hasOwnProperty.call(member, "loginCode")) result.loginCode = loginCode;
       if (Object.prototype.hasOwnProperty.call(member, "role")) result.role = personnelRole_(member.role);
+      delete result.constructionPhotoSubscriptionAfter;
+      delete result.constructionPhotoSubscriptionAt;
+      if (constructionPhotoSubscriber_(result)) {
+        if (constructionPhotoSubscriber_(priorAccount) && Number.isSafeInteger(priorAccount.constructionPhotoSubscriptionAfter) && Number.isFinite(priorAccount.constructionPhotoSubscriptionAt)) {
+          result.constructionPhotoSubscriptionAfter = priorAccount.constructionPhotoSubscriptionAfter;
+          result.constructionPhotoSubscriptionAt = priorAccount.constructionPhotoSubscriptionAt;
+        } else {
+          if (subscriptionCursor === undefined) subscriptionCursor = constructionPhotoEvents_().cursor;
+          result.constructionPhotoSubscriptionAfter = subscriptionCursor;
+          result.constructionPhotoSubscriptionAt = subscriptionAt;
+        }
+      }
       return result;
     });
   });
-  writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, normalized);
+  return normalized;
+}
+
+function savePersonnelCache_(personnel) {
+  const previous = readPropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY);
+  writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, normalizePersonnelCache_(personnel, previous));
   return { ok: true, storage: "script-properties", savedAt: Date.now() };
 }
 
@@ -4310,12 +4435,35 @@ function loadPersonnel_() {
       }
     }
     if (!file) return { ok: true, personnel: {}, source: "empty" };
-    const personnel = personnelFromWorkbook_(file);
+    const personnel = normalizePersonnelCache_(personnelFromWorkbook_(file), null);
     try { writePropertyJson_(PERSONNEL_CACHE_PROPERTY_KEY, personnel); } catch (error) { /* Migration cache is best effort. */ }
     return { ok: true, personnel: personnel, source: "drive-migrated" };
   } catch (error) {
     return { ok: true, personnel: {}, source: "empty", driveWarning: error && error.message ? error.message : "Không thể đọc danh sách nhân lực cũ." };
   }
+}
+
+function loadPersonnelForClient_(payload) {
+  const result = loadPersonnel_();
+  let manager = false;
+  try {
+    const actor = workflowOptionalActor_(payload);
+    manager = Boolean(actor && actor.manager);
+  } catch (error) {
+    if (error.code !== "AUTH_REQUIRED") throw error;
+  }
+  const personnel = {};
+  Object.keys(result.personnel).forEach(function(category) {
+    personnel[category] = (Array.isArray(result.personnel[category]) ? result.personnel[category] : []).map(function(member) {
+      if (!member || typeof member !== "object" || Array.isArray(member)) return member;
+      const publicMember = { ...member };
+      if (!manager) delete publicMember.loginCode;
+      delete publicMember.constructionPhotoSubscriptionAfter;
+      delete publicMember.constructionPhotoSubscriptionAt;
+      return publicMember;
+    });
+  });
+  return { ...result, personnel: personnel };
 }
 
 function syncPersonnelWorkbook_(personnel) {
