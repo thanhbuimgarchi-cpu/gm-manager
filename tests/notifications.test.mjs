@@ -171,7 +171,7 @@ const frontendNotificationCode = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
 ).outputText;
 
-function frontendFixture({ permission = "granted", requestPermission, desktop = null, showNotification, ready, fakeTimeout = false, ios = false, standalone = true, supported = true, currentRegistration } = {}) {
+function frontendFixture({ permission = "granted", requestPermission, desktop = null, mobile = null, showNotification, ready, fakeTimeout = false, ios = false, standalone = true, supported = true, currentRegistration } = {}) {
   const storage = new Map();
   const state = {};
   const shown = [];
@@ -183,6 +183,9 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     navigator: { serviceWorker: { ready: ready || Promise.resolve(registration) } },
     Notification, Error,
     desktopBridge: () => desktop,
+    mobileBridge: () => mobile,
+    mobilePermissionRevision: { current: { notification: 0 } },
+    projectNotificationUrl: () => new URL(mobile ? "capacitor://localhost/" : appUrl),
     devicePermissionsBusy: false,
     setEnablingNotifications: (value) => { state.busy = value; },
     setNotificationsEnabled: (value) => { state.enabled = value; },
@@ -193,7 +196,7 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     notificationEnabledStorageKey: "gm-manager-notifications-enabled-v1",
     mobileNotificationSetupKey: "gm-manager-mobile-notification-setup-v1",
     serviceWorkerRegistration: { current: currentRegistration || (ready ? null : registration) },
-    isMobileDevice: () => ios,
+    isMobileDevice: () => Boolean(mobile || ios),
     isAppleMobileDevice: () => ios,
     isStandaloneWebApp: () => standalone,
   });
@@ -249,6 +252,28 @@ test("native acceptance persists the notification setting across later app launc
   assert.equal(received[0].url, appUrl);
   assert.equal(fixture.storage.get("gm-manager-notifications-enabled-v1"), "enabled");
   assert.equal(fixture.state.permission, "granted");
+});
+
+test("the installed mobile app requests native notification permission and routes its local alert to the app", async () => {
+  const received = [];
+  const mobile = {
+    requestNotificationPermission: async () => "granted",
+    showNotification: async (notification) => { received.push(notification); return true; },
+  };
+  const fixture = frontendFixture({ mobile, ios: true, standalone: false, supported: false });
+  await fixture.enable();
+  assert.equal(fixture.state.permission, "granted");
+  assert.equal(fixture.state.enabled, true);
+  assert.equal(fixture.state.installHelp, undefined);
+  assert.equal(fixture.shown.length, 0);
+  assert.equal(received[0].url, "capacitor://localhost/");
+
+  const denied = frontendFixture({ mobile: { ...mobile, requestNotificationPermission: async () => "denied" } });
+  await denied.enable();
+  assert.match(denied.state.notice, /cho phép thông báo cho GM Manager/);
+  assert.equal(denied.state.enabled, false);
+  assert.equal(denied.state.busy, false);
+  assert.equal(received.length, 1);
 });
 
 test("iPhone Safari opens Home Screen instructions without requesting an unavailable permission", async () => {

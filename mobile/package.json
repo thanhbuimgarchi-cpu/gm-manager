@@ -1,0 +1,21 @@
+{
+  "name": "gm-manager-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "sync:android": "cap sync android",
+    "sync:ios": "cap sync ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.6.0",
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.0",
+    "@capacitor/geolocation": "8.2.4",
+    "@capacitor/ios": "8.6.0",
+    "@capacitor/local-notifications": "8.3.1",
+    "site-creator-vinext-starter": "file:../../.."
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.0"
+  }
+}

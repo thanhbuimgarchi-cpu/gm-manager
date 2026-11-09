@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type ChangeEvent } from "react";
+import { mobileBridge, type NativeMobilePosition } from "./mobile-bridge";
 import "./construction-photos.css";
 
 export type ConstructionPhoto = {
@@ -100,22 +101,25 @@ const locationStatusText: Record<LocationStatus, string> = {
 };
 
 function onMobile() {
-  return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return Boolean(mobileBridge()) || /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function positionResult({ coords: { latitude, longitude, accuracy }, timestamp }: NativeMobilePosition): PositionResult {
+  if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) return { status: "unavailable" };
+  const measuredAt = Number.isFinite(timestamp) ? Math.min(timestamp, Date.now()) : Date.now();
+  return { status: "ready", position: { latitude, longitude, accuracy }, measuredAt };
+}
+
+function locationFailure(code: unknown): PositionResult {
+  return { status: code === 1 ? "denied" : code === 3 ? "timeout" : "unavailable" };
 }
 
 function locateDevice(geolocation: Geolocation, options: PositionOptions): Promise<PositionResult> {
   return new Promise((resolve) => {
     try {
       geolocation.getCurrentPosition(
-        ({ coords: { latitude, longitude, accuracy }, timestamp }) => {
-          if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
-            resolve({ status: "unavailable" });
-            return;
-          }
-          const measuredAt = Number.isFinite(timestamp) ? Math.min(timestamp, Date.now()) : Date.now();
-          resolve({ status: "ready", position: { latitude, longitude, accuracy }, measuredAt });
-        },
-        ({ code }) => resolve({ status: code === 1 ? "denied" : code === 3 ? "timeout" : "unavailable" }),
+        (position) => resolve(positionResult(position)),
+        ({ code }) => resolve(locationFailure(code)),
         options,
       );
     } catch {
@@ -125,11 +129,17 @@ function locateDevice(geolocation: Geolocation, options: PositionOptions): Promi
 }
 
 export async function requestConstructionPhotoPosition(): Promise<PositionResult> {
-  const geolocation = navigator.geolocation;
-  if (!window.isSecureContext || !geolocation) return { status: "unavailable" };
-  const first = await locateDevice(geolocation, { enableHighAccuracy: false, maximumAge: positionMaxAgeMs, timeout: 8000 });
+  const mobile = mobileBridge();
+  const geolocation = mobile ? undefined : navigator.geolocation;
+  if (!mobile && (!window.isSecureContext || !geolocation)) return { status: "unavailable" };
+  const locate = async (options: PositionOptions) => {
+    if (!mobile) return locateDevice(geolocation!, options);
+    try { return positionResult(await mobile.getPosition(options)); }
+    catch (error) { return locationFailure(error && typeof error === "object" && "code" in error ? error.code : undefined); }
+  };
+  const first = await locate({ enableHighAccuracy: false, maximumAge: positionMaxAgeMs, timeout: 8000 });
   if (first.status === "ready" || first.status === "denied") return first;
-  return locateDevice(geolocation, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+  return locate({ enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
 }
 
 function photoLocation(position: Position | null) {
@@ -848,7 +858,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
         <a className="construction-photos__source" href={weatherAttribution} target="_blank" rel="noreferrer">Thời tiết NOAA</a>
       </div>}
       {phase !== "closed" && <div className="construction-photos__capture-status">
-        <p className="construction-photos__status" role="status">{locationStatusText[locationStatus]}</p>
+        <p className="construction-photos__status" role="status">{locationStatus === "denied" && mobileBridge() ? "Hãy mở Cài đặt trên điện thoại và cho phép GM Manager dùng vị trí." : locationStatusText[locationStatus]}</p>
         {locationStatus !== "ready" && locationStatus !== "checking" && <button type="button" className="construction-photos__secondary" onClick={() => void requestPosition(true)}>
           {locationStatus === "idle" ? "Lấy vị trí" : "Thử lại vị trí"}
         </button>}

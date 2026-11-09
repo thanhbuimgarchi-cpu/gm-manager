@@ -1,0 +1,11 @@
+{
+  "appId": "com.mgarchi.gmmanager",
+  "appName": "GM Manager",
+  "webDir": "www",
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_gm_notification",
+      "iconColor": "#a52637"
+    }
+  }
+}

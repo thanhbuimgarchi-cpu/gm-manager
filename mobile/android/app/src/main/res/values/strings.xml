@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GM Manager</string>
+    <string name="title_activity_main">GM Manager</string>
+    <string name="package_name">com.mgarchi.gmmanager</string>
+    <string name="custom_url_scheme">com.mgarchi.gmmanager</string>
+</resources>

@@ -1,0 +1,81 @@
+name: Build GM Manager mobile
+
+on:
+  push:
+    branches: [main, codex/native-mobile]
+    paths:
+      - "app/**"
+      - "mobile/**"
+      - "public/**"
+      - "src/**"
+      - "vite.mobile.config.ts"
+      - ".github/workflows/build-mobile.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - run: npm ci
+      - run: npm ci --prefix mobile
+      - run: npm exec vite -- build --config vite.mobile.config.ts
+      - run: npm run --prefix mobile sync:android
+      - run: bash ./gradlew --no-daemon assembleDebug
+        working-directory: mobile/android
+      - run: cp mobile/android/app/build/outputs/apk/debug/app-debug.apk GM-Manager-Android-preview.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GM-Manager-Android-preview
+          path: GM-Manager-Android-preview.apk
+
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix mobile
+      - run: npm exec vite -- build --config vite.mobile.config.ts
+      - run: npm run --prefix mobile sync:ios
+      - name: Compile iPhone app without signing
+        run: >-
+          xcodebuild -project mobile/ios/App/App.xcodeproj -scheme App
+          -configuration Release -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/gm-manager-ios" CODE_SIGNING_ALLOWED=NO build
+      - name: Package an IPA for local signing
+        run: |
+          app="$RUNNER_TEMP/gm-manager-ios/Build/Products/Release-iphoneos/App.app"
+          archive="$RUNNER_TEMP/gm-manager-ios-ipa"
+          test -d "$app"
+          mkdir -p "$archive/Payload"
+          ditto "$app" "$archive/Payload/App.app"
+          (cd "$archive" && zip -qry "$GITHUB_WORKSPACE/GM-Manager-iPhone-unsigned.ipa" Payload)
+          unzip -tq GM-Manager-iPhone-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GM-Manager-iPhone-unsigned
+          path: GM-Manager-iPhone-unsigned.ipa

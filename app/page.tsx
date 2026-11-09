@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState 
 import type { TextareaHTMLAttributes } from "react";
 import { applyColorTheme, colorThemeStorageKey, readColorTheme, type ColorTheme } from "./color-theme";
 import ConstructionPhotos, { requestConstructionPhotoPosition, type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
+import { mobileBridge, type NativeMobileNotification } from "./mobile-bridge";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
 import { createWorkflowClient, formatDateInput as formatDesignDateInput, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
@@ -688,6 +689,7 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const macInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-macOS-x64.dmg";
+const publicWorkspaceUrl = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
@@ -746,7 +748,7 @@ function parseDesktopUpdateManifest(value: unknown): DesktopUpdateManifest | nul
 }
 
 function isWindowsDesktop() {
-  return /windows nt/i.test(navigator.userAgent);
+  return !mobileBridge() && /windows nt/i.test(navigator.userAgent);
 }
 
 function isMacDesktop() {
@@ -754,15 +756,16 @@ function isMacDesktop() {
 }
 
 function isMobileDevice() {
-  return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return Boolean(mobileBridge()) || /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
 function isAppleMobileDevice() {
-  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const mobile = mobileBridge();
+  return mobile ? mobile.platform === "ios" : /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
 
 function isStandaloneWebApp() {
-  return Boolean((navigator as Navigator & { standalone?: boolean }).standalone) || window.matchMedia("(display-mode: standalone)").matches;
+  return Boolean(mobileBridge() || (navigator as Navigator & { standalone?: boolean }).standalone) || window.matchMedia("(display-mode: standalone)").matches;
 }
 
 type AppsScriptBridgeMessage<T> = {
@@ -869,13 +872,28 @@ async function postToAppsScript<T extends { ok?: boolean; error?: string }>(conf
     const account = window.localStorage.getItem(personnelSessionEmailKey) ?? "";
     if (!requestPayload.workflowSessionToken && isCurrentWorkflowSession(session, account, config.scriptUrl)) requestPayload.workflowSessionToken = session.token;
   } catch { /* Public reads and login do not require a saved session. */ }
+  const mobile = mobileBridge();
   const readAction = ["load-consulting", "list-workflow-files", "list-documents", "list-3d-files", "list-construction-photos", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
-  // Use the HtmlService bridge because ContentService's googleusercontent.com
-  // redirect is not consistently CORS-readable from GitHub Pages.
+  // The website uses HtmlService to cross the Apps Script redirect. Native
+  // shells have their own origins and use the app's HTTPS transport instead.
   for (let attempt = 0; attempt < retryLimit; attempt += 1) {
     try {
+      if (mobile) {
+        let reply: Awaited<ReturnType<typeof mobile.postAppsScript>>;
+        try { reply = await mobile.postAppsScript(config.scriptUrl, requestPayload); }
+        catch { throw new Error("Không thể kết nối Google Apps Script."); }
+        if (!Number.isInteger(reply.status) || reply.status < 200 || reply.status > 599) throw new Error("Google Apps Script không trả về trạng thái hợp lệ.");
+        let data = reply.data;
+        if (typeof data === "string") {
+          try { data = JSON.parse(data); } catch { data = null; }
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data) || typeof (data as { ok?: unknown }).ok !== "boolean") {
+          throw new Error(reply.status >= 400 ? `Không thể kết nối Google Apps Script (HTTP ${reply.status}).` : "Google Apps Script không trả về dữ liệu hợp lệ.");
+        }
+        return { response: new Response(null, { status: reply.status }), result: data as T };
+      }
       const result = await postViaAppsScriptBridge<T>(config.scriptUrl, requestPayload);
       return { response: new Response(JSON.stringify(result), { status: 200 }), result };
     } catch (error) {
@@ -2137,9 +2155,10 @@ export default function Home() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
-  const [mobileDevice, setMobileDevice] = useState(false);
+  const [mobileDevice, setMobileDevice] = useState(() => Boolean(mobileBridge()));
   const [photoLocationPermission, setPhotoLocationPermission] = useState<PermissionState>("prompt");
   const [requestingPhotoLocation, setRequestingPhotoLocation] = useState(false);
+  const mobilePermissionRevision = useRef({ location: 0, notification: 0 });
   const [notificationSetupFeedback, setNotificationSetupFeedback] = useState("");
   const [locationSetupFeedback, setLocationSetupFeedback] = useState("");
   const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
@@ -2617,6 +2636,26 @@ export default function Home() {
     if (!isMobileDevice()) return;
     setMobileDevice(true);
     let active = true;
+    const mobile = mobileBridge();
+    if (mobile) {
+      const refreshLocationPermission = () => {
+        if (document.visibilityState !== "visible") return;
+        const revision = ++mobilePermissionRevision.current.location;
+        void mobile.checkLocationPermission().then((permission) => {
+          if (!active || mobilePermissionRevision.current.location !== revision) return;
+          setPhotoLocationPermission(permission);
+          if (permission === "granted") setLocationSetupFeedback("");
+        }).catch(() => { /* Keep the last known permission when the device is unavailable. */ });
+      };
+      refreshLocationPermission();
+      window.addEventListener("focus", refreshLocationPermission);
+      document.addEventListener("visibilitychange", refreshLocationPermission);
+      return () => {
+        active = false;
+        window.removeEventListener("focus", refreshLocationPermission);
+        document.removeEventListener("visibilitychange", refreshLocationPermission);
+      };
+    }
     let permission: PermissionStatus | undefined;
     const refreshLocationPermission = () => {
       if (!permission) return;
@@ -2639,6 +2678,29 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const mobile = mobileBridge();
+    if (mobile) {
+      setIsAppInstalled(true);
+      let active = true;
+      const refreshNotificationPermission = () => {
+        if (document.visibilityState !== "visible") return;
+        const revision = ++mobilePermissionRevision.current.notification;
+        void mobile.checkNotificationPermission().then((permission) => {
+          if (!active || mobilePermissionRevision.current.notification !== revision) return;
+          setNotificationPermission(permission);
+          markNotificationsEnabled(permission === "granted");
+          if (permission === "granted") setNotificationSetupFeedback("");
+        }).catch(() => { /* Keep the last known permission when the device is unavailable. */ });
+      };
+      refreshNotificationPermission();
+      window.addEventListener("focus", refreshNotificationPermission);
+      document.addEventListener("visibilitychange", refreshNotificationPermission);
+      return () => {
+        active = false;
+        window.removeEventListener("focus", refreshNotificationPermission);
+        document.removeEventListener("visibilitychange", refreshNotificationPermission);
+      };
+    }
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
     const updateInstallState = () => {
       const installed = Boolean(desktopBridge()) || isStandaloneWebApp();
@@ -2967,6 +3029,16 @@ export default function Home() {
     return url.toString();
   };
 
+  const showWorkflowNotification = async ({ title, body, url, tag }: NativeMobileNotification) => {
+    const mobile = mobileBridge();
+    if (mobile) return mobile.showNotification({ title, body, url, tag });
+    const desktop = desktopBridge();
+    if (desktop?.isDesktop) return desktop.showNotification({ title, body, url });
+    if (!("Notification" in window) || Notification.permission !== "granted" || !serviceWorkerRegistration.current) return false;
+    await serviceWorkerRegistration.current.showNotification(title, { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag, data: { url } });
+    return true;
+  };
+
   const showConstructionPhotoNotification = async (photo: ConstructionPhotoNotification, account: string, isCurrent: () => boolean) => {
     const title = "GM Manager · Ảnh thi công mới";
     const capture = new Date(photo.capturedAt || "");
@@ -2974,12 +3046,15 @@ export default function Home() {
     const body = [`Mã nhà: ${photo.houseId || photo.projectId}`, `${photo.actorName || "Nhân lực"} đã chụp ảnh thi công.`, photo.fileName, time].filter(Boolean).join("\n");
     const url = projectNotificationUrl(photo);
     url.searchParams.set("gmcrmConstructionPhoto", photo.id);
+    const tag = `gmcrm-construction-photo-${account}-${photo.id}`;
+    const mobile = mobileBridge();
+    if (mobile) return isCurrent() && await mobile.showNotification({ title, body, url: url.toString(), tag });
     const desktop = desktopBridge();
     if (desktop?.isDesktop && desktop.showNotification) return isCurrent() && await desktop.showNotification({ title, body, url: url.toString() });
     if (!("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator)) return false;
     const registration = serviceWorkerRegistration.current ?? await navigator.serviceWorker.getRegistration();
     if (!registration?.active || !isCurrent()) return false;
-    await registration.showNotification(title, { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-construction-photo-${account}-${photo.id}`, data: { url: url.toString() } });
+    await registration.showNotification(title, { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag, data: { url: url.toString() } });
     return true;
   };
 
@@ -2987,9 +3062,11 @@ export default function Home() {
     const title = "GM-CRM · Tin nhắn khách mới";
     const body = customerMessageNotificationBody(message);
     const url = customerMessageNotificationUrl(message);
+    const tag = `gmcrm-customer-message-${message.id}`;
+    const mobile = mobileBridge();
     const desktop = desktopBridge();
-    if (desktop?.isDesktop) {
-      const shown = await desktop.showNotification({ title, body, url });
+    if (mobile || desktop?.isDesktop) {
+      const shown = await showWorkflowNotification({ title, body, url, tag });
       if (shown) markNotificationsEnabled(true);
       return shown;
     }
@@ -3000,7 +3077,7 @@ export default function Home() {
         body,
         icon: `${import.meta.env.BASE_URL}gm-logo.png`,
         badge: `${import.meta.env.BASE_URL}gm-logo.png`,
-        tag: `gmcrm-customer-message-${message.id}`,
+        tag,
         renotify: true,
         data: { url },
       };
@@ -3050,9 +3127,19 @@ export default function Home() {
 
   const sendTestNotification = async () => {
     setEnablingNotifications(true);
+    const mobile = mobileBridge();
     try {
       const desktop = desktopBridge();
-      if (desktop?.isDesktop) {
+      if (mobile) {
+        mobilePermissionRevision.current.notification++;
+        const permission = await mobile.requestNotificationPermission();
+        mobilePermissionRevision.current.notification++;
+        setNotificationPermission(permission);
+        if (permission !== "granted") throw new Error("Hãy mở Cài đặt trên điện thoại và cho phép thông báo cho GM Manager.");
+        const shown = await mobile.showNotification({ title: "GM Manager", body: "Thông báo đã được bật. Bạn sẽ nhận thông báo khi có công việc hoặc tin nhắn mới.", url: projectNotificationUrl().toString() });
+        if (!shown) throw new Error("Chưa gửi được thông báo kiểm tra trên thiết bị.");
+        markNotificationsEnabled(true);
+      } else if (desktop?.isDesktop) {
         const shown = await desktop.showNotification({ title: "GM Manager", body: "Thông báo đã được bật. Bạn sẽ nhận thông báo khi có công việc hoặc tin nhắn mới.", url: `${window.location.origin}${import.meta.env.BASE_URL}` });
         if (!shown) throw new Error("Hệ thống chưa xác nhận hiển thị thông báo. Hãy kiểm tra quyền thông báo GM Manager trong máy.");
         setNotificationPermission("granted");
@@ -3102,12 +3189,16 @@ export default function Home() {
     if (enablingNotifications || requestingPhotoLocation) return;
     setLocationSetupFeedback("");
     setRequestingPhotoLocation(true);
+    const mobile = mobileBridge();
+    if (mobile) mobilePermissionRevision.current.location++;
     try {
       const result = await requestConstructionPhotoPosition();
+      if (mobile) mobilePermissionRevision.current.location++;
       if (result.status === "ready") {
         setPhotoLocationPermission("granted");
       } else if (result.status === "denied") {
-        const permission = await navigator.permissions?.query({ name: "geolocation" }).then(({ state }) => state).catch(() => undefined);
+        const permission = mobile ? await mobile.checkLocationPermission().catch(() => undefined)
+          : await navigator.permissions?.query({ name: "geolocation" }).then(({ state }) => state).catch(() => undefined);
         setPhotoLocationPermission(permission === "prompt" ? "prompt" : "denied");
         if (permission === "prompt") setLocationSetupFeedback("Chưa chọn quyền. Bấm Cho phép vị trí rồi chọn Cho phép khi điện thoại hỏi.");
       } else {
@@ -3254,7 +3345,7 @@ export default function Home() {
     </button>
   );
   const renderOverviewActions = () => <>
-    {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
+    {!isAppInstalled && !mobileBridge() && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     {renderDevicePermissionsAction()}
     {renderWindowsStartupAction()}
@@ -5225,7 +5316,9 @@ export default function Home() {
     const poll = async () => {
       if (!isCurrent() || polling || navigator.onLine === false) return;
       const desktop = desktopBridge();
-      if (!(desktop?.isDesktop && desktop.showNotification) && (!("Notification" in window) || Notification.permission !== "granted" || !("serviceWorker" in navigator))) return;
+      const canNotify = mobileBridge() ? notificationPermission === "granted"
+        : Boolean(desktop?.isDesktop && desktop.showNotification) || ("Notification" in window && Notification.permission === "granted" && "serviceWorker" in navigator);
+      if (!canNotify) return;
       polling = true;
       try {
         // Tabs on the same device share an account cursor. A browser lock
@@ -5282,12 +5375,7 @@ export default function Home() {
           const url = kind
             ? designTaskNotificationUrl({ ...item as DesignProgressRow, ...project, kind, title: designProgressDefinitions[kind].title })
             : workNoteNotificationUrl({ ...item as WorkNote, ...project });
-          const desktop = desktopBridge();
-          if (desktop?.isDesktop) shown = await desktop.showNotification({ title, body, url });
-          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
-            await serviceWorkerRegistration.current.showNotification(title, { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: key, data: { url } });
-            shown = true;
-          }
+          shown = await showWorkflowNotification({ title, body, url, tag: key });
           if (shown) try { window.localStorage.setItem(key, requestedAt); } catch { /* The current session already remembers it. */ }
         } catch { /* Retry on a later poll. The review remains available in the app. */ }
         finally { if (!shown) reviewNotificationInFlight.current.delete(notificationKey); }
@@ -5342,13 +5430,7 @@ export default function Home() {
             note.messageContext ? `Tin nhắn khách đã chọn:\n${note.messageContext}` : "",
           ].filter(Boolean).join("\n");
           const url = workNoteNotificationUrl(note);
-          const desktop = desktopBridge();
-          let shown = false;
-          if (desktop?.isDesktop) shown = await desktop.showNotification({ title: "GM-CRM · Có việc mới được giao", body, url });
-          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
-            await serviceWorkerRegistration.current.showNotification("GM-CRM · Có việc mới được giao", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-work-note-${note.id}`, data: { url } });
-            shown = true;
-          }
+          const shown = await showWorkflowNotification({ title: "GM-CRM · Có việc mới được giao", body, url, tag: `gmcrm-work-note-${note.id}` });
           if (shown) {
             markNotificationsEnabled(true);
             window.localStorage.setItem(key, String(now));
@@ -5436,13 +5518,7 @@ export default function Home() {
           if (now - Number(window.localStorage.getItem(key) ?? 0) < 15 * 60 * 1000) continue;
           const body = [`Khách hàng: ${task.customerName || task.houseId || "Khách hàng"}`, task.title, `Hạng mục: ${task.content}`, `Hoàn thành dự kiến: ${task.plannedDate || "Chưa có"}`, task.reviewComment ? `Nhận xét của quản lý: ${task.reviewComment}` : ""].filter(Boolean).join("\n");
           const url = designTaskNotificationUrl(task);
-          const desktop = desktopBridge();
-          let shown = false;
-          if (desktop?.isDesktop) shown = await desktop.showNotification({ title: "GM Manager · Có hạng mục thiết kế mới", body, url });
-          else if ("Notification" in window && Notification.permission === "granted" && serviceWorkerRegistration.current) {
-            await serviceWorkerRegistration.current.showNotification("GM Manager · Có hạng mục thiết kế mới", { body, icon: `${import.meta.env.BASE_URL}gm-logo.png`, badge: `${import.meta.env.BASE_URL}gm-logo.png`, tag: `gmcrm-design-${task.kind}-${task.id}`, data: { url } });
-            shown = true;
-          }
+          const shown = await showWorkflowNotification({ title: "GM Manager · Có hạng mục thiết kế mới", body, url, tag: `gmcrm-design-${task.kind}-${task.id}` });
           if (shown) {
             markNotificationsEnabled(true);
             window.localStorage.setItem(key, String(now));
@@ -5758,7 +5834,11 @@ export default function Home() {
     loadWorkNotes();
   }, [activeFolder, canViewNotesSummary, canManageCustomerWorkflows, currentWorkflowToken, driveScriptUrl, loggedInEmployeeEmail, selectedCustomerProjectId, selectedMonth, selectedYear]);
   const customerPortalShareToken = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("share")?.trim() ?? "";
-  const customerPortalLink = (shareToken: string) => typeof window === "undefined" ? "" : `${window.location.origin}${window.location.pathname}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
+  const customerPortalLink = (shareToken: string) => {
+    if (typeof window === "undefined") return "";
+    const base = mobileBridge() ? publicWorkspaceUrl : `${window.location.origin}${window.location.pathname}`;
+    return `${base}?view=customer&share=${encodeURIComponent(shareToken)}&gmcrm-update=${encodeURIComponent(appVersionLabel)}`;
+  };
   const publishCustomerPortalLink = async (record: WorkRecord, location: CustomerLocation) => {
     if (!requireCustomerWorkflowManager()) return;
     if (!record.houseId?.trim()) {
@@ -6636,13 +6716,13 @@ export default function Home() {
               <section className="permission-option" aria-labelledby="notification-permission-label">
                 <div><strong id="notification-permission-label">Thông báo</strong><small role="status" className={notificationsEnabled ? "is-granted" : undefined}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "Đã bật" : notificationPermission === "denied" ? "Đang bị chặn" : "Nhắc việc và tin nhắn"}</small></div>
                 <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestNotificationFromPanel()}>{notificationsEnabled ? "Gửi thử" : "Bật thông báo"}</button>
-                {notificationPermission === "denied" ? <p>{isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager → Cho phép thông báo." : "Thông báo đang bị chặn. Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Thông báo."}</p>
+                {notificationPermission === "denied" ? <p>{mobileBridge() ? "Hãy mở Cài đặt trên điện thoại và cho phép thông báo cho GM Manager." : isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager → Cho phép thông báo." : "Thông báo đang bị chặn. Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Thông báo."}</p>
                   : notificationSetupFeedback ? <p role="status">{notificationSetupFeedback}</p> : null}
               </section>
               <section className="permission-option" aria-labelledby="location-permission-label">
                 <div><strong id="location-permission-label">Vị trí</strong><small role="status" className={photoLocationPermission === "granted" ? "is-granted" : undefined}>{requestingPhotoLocation ? "Đang lấy vị trí…" : photoLocationPermission === "granted" ? "Đã cấp" : photoLocationPermission === "denied" ? "Đang bị chặn" : "Địa điểm và thời tiết trên ảnh"}</small></div>
                 <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestLocationFromPanel()}>{photoLocationPermission === "granted" ? "Kiểm tra vị trí" : "Cho phép vị trí"}</button>
-                {photoLocationPermission === "denied" ? <p>Vị trí đang bị chặn. {isAppleMobileDevice() ? "Kiểm tra Cài đặt → Quyền riêng tư & Bảo mật → Dịch vụ định vị." : "Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Vị trí."}</p>
+                {photoLocationPermission === "denied" ? <p>Vị trí đang bị chặn. {mobileBridge() ? "Hãy mở Cài đặt trên điện thoại và cho phép GM Manager dùng vị trí." : isAppleMobileDevice() ? "Kiểm tra Cài đặt → Quyền riêng tư & Bảo mật → Dịch vụ định vị." : "Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Vị trí."}</p>
                   : locationSetupFeedback ? <p role="status">{locationSetupFeedback}</p> : null}
               </section>
             </div>
