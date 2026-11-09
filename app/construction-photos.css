@@ -130,6 +130,8 @@
   list-style: none;
 }
 
+.construction-photos__grid > li { position: relative; min-width: 0; }
+
 .construction-photos__grid a {
   display: block;
   overflow: hidden;
@@ -159,28 +161,25 @@
 
 .construction-photos__thumbnail img[hidden],
 .construction-photos__camera[hidden] { display: none; }
-.construction-photos__filename {
-  display: block;
-  padding: 8px;
-  overflow-wrap: anywhere;
-  font-size: 12px;
-  font-weight: 600;
-}
 
 .construction-photos__photo-delete {
-  min-height: 36px;
-  margin-top: 4px;
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  min-width: 44px;
+  min-height: 44px;
   padding: 5px 9px;
-  border: 0;
+  border: 1px solid #ffffff70;
   border-radius: 7px;
-  background: transparent;
-  color: #842132;
+  background: #801c2bec;
+  color: #fff;
   font: inherit;
   font-size: 12px;
   font-weight: 650;
 }
 
-.construction-photos__photo-delete:hover { background: #fff3f4; }
+.construction-photos__photo-delete:hover { background: #641323; }
+.construction-photos__photo-delete:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
 
 .construction-photos__dialog {
   position: fixed;
@@ -259,6 +258,8 @@
   overflow: auto;
   list-style: none;
 }
+
+.construction-photos > .construction-photos__failed-shots { margin: 8px 16px; }
 
 .construction-photos__failed-shots li {
   display: flex;

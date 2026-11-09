@@ -198,13 +198,23 @@ try {
   assert.equal(uploads.length, 1);
   assert.deepEqual(await page.evaluate(() => ({ calls: window.constructionCameraTest.calls, tracks: window.constructionCameraTest.tracks.map((track) => track.readyState) })), { calls: 1, tracks: ["live"] });
   await camera.getByRole("button", { name: "Đóng camera" }).tap();
-  const preview = page.getByRole("dialog", { name: "Ảnh vừa chụp" });
-  await preview.getByText("Đã lưu 0 ảnh · Đang lưu 3 ảnh", { exact: true }).waitFor();
+  await camera.waitFor({ state: "hidden" });
+  assert.equal(await page.locator("dialog[open]").count(), 0);
   assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[0]?.readyState), "ended");
+  assert.equal(uploads.length, 1);
+  await page.getByRole("button", { name: /Tổng quan/ }).tap();
+  await photos.waitFor({ state: "hidden" });
+  await enterGallery(page);
+  await photos.getByRole("button", { name: "Chụp ảnh", exact: true }).tap();
+  await camera.getByText("Đã lưu 0 ảnh · Đang lưu 3 ảnh", { exact: true }).waitFor();
   releaseFirstUpload();
-  await preview.getByRole("img", { name: "Ảnh chụp lúc 23:59:59" }).waitFor();
-  await preview.getByText(/Drive chưa lưu được ảnh/).waitFor();
-  await preview.getByText("Đã lưu 2 ảnh · 1 ảnh chưa lưu", { exact: true }).waitFor();
+  await camera.getByRole("img", { name: "Ảnh chụp lúc 23:59:59" }).waitFor();
+  await camera.getByText(/Drive chưa lưu được ảnh/).waitFor();
+  await camera.getByText("Đã lưu 2 ảnh · 1 ảnh chưa lưu", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[1]?.readyState), "live");
+  await page.keyboard.press("Escape");
+  await camera.waitFor({ state: "hidden" });
+  assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[1]?.readyState), "ended");
   const stamps = await page.evaluate(() => window.constructionCameraTest.lines);
   const stampedPhotos = Array.from({ length: 3 }, (_, index) => stamps.slice(index * 4, index * 4 + 4)).sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
   assert.deepEqual(stampedPhotos, [
@@ -217,10 +227,14 @@ try {
   ]));
   assert.equal(weather.length, 1);
   assert.ok(!weather[0].searchParams.get("geometry").includes("21.02851"));
-  await preview.getByRole("button", { name: "Thử lưu lại" }).tap();
-  await preview.waitFor({ state: "hidden" });
+  await photos.getByRole("button", { name: "Thử lưu lại" }).tap();
   await photos.getByText("Đã lưu ảnh vào thư mục 07/11/2026.").waitFor();
-  for (const photo of expectedPhotos) await photos.getByRole("link", { name: photo.name }).waitFor();
+  for (const photo of expectedPhotos) {
+    const link = photos.getByRole("link", { name: photo.name });
+    await link.waitFor();
+    assert.equal(await link.getAttribute("title"), null);
+    assert.equal(await photos.getByText(photo.name, { exact: true }).count(), 0);
+  }
   const dayLinks = await photos.getByRole("link", { name: /Mở thư mục trên Drive/ }).evaluateAll((links) => links.map((link) => link.href));
   assert.deepEqual(dayLinks, [savedDays.get("08-11-2026").folderUrl, savedDays.get("07-11-2026").folderUrl]);
   assert.equal(uploads.length, 4);
@@ -279,6 +293,12 @@ try {
   const cancelButton = confirmDialog.getByRole("button", { name: "Hủy", exact: true });
   const deletePhotoLink = manager.photos.getByRole("link", { name: expectedPhotos[2].name });
   const reloadAlbum = manager.photos.getByRole("button", { name: "Nạp lại", exact: true });
+  await deleteButton.waitFor();
+  const imageBounds = await deletePhotoLink.boundingBox();
+  const deleteBounds = await deleteButton.boundingBox();
+  const rightInset = imageBounds.x + imageBounds.width - deleteBounds.x - deleteBounds.width;
+  const bottomInset = imageBounds.y + imageBounds.height - deleteBounds.y - deleteBounds.height;
+  assert.ok(rightInset >= 0 && rightInset <= 12 && bottomInset >= 0 && bottomInset <= 12 && deleteBounds.height >= 44);
   await deleteButton.click();
   await confirmDialog.getByText(/vào thùng rác Google Drive/).waitFor();
   await cancelButton.click();
@@ -341,7 +361,7 @@ try {
   await manager.context.close();
 
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraReleasedBeforeUploadsFinish: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true, offlineMetadata: true, accountIsolation: true, managerDeleteAndConfirm: true, staleReadProtection: true, restoreFromDrive: true }));
+  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraClosesImmediately: true, queuedAcrossNavigation: true, reopenedCameraStaysOpen: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true, offlineMetadata: true, accountIsolation: true, managerDeleteAndConfirm: true, deleteOverlaysPhoto: true, photoNamesHidden: true, staleReadProtection: true, restoreFromDrive: true }));
 } finally {
   await browser.close();
 }

@@ -66,8 +66,15 @@ type PhotoJob = {
   error?: string;
   stage: "preparing" | "uploading" | "failed";
 };
-type CameraPhase = "closed" | "starting" | "live" | "failed" | "finishing";
+type CameraPhase = "closed" | "starting" | "live" | "failed";
+type CaptureResult = { uploaded: ConstructionPhotoUploadResult } | { removed: string };
+type CaptureQueue = {
+  shots: PhotoJob[];
+  uploadTail: Promise<void>;
+  listeners: Set<(shots: PhotoJob[], result?: CaptureResult) => void>;
+};
 const maxOutstandingPhotos = 8;
+const captureQueues = new Map<string, CaptureQueue>();
 
 const vietnamTimeZone = "Asia/Ho_Chi_Minh";
 const photoDate = new Intl.DateTimeFormat("vi-VN", { timeZone: vietnamTimeZone, day: "2-digit", month: "2-digit", year: "numeric" });
@@ -310,6 +317,27 @@ function withoutDeletedPhotos(days: ConstructionPhotoDay[], deletions: PhotoDele
     .sort(dayOrder);
 }
 
+function writeGallery(storageKey: string, gallery: PhotoGallery) {
+  if (!storageKey) return;
+  try { window.localStorage.setItem(storageKey, JSON.stringify(gallery)); }
+  catch { /* The current gallery stays available when storage is full or disabled. */ }
+}
+
+function withUploadedPhoto(days: ConstructionPhotoDay[], { date, folderId, folderUrl, photo }: ConstructionPhotoUploadResult) {
+  const previous = days.find((day) => day.date === date);
+  const photos = [photo, ...(previous?.photos.filter((entry) => entry.id !== photo.id) ?? [])]
+    .sort((left, right) => right.capturedAt.localeCompare(left.capturedAt));
+  return [...days.filter((day) => day.date !== date), { date, folderId, folderUrl, photos }];
+}
+
+function captureQueue(storageKey: string): CaptureQueue {
+  return captureQueues.get(storageKey) ?? { shots: [], uploadTail: Promise.resolve(), listeners: new Set() };
+}
+
+function releaseQueue(storageKey: string, queue: CaptureQueue) {
+  if (!queue.listeners.size && !queue.shots.length && captureQueues.get(storageKey) === queue) captureQueues.delete(storageKey);
+}
+
 function photoErrorCode(error: unknown) {
   return error instanceof Error && "code" in error ? String(error.code) : "";
 }
@@ -345,7 +373,8 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   const [openDays, setOpenDays] = useState(() => new Set(gallery?.days.slice(0, 1).map((day) => day.date)));
   const [phase, setPhase] = useState<CameraPhase>("closed");
   const [videoReady, setVideoReady] = useState(false);
-  const [shots, setShots] = useState<PhotoJob[]>([]);
+  const [queue] = useState(() => captureQueue(storageKey));
+  const [shots, setShots] = useState(queue.shots);
   const [savedCount, setSavedCount] = useState(0);
   const [cameraError, setCameraError] = useState("");
   const [nativeAvailable, setNativeAvailable] = useState(false);
@@ -361,9 +390,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   const listPending = useRef(false);
   const galleryRef = useRef(gallery);
   const galleryBlocked = useRef(false);
-  const finishing = useRef(false);
-  const pendingShots = useRef<PhotoJob[]>([]);
-  const uploadTail = useRef<Promise<void>>(Promise.resolve());
   const locationRequest = useRef<{ startedAt: number; result: Promise<Position | null> } | null>(null);
   const nativeOpenedAt = useRef(0);
   const loader = useRef(loadPhotos);
@@ -378,10 +404,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     if (!galleryRef.current?.days.length && next.days[0]) setOpenDays(new Set([next.days[0].date]));
     galleryRef.current = next;
     setGallery(next);
-    if (storageKey) {
-      try { window.localStorage.setItem(storageKey, JSON.stringify(next)); }
-      catch { /* The current gallery stays available when storage is full or disabled. */ }
-    }
+    writeGallery(storageKey, next);
   }, [storageKey]);
 
   const refresh = useCallback(async () => {
@@ -416,6 +439,34 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   }, [publishGallery, storageKey]);
 
   useEffect(() => {
+    if (storageKey) captureQueues.set(storageKey, queue);
+    function showCaptureResult(next: PhotoJob[], result?: CaptureResult) {
+      setShots(next);
+      if (!result) return;
+      if ("removed" in result) {
+        setNotice(result.removed);
+        if (dialog.current?.open) setCameraError(result.removed);
+        return;
+      }
+      const { uploaded } = result;
+      if (listPending.current) void refresh();
+      if (!galleryBlocked.current) {
+        publishGallery(withUploadedPhoto(galleryRef.current?.days ?? [], uploaded));
+        setAlbumOpen(true);
+        setOpenDays((current) => new Set([...current, uploaded.date]));
+      }
+      setNotice(`Đã lưu ảnh vào thư mục ${displayDay(uploaded.date)}.`);
+      setSavedCount((current) => current + 1);
+    }
+    queue.listeners.add(showCaptureResult);
+    setShots(queue.shots);
+    return () => {
+      queue.listeners.delete(showCaptureResult);
+      releaseQueue(storageKey, queue);
+    };
+  }, [publishGallery, queue, refresh, storageKey]);
+
+  useEffect(() => {
     if (!storageKey) return;
     function reflectDeletedPhotos(event: StorageEvent) {
       if (event.key !== storageKey) return;
@@ -447,31 +498,22 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
       lifetime.current++;
       stream.current?.getTracks().forEach((track) => track.stop());
       stream.current = null;
-      pendingShots.current.forEach((shot) => {
-        if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
-      });
     };
   }, [refresh]);
 
-  function updateShots(next: PhotoJob[]) {
-    pendingShots.current = next;
-    setShots(next);
+  function updateShots(next: PhotoJob[], result?: CaptureResult) {
+    queue.shots = next;
+    for (const listener of queue.listeners) listener(next, result);
+    releaseQueue(storageKey, queue);
   }
 
   function replaceShot(shot: PhotoJob) {
-    updateShots(pendingShots.current.map((item) => item.uploadId === shot.uploadId ? shot : item));
+    updateShots(queue.shots.map((item) => item.uploadId === shot.uploadId ? shot : item));
   }
 
-  function closeIfFinished() {
-    if (!finishing.current || pendingShots.current.length) return;
-    setPhase("closed");
-    if (dialog.current?.open) dialog.current.close();
-  }
-
-  function removeShot(shot: PhotoJob) {
+  function removeShot(shot: PhotoJob, result?: CaptureResult) {
     if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
-    updateShots(pendingShots.current.filter((item) => item.uploadId !== shot.uploadId));
-    closeIfFinished();
+    updateShots(queue.shots.filter((item) => item.uploadId !== shot.uploadId), result);
   }
 
   function closeCamera() {
@@ -479,9 +521,8 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     releaseStream();
     locationRequest.current = null;
     setCameraError("");
-    finishing.current = true;
-    setPhase("finishing");
-    closeIfFinished();
+    setPhase("closed");
+    if (dialog.current?.open) dialog.current.close();
   }
 
   function requestPosition() {
@@ -496,7 +537,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   async function startCamera() {
     if (!canCapture || !mobile) return;
     const revision = ++cameraRevision.current;
-    finishing.current = false;
     releaseStream();
     setCameraError("");
     setNativeAvailable(false);
@@ -532,13 +572,13 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
 
   function queuePhoto(frame: HTMLCanvasElement | File, capturedAt: Date) {
     const shot: PhotoJob = { uploadId: crypto.randomUUID(), capturedAt, frame, position: requestPosition(), stage: "preparing" };
-    updateShots([...pendingShots.current, shot]);
+    updateShots([...queue.shots, shot]);
     void processShot(shot);
   }
 
   function takePhoto() {
     const viewfinder = video.current;
-    if (!viewfinder || !stream.current || phase !== "live" || pendingShots.current.length >= maxOutstandingPhotos) return;
+    if (!viewfinder || !stream.current || phase !== "live" || queue.shots.length >= maxOutstandingPhotos) return;
     const capturedAt = new Date();
     try {
       const frame = copyFrame(viewfinder, viewfinder.videoWidth, viewfinder.videoHeight);
@@ -552,7 +592,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   function readNativeCapture(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
-    if (!file || phase !== "failed" || finishing.current || pendingShots.current.length >= maxOutstandingPhotos) return;
+    if (!file || phase !== "failed" || !dialog.current?.open || queue.shots.length >= maxOutstandingPhotos) return;
     const capturedAt = new Date(file.lastModified);
     const time = capturedAt.getTime();
     if (!Number.isFinite(time) || time < nativeOpenedAt.current - 120_000 || time > Date.now() + 10_000) {
@@ -564,53 +604,35 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   }
 
   async function processShot(shot: PhotoJob) {
-    const revision = lifetime.current;
     let prepared = shot;
     try {
       let blob = shot.blob;
       if (!blob) {
         const position = await shot.position;
-        if (revision !== lifetime.current) return;
         const frame = shot.frame instanceof File ? await decodeCapture(shot.frame) : shot.frame;
         if (!frame) throw new Error("Không thể đọc ảnh vừa chụp.");
-        if (revision !== lifetime.current) return;
         blob = await stampPhoto(frame, shot.capturedAt, position);
         frame.width = 0;
       }
-      if (revision !== lifetime.current) return;
       prepared = { ...shot, frame: undefined, blob, stage: "uploading", error: undefined };
       replaceShot(prepared);
       // Each frame is taken immediately. Keep Drive writes sequential because they share a server-side lock.
-      const transfer = uploadTail.current.then(async () => {
-        if (revision !== lifetime.current) return null;
+      const transfer = queue.uploadTail.then(async () => {
         const data = await blobData(blob);
-        if (revision !== lifetime.current) return null;
         return uploadPhoto({ uploadId: shot.uploadId, capturedAt: shot.capturedAt.toISOString(), file: { mimeType: "image/jpeg", data } });
       });
-      uploadTail.current = transfer.then(() => undefined, () => undefined);
-      const result = await transfer;
-      if (!result || revision !== lifetime.current) return;
-      const { date, folderId, folderUrl, photo } = result;
-      if (listPending.current) void refresh();
-      if (!galleryBlocked.current) {
-        const current = galleryRef.current?.days ?? [];
-        const old = current.find((day) => day.date === date);
-        const photos = [photo, ...(old?.photos.filter((entry) => entry.id !== photo.id) || [])]
-          .sort((left, right) => right.capturedAt.localeCompare(left.capturedAt));
-        publishGallery([...current.filter((day) => day.date !== date), { date, folderId, folderUrl, photos }]);
-        setAlbumOpen(true);
-        setOpenDays((current) => new Set([...current, date]));
+      queue.uploadTail = transfer.then(() => undefined, () => undefined);
+      const uploaded = await transfer;
+      if (!queue.listeners.size && storageKey && !galleryBlocked.current) {
+        const previous = readGallery(storageKey);
+        const deletedPhotos = recentPhotoDeletions(previous?.deletedPhotos ?? []);
+        const days = withoutDeletedPhotos(withUploadedPhoto(previous?.days ?? [], uploaded), deletedPhotos);
+        writeGallery(storageKey, { days, deletedPhotos });
       }
-      setNotice(`Đã lưu ảnh vào thư mục ${displayDay(date)}.`);
-      setSavedCount((current) => current + 1);
-      removeShot(prepared);
+      removeShot(prepared, { uploaded });
     } catch (error) {
-      if (revision !== lifetime.current) return;
       if (photoErrorCode(error) === "PHOTO_DELETED") {
-        const message = "Ảnh này đã được chuyển vào thùng rác Google Drive.";
-        setNotice(message);
-        if (!finishing.current) setCameraError(message);
-        removeShot(prepared);
+        removeShot(prepared, { removed: "Ảnh này đã được chuyển vào thùng rác Google Drive." });
         return;
       }
       replaceShot({ ...prepared, stage: "failed", previewUrl: prepared.previewUrl || (prepared.blob ? URL.createObjectURL(prepared.blob) : undefined), error: error instanceof Error ? error.message : "Chưa lưu được ảnh lên Drive." });
@@ -618,20 +640,16 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   }
 
   function retryShot(uploadId: string) {
-    const shot = pendingShots.current.find((item) => item.uploadId === uploadId);
+    const shot = queue.shots.find((item) => item.uploadId === uploadId);
     if (!canCapture || shot?.stage !== "failed") return;
     const retry: PhotoJob = { ...shot, stage: shot.blob ? "uploading" : "preparing", error: undefined };
     replaceShot(retry);
     void processShot(retry);
   }
 
-  function discardFailedShots() {
-    if (pendingShots.current.some((shot) => shot.stage !== "failed")) return;
-    pendingShots.current.forEach((shot) => {
-      if (shot.previewUrl) URL.revokeObjectURL(shot.previewUrl);
-    });
-    updateShots([]);
-    closeIfFinished();
+  function discardFailedShot(uploadId: string) {
+    const shot = queue.shots.find((item) => item.uploadId === uploadId);
+    if (shot?.stage === "failed") removeShot(shot);
   }
 
   function askDeletePhoto(day: ConstructionPhotoDay, photo: ConstructionPhoto) {
@@ -673,6 +691,14 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   const failedShots = shots.filter((shot) => shot.stage === "failed");
   const pendingCount = shots.length - failedShots.length;
   const queueFull = shots.length >= maxOutstandingPhotos;
+  const failedShotList = failedShots.length > 0 && <ul className="construction-photos__failed-shots">
+    {failedShots.map((shot) => <li key={shot.uploadId}>
+      {shot.previewUrl && <img className="construction-photos__failed-preview" src={shot.previewUrl} alt={`Ảnh chụp lúc ${photoTime.format(shot.capturedAt)}`} />}
+      <div><strong>Ảnh lúc {photoTime.format(shot.capturedAt)}</strong><p role="alert">{shot.error}</p></div>
+      <button type="button" className="construction-photos__secondary" disabled={!canCapture} onClick={() => retryShot(shot.uploadId)}>Thử lưu lại</button>
+      <button type="button" className="construction-photos__secondary" onClick={() => discardFailedShot(shot.uploadId)}>Bỏ ảnh</button>
+    </li>)}
+  </ul>;
 
   return <section className="construction-photos" aria-label="Ảnh thi công">
     <header className="construction-photos__header">
@@ -687,6 +713,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
       </div>
     </header>
     {notice && <p className="construction-photos__status" role="status">{notice}</p>}
+    {phase === "closed" && failedShotList}
     <div id={albumId} hidden={!albumOpen}>
       {listError && <p className="construction-photos__status construction-photos__error" role="alert">{listError}{gallery && " Đang hiển thị danh sách đã lưu."}</p>}
       {loading && !gallery && <p className="construction-photos__empty" role="status">Đang tải thư mục ảnh…</p>}
@@ -707,12 +734,11 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
             {day.folderUrl && <a className="construction-photos__drive" href={day.folderUrl} target="_blank" rel="noreferrer">Mở thư mục trên Drive ↗</a>}
             <ul className="construction-photos__grid">
               {day.photos.map((photo) => <li key={photo.id}>
-                <a href={photo.viewUrl || photo.downloadUrl} target="_blank" rel="noreferrer" title={photo.name}>
+                <a href={photo.viewUrl || photo.downloadUrl} target="_blank" rel="noreferrer" aria-label={photo.name}>
                   <span className="construction-photos__thumbnail">
                     <CameraIcon />
                     {photo.thumbnailUrl && <img src={photo.thumbnailUrl} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(event) => { event.currentTarget.hidden = true; }} />}
                   </span>
-                  <span className="construction-photos__filename">{photo.name}</span>
                 </a>
                 {deletePhoto && <button type="button" className="construction-photos__photo-delete" aria-label={`Xóa ảnh ${photo.name}`} onClick={() => askDeletePhoto(day, photo)}>Xóa</button>}
               </li>)}
@@ -724,7 +750,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     <dialog ref={deleteDialog} className="construction-photos__dialog construction-photos__delete-dialog" aria-labelledby={deleteTitleId} aria-describedby={deleteDescriptionId}
       onCancel={(event) => { event.preventDefault(); closeDeleteDialog(); }}>
       <header className="construction-photos__dialog-heading"><h3 id={deleteTitleId}>Xóa ảnh thi công?</h3></header>
-      <p id={deleteDescriptionId}>Chuyển <strong>{toDelete?.photo.name}</strong> vào thùng rác Google Drive.</p>
+      <p id={deleteDescriptionId}>Chuyển ảnh đã chọn vào thùng rác Google Drive.</p>
       {deleteError && <p className="construction-photos__status construction-photos__error" role="alert">{deleteError}</p>}
       <div className="construction-photos__dialog-actions">
         <button type="button" className="construction-photos__secondary" disabled={deleting} onClick={closeDeleteDialog}>Hủy</button>
@@ -733,8 +759,8 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     </dialog>
     <dialog ref={dialog} className={`construction-photos__dialog${mobile ? " construction-photos__dialog--mobile" : ""}`} aria-labelledby={cameraTitleId} onCancel={(event) => { event.preventDefault(); closeCamera(); }}>
       <header className="construction-photos__dialog-heading">
-        <h3 id={cameraTitleId}>{phase === "finishing" ? "Ảnh vừa chụp" : "Chụp ảnh thi công"}</h3>
-        {phase !== "finishing" && <button type="button" aria-label="Đóng camera" onClick={closeCamera}>×</button>}
+        <h3 id={cameraTitleId}>Chụp ảnh thi công</h3>
+        <button type="button" aria-label="Đóng camera" onClick={closeCamera}>×</button>
       </header>
       <video ref={video} className="construction-photos__camera" hidden={phase !== "starting" && phase !== "live"} muted autoPlay playsInline
         onCanPlay={(event) => setVideoReady(Boolean(event.currentTarget.videoWidth))} />
@@ -746,14 +772,8 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
         <a className="construction-photos__source" href={weatherAttribution} target="_blank" rel="noreferrer">Thời tiết NOAA</a>
       </div>}
       {cameraError && <p className="construction-photos__status construction-photos__error" role="alert">{cameraError}</p>}
-      {queueFull && phase !== "finishing" && <p className="construction-photos__status" role="status">Đã đủ ảnh chờ lưu. Chờ ảnh tải lên hoặc thử lưu lại ảnh lỗi để chụp tiếp.</p>}
-      {failedShots.length > 0 && <ul className="construction-photos__failed-shots">
-        {failedShots.map((shot) => <li key={shot.uploadId}>
-          {shot.previewUrl && <img className="construction-photos__failed-preview" src={shot.previewUrl} alt={`Ảnh chụp lúc ${photoTime.format(shot.capturedAt)}`} />}
-          <div><strong>Ảnh lúc {photoTime.format(shot.capturedAt)}</strong><p role="alert">{shot.error}</p></div>
-          <button type="button" className="construction-photos__secondary" disabled={!canCapture} onClick={() => retryShot(shot.uploadId)}>Thử lưu lại</button>
-        </li>)}
-      </ul>}
+      {queueFull && <p className="construction-photos__status" role="status">Đã đủ ảnh chờ lưu. Chờ ảnh tải lên hoặc thử lưu lại ảnh lỗi để chụp tiếp.</p>}
+      {phase !== "closed" && failedShotList}
       <div className="construction-photos__dialog-actions">
         {phase === "live" && <button type="button" className="construction-photos__primary construction-photos__shutter" disabled={!videoReady || queueFull} onClick={takePhoto}>
           <CameraIcon /> Chụp
@@ -765,10 +785,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
             nativeCamera.current?.click();
             void requestPosition();
           }}>Mở camera của thiết bị</button>}
-        </>}
-        {phase === "finishing" && <>
-          {pendingCount === 0 && failedShots.length > 0 && <button type="button" className="construction-photos__secondary" onClick={discardFailedShots}>Bỏ ảnh chưa lưu</button>}
-          <button type="button" className="construction-photos__primary" disabled={!canCapture} onClick={() => void startCamera()}>Chụp tiếp</button>
         </>}
       </div>
       <input ref={nativeCamera} type="file" accept="image/*" capture="environment" hidden onChange={readNativeCapture} />
