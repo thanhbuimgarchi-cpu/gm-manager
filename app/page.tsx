@@ -2149,7 +2149,7 @@ export default function Home() {
   const startupChangeInFlight = useRef(false);
   const startupSettingsRevision = useRef(0);
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
-  const [mobileDownloadsOpen, setMobileDownloadsOpen] = useState(false);
+  const [mobileDownloadPlatform, setMobileDownloadPlatform] = useState<"ios" | "android" | "other" | null>(null);
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
@@ -2297,7 +2297,7 @@ export default function Home() {
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
-  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : appearanceSettingsOpen ? "appearance" : loginOpen ? "login" : mobileInstallHelp ? "install" : mobileDownloadsOpen ? "mobile-downloads" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : appearanceSettingsOpen ? "appearance" : loginOpen ? "login" : mobileInstallHelp ? "install" : mobileDownloadPlatform ? "mobile-downloads" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
     if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
@@ -2308,7 +2308,7 @@ export default function Home() {
     else if (appearanceSettingsOpen) setAppearanceSettingsOpen(false);
     else if (loginOpen) setLoginOpen(false);
     else if (mobileInstallHelp) setMobileInstallHelp(null);
-    else if (mobileDownloadsOpen) setMobileDownloadsOpen(false);
+    else if (mobileDownloadPlatform) setMobileDownloadPlatform(null);
     else if (notificationSetupOpen) dismissMobileNotificationSetup();
     else if (pendingWorkNoteCompletionId) setPendingWorkNoteCompletionId(null);
     else if (pendingDesignTaskCompletion) setPendingDesignTaskCompletion(null);
@@ -3258,7 +3258,7 @@ export default function Home() {
   );
   const renderOverviewActions = () => <>
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
-    <button type="button" className="pwa-action" aria-haspopup="dialog" onClick={() => setMobileDownloadsOpen(true)}>⇩ Tải bản cài</button>
+    <button type="button" className="pwa-action" aria-haspopup="dialog" onClick={() => setMobileDownloadPlatform(isAppleMobileDevice() ? "ios" : /android/i.test(navigator.userAgent) ? "android" : "other")}>⇩ Tải bản cài</button>
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     {renderDevicePermissionsAction()}
     {renderWindowsStartupAction()}
@@ -6619,16 +6619,17 @@ export default function Home() {
         </div>
       )}
 
-      {mobileDownloadsOpen && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileDownloadsOpen(false)}>
+      {mobileDownloadPlatform && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileDownloadPlatform(null)}>
           <section className="security-dialog mobile-download-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-download-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="dialog-close" onClick={() => setMobileDownloadsOpen(false)} aria-label="Đóng">×</button>
+            <button type="button" className="dialog-close" onClick={() => setMobileDownloadPlatform(null)} aria-label="Đóng">×</button>
             <h2 id="mobile-download-title">Tải bản cài điện thoại</h2>
             <div className="mobile-download-links">
-              <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-Android-1.0.0.apk`}>Tải APK Android</a>
-              <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-iPhone-unsigned.ipa`}>Tải IPA iPhone</a>
+              {mobileDownloadPlatform === "ios" && <button type="button" className="pwa-action" onClick={() => { setMobileDownloadPlatform(null); setMobileInstallHelp("ios"); }}>Thêm GM Manager vào Màn hình chính</button>}
+              {mobileDownloadPlatform !== "ios" && <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-Android-1.0.0.apk`}>Tải APK cho Android 7 trở lên</a>}
+              {mobileDownloadPlatform !== "android" && <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-iPhone-unsigned.ipa`}>Tải IPA cho iPhone / iPad</a>}
             </div>
-            <p>Android là bản cài thử. File IPA cần ký bằng Apple Account trước khi cài lên iPhone.</p>
+            {mobileDownloadPlatform === "android" ? <p>Mở trang bằng Chrome rồi tải APK. Khi tải xong, vào <b>Tệp tải xuống</b> trong Chrome và mở file. Nếu Android hỏi, chọn <b>Cho phép từ nguồn này</b>.</p> : <p>File IPA cần ký bằng tài khoản Apple trước khi cài lên iPhone hoặc iPad.</p>}
           </section>
         </div>
       )}
