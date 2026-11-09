@@ -98,6 +98,95 @@ const notificationAction = () => workspaceHeader.getByRole('button', { name: /B�
 const settingsAction = page.getByRole('button', { name: /Thiết lập$/ });
 const openPersonnel = () => page.getByRole('button', { name: 'Nhân lực', exact: true }).click();
 
+const waitForTheme = (theme) => page.waitForFunction((theme) => document.documentElement.dataset.theme === theme, theme);
+
+function workspacePalette() {
+  return page.evaluate(() => {
+    const header = document.querySelector('.workspace-header');
+    const logo = header.querySelector('.brand__mark img');
+    const name = header.querySelector('.brand__wordmark');
+    const title = document.querySelector('.workspace-overview h1');
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    const rgba = (color) => {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      return [...context.getImageData(0, 0, 1, 1).data];
+    };
+    const background = (element) => {
+      const layers = [];
+      for (let node = element; node; node = node.parentElement) {
+        const color = rgba(getComputedStyle(node).backgroundColor);
+        if (color[3]) layers.unshift(color);
+        if (color[3] === 255) break;
+      }
+      return layers.reduce((below, [r, g, b, a]) => [r, g, b].map((channel, index) => (channel * a + below[index] * (255 - a)) / 255), [255, 255, 255]);
+    };
+    return {
+      header: background(header),
+      name: [rgba(getComputedStyle(name).color), background(name)],
+      title: [rgba(getComputedStyle(title).color), background(title)],
+      logoStyle: `${getComputedStyle(logo).filter} ${getComputedStyle(logo.parentElement).filter} ${logo.className} ${logo.currentSrc}`,
+    };
+  });
+}
+
+function luminance(color) {
+  const [r, g, b] = color.slice(0, 3).map((channel) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function assertContrast([foreground, background], name) {
+  const colors = [luminance(foreground), luminance(background)];
+  const ratio = (Math.max(...colors) + 0.05) / (Math.min(...colors) + 0.05);
+  assert.ok(ratio >= 4.5, `${name} remains readable at ${ratio.toFixed(2)}:1`);
+}
+
+async function assertThemeToggle() {
+  const settings = page.locator('.drive-config-dialog');
+  const toggle = settings.getByRole('checkbox', { name: 'Chế độ tối', exact: true });
+  const close = settings.getByRole('button', { name: 'Đóng', exact: true });
+  const whiteLogo = /invert\((?:1(?:\.0+)?|100%)\)|white/i;
+  await waitForTheme('light');
+  const light = await workspacePalette();
+  assert.ok(light.header.every((channel) => channel >= 249), `light header stays white (${light.header})`);
+  assert.doesNotMatch(light.logoStyle, whiteLogo, 'the light theme keeps the standard logo');
+  assertContrast(light.name, 'Light header name');
+  assertContrast(light.title, 'Light overview heading');
+
+  await settingsAction.click();
+  assert.equal(await toggle.isChecked(), false);
+  await toggle.check();
+  await waitForTheme('dark');
+  await close.click();
+  const dark = await workspacePalette();
+  assert.ok(luminance(dark.header) < 0.1, `dark header uses a dark surface (${dark.header})`);
+  assert.match(dark.logoStyle, whiteLogo, 'the dark theme styles the logo white');
+  assertContrast(dark.name, 'Dark header name');
+  assertContrast(dark.title, 'Dark overview heading');
+
+  await page.reload();
+  await waitForTheme('dark');
+  await settingsAction.waitFor();
+  const originalViewport = page.viewportSize();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settingsAction.click();
+  assert.equal(await toggle.isChecked(), true, 'the settings checkbox remembers dark mode after reload');
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'dark settings do not overflow at mobile width');
+  await toggle.uncheck();
+  await waitForTheme('light');
+  await close.click();
+  await page.setViewportSize(originalViewport);
+  await page.reload();
+  await waitForTheme('light');
+  await page.getByRole('heading', { name: 'Tổng quan dự án' }).waitFor();
+}
+
 async function backButtonPosition(width) {
   await overviewBack.waitFor();
   assert.equal(await workspaceHeader.getByRole('button', { name: '← Tổng quan', exact: true }).count(), 1);
@@ -142,7 +231,14 @@ async function assertRestrictedCustomerActions(accountLabel) {
   const manager = accountLabel === 'manager';
   await page.locator('.overview-metrics').waitFor();
   assert.equal(await page.getByRole('button',{name:'Thêm khách hàng',exact:true}).count(),0);
-  assert.equal(await page.getByRole('button',{name:/Thiết lập/}).count(),0);
+  if (accountLabel === 'logged out') assert.equal(await settingsAction.count(),0);
+  else {
+    await settingsAction.click();
+    const settings = page.getByRole('dialog',{name:'Thiết lập',exact:true});
+    await settings.getByRole('checkbox',{name:'Chế độ tối',exact:true}).waitFor();
+    assert.equal(await settings.locator('.pancake-config, input:not([type="checkbox"]), .script-link').count(),0);
+    await settings.getByRole('button',{name:'Đóng',exact:true}).click();
+  }
   const row=page.locator('.customer-result-row').filter({hasText:'DV-75'});
   const menu=row.getByRole('button',{name:/Tùy chọn khách hàng/});
   if(manager){await menu.click();assert.equal(await page.getByRole('menuitem',{name:'Delete',exact:true}).count(),0);assert.ok(await page.getByRole('menuitem',{name:'Rename',exact:true}).isVisible());await menu.click();}
@@ -164,6 +260,7 @@ assert.equal(await workspaceWordmark.innerText(),'Admin','the signed-in built-in
 assert.ok(await settingsAction.isVisible(),'admin can open settings from the overview');
 assert.ok(await accountAction().isVisible(),'account switching stays available on the overview');
 assert.ok(await notificationAction().isVisible(),'notifications can still be enabled on the overview');
+await assertThemeToggle();
 const groupedNotes=page.getByLabel('Tổng hợp ghi chú').first().locator('.sidebar-customer-group__trigger').first();
 assert.equal(await groupedNotes.getAttribute('aria-expanded'),'false');
 await groupedNotes.click();
@@ -393,6 +490,17 @@ await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
 await page.waitForFunction(()=>!document.querySelector('.login-dialog'));
 assert.equal(await page.evaluate(()=>localStorage.getItem('gm-manager-personnel-session-email')),'anh@example.com');
 assert.equal(await workspaceWordmark.innerText(),'Nguyễn Minh Anh','the workspace header follows the active employee after an account switch');
+await settingsAction.click();
+const appearance=page.getByRole('dialog',{name:'Thiết lập',exact:true});
+const employeeThemeToggle=appearance.getByRole('checkbox',{name:'Chế độ tối',exact:true});
+await employeeThemeToggle.waitFor();
+assert.equal(await page.locator('.drive-config-dialog').count(),0,'appearance does not open admin connection settings');
+assert.equal(await appearance.getByRole('textbox').count(),0,'employee appearance has no connection fields');
+await employeeThemeToggle.check();
+await waitForTheme('dark');
+await employeeThemeToggle.uncheck();
+await waitForTheme('light');
+await appearance.getByRole('button',{name:'Đóng',exact:true}).click();
 const notificationCalls=await page.evaluate(()=>window.qaNotificationCalls);
 await page.getByRole('button',{name:/Bật thông báo|Thông báo đã bật/}).click();
 await page.getByRole('button',{name:/Thông báo đã bật/}).waitFor();
@@ -463,5 +571,5 @@ await page.evaluate(()=>{localStorage.removeItem('gm-manager-personnel-session-e
 await page.reload();
 await assertRestrictedCustomerActions('logged out');
 assert.deepEqual(errors,[],'no browser runtime errors');
-console.log(JSON.stringify({passed:true,errors,mobile,projectMobile,desktopCustomerRowHeight,desktopPersonnelRowHeight,desktopProjectBack,mobileLayouts,screenshots:'outputs/interface-qa'}));
+console.log(JSON.stringify({passed:true,errors,mobile,projectMobile,desktopCustomerRowHeight,desktopPersonnelRowHeight,desktopProjectBack,mobileLayouts,adminThemeToggle:true,employeeAppearanceOnly:true,screenshots:'outputs/interface-qa'}));
 await browser.close();

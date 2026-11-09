@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("gmDesktop", {
   isDesktop: true,
   platform: process.platform,
   notificationSupport: () => ipcRenderer.invoke("gmcrm:notification-support"),
+  setColorTheme: (theme) => ipcRenderer.invoke("gmcrm:set-color-theme", theme),
   getAppInfo: () => ipcRenderer.invoke("gmcrm:get-app-info"),
   checkForUpdates: () => ipcRenderer.invoke("gmcrm:check-for-updates"),
   downloadUpdate: () => ipcRenderer.invoke("gmcrm:download-update"),

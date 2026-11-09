@@ -13,7 +13,8 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  if (event.request.method !== "GET") return;
+  // Let the browser fetch media byte ranges directly. Cache.put rejects 206 responses.
+  if (event.request.method !== "GET" || event.request.headers.has("range")) return;
   // GitHub Pages serves HTML and the service worker with a short HTTP cache.
   // A navigation must nevertheless obtain the newest app shell so an installed
   // phone/desktop app cannot remain on an older note-sync implementation.

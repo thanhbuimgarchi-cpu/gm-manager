@@ -50,6 +50,8 @@ function fixture(options = {}) {
       windows.push(this);
     }
     loadURL(url) { this.url = url; }
+    setBackgroundColor(color) { this.backgroundColor = color; }
+    setAccentColor(color) { this.accentColor = color; }
     isDestroyed() { return this.destroyed; }
     isMinimized() { return this.minimized; }
     isVisible() { return this.visible; }
@@ -221,7 +223,8 @@ test("tray startup changes and focus reconciliation publish the actual state to 
 
 async function mainFixture(options = {}) {
   const f = fixture(options), handlers = new Map();
-  const electron = { app: f.app, BrowserWindow: f.Window, Tray: f.Tray, Menu: f.Menu, nativeImage: f.nativeImage,
+  const nativeTheme = Object.assign(new EventEmitter(), { themeSource: "system", inForcedColorsMode: false });
+  const electron = { app: f.app, BrowserWindow: f.Window, Tray: f.Tray, Menu: f.Menu, nativeImage: f.nativeImage, nativeTheme,
     Notification: { isSupported: () => false }, ipcMain: { handle: (channel, callback) => handlers.set(channel, callback) },
     shell: { openExternal() {}, openPath: async () => "" }, session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} } },
     dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showMessageBox: async () => {} },
@@ -231,7 +234,7 @@ async function mainFixture(options = {}) {
     __dirname: path.resolve("desktop"), process: { platform: options.platform || "win32", execPath: exePath, argv: options.argv || [exePath], resourcesPath: "C:\\Synthetic-GM-Resources", defaultApp: false }, URL, setTimeout, clearTimeout,
   });
   await new Promise((resolve) => setImmediate(resolve));
-  return { ...f, handlers };
+  return { ...f, handlers, nativeTheme };
 }
 
 test("native startup IPC rejects foreign frames and requires a strict boolean", async () => {
@@ -261,12 +264,39 @@ test("native background launch stays hidden, normal second-instance foregrounds 
   assert.equal(duplicate.windows.length, 0); assert.equal(duplicate.trays.length, 0); assert.equal(duplicate.handlers.size, 0);
 });
 
+test("theme IPC applies both palettes to the Windows window and respects system high contrast", async () => {
+  const f = await mainFixture();
+  const window = f.windows[0], setTheme = f.handlers.get("gmcrm:set-color-theme");
+  const trusted = { senderFrame: { url: APP_URL } };
+  assert.equal(f.nativeTheme.themeSource, "light");
+  assert.equal(window.configuration.backgroundColor, "#ffffff");
+  assert.equal(window.accentColor, "#ffffff");
+  assert.equal(setTheme({ senderFrame: { url: APP_URL, parent: {} } }, "dark"), false);
+  assert.equal(setTheme({ senderFrame: { url: "https://example.org/" } }, "dark"), false);
+  assert.equal(setTheme(trusted, "system"), false);
+  assert.equal(f.nativeTheme.themeSource, "light");
+  assert.equal(setTheme(trusted, "dark"), true);
+  assert.equal(f.nativeTheme.themeSource, "dark");
+  assert.equal(window.backgroundColor, "#1d222b");
+  assert.equal(window.accentColor, "#292a2d");
+  f.nativeTheme.inForcedColorsMode = true;
+  f.nativeTheme.emit("updated");
+  assert.equal(window.accentColor, null);
+  f.nativeTheme.inForcedColorsMode = false;
+  assert.equal(setTheme(trusted, "light"), true);
+  assert.equal(f.nativeTheme.themeSource, "light");
+  assert.equal(window.backgroundColor, "#ffffff");
+  assert.equal(window.accentColor, "#ffffff");
+});
+
 test("the preload exposes a narrow startup API and unsubscribes tray change listeners", async () => {
   const ipc = new EventEmitter(), calls = []; let bridge;
   ipc.invoke = (...args) => { calls.push(args); return Promise.resolve({ supported: true, canChange: true, openAtLogin: true }); };
   vm.runInNewContext(await readFile(new URL("../desktop/preload.cjs", import.meta.url), "utf8"), { require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { bridge = value; } }, ipcRenderer: ipc }), process: { platform: "win32" } });
   await bridge.getStartupSettings(); await bridge.setStartupSettings({ openAtLogin: false });
   assert.deepEqual(calls.map((value) => value[0]), ["gmcrm:get-startup-settings", "gmcrm:set-startup-settings"]);
+  await bridge.setColorTheme("dark");
+  assert.deepEqual(calls.at(-1), ["gmcrm:set-color-theme", "dark"]);
   const changes = [], unsubscribe = bridge.onStartupChanged((value) => changes.push(plain(value)));
   ipc.emit("gmcrm:startup-changed", { sender: "not-exposed" }, { supported: true, canChange: true, openAtLogin: true, injected: "not-exposed" });
   assert.deepEqual(changes, [{ supported: true, canChange: true, openAtLogin: true }]);

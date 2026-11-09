@@ -75,7 +75,11 @@ try {
   const { context, page, button } = await fixture();
   await button.getByText('Khởi động cùng Windows', { exact: false }).waitFor();
   assert.equal(await button.getAttribute('aria-pressed'), 'false');
-  assert.equal(await page.getByRole('button', { name: '⚙ Thiết lập', exact: true }).count(), 0, 'the per-device control does not depend on admin settings');
+  await page.getByRole('button', { name: '⚙ Thiết lập', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: 'Thiết lập', exact: true });
+  await settings.getByRole('checkbox', { name: 'Chế độ tối', exact: true }).waitFor();
+  assert.equal(await settings.getByRole('button', { name: /Khởi động cùng Windows/ }).count(), 0, 'startup stays in the PC toolbar');
+  await settings.getByRole('button', { name: 'Đóng', exact: true }).click();
   assert.equal(await page.evaluate(() => qaStartup.setCalls.length), 0, 'reading startup state never enables it');
 
   await page.evaluate(() => { qaStartup.holdWrite = true; });

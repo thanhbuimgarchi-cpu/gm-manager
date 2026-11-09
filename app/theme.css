@@ -1,0 +1,215 @@
+.add-dialog .appearance-theme-control,
+.security-dialog .appearance-theme-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 46px;
+  margin: 0 0 14px;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.appearance-theme-control input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 20px;
+  min-height: 20px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ink: #eef2f8;
+  --cream: #151922;
+  --paper: #1d222b;
+  --gm-header: #292a2d;
+  --line: #3b4555;
+  --gm-muted: #bbc6d6;
+  --gm-subtle: #a7b4c8;
+  --gm-shadow: 0 3px 16px #0003;
+  --gm-raised: #262d38;
+  --gm-field: #191e27;
+  --gm-hover: #303a49;
+  --gm-link: #a9ccff;
+  --gm-red: #ffabb8;
+  --gm-red-soft: #412831;
+  --gm-green: #a1e3ba;
+  --gm-green-soft: #223d35;
+  --gm-amber: #f4ce92;
+  --gm-amber-soft: #403424;
+  --gm-blue-soft: #273a55;
+}
+
+:root[data-theme="dark"] :is(.brand__mark img, .customer-portal__brand img) {
+  filter: brightness(0) invert(1);
+}
+
+:root[data-theme="dark"] :is(.customer-portal, .workspace, .workflow-page, .design-workspace, .personnel-layout, .personnel-workspace) {
+  background: var(--cream);
+  color: var(--ink);
+}
+
+/* Cards and overlays share the same surface, including panels from the original workspace. */
+:root[data-theme="dark"] :is(
+  .sidebar, .personnel-sidebar, .topbar, .gateway-notes, .overview-metric, .workspace-overview__date,
+  .customer-search, .customer-search-suggestions, .customer-period, .customer-search-results,
+  .customer-result, .personnel-entry, .calendar-bar, .record-detail, .workflow-files,
+  .workflow-customer-search--assigned, .workflow-customer-search__results, .room-suggestions,
+  .personnel-category-detail, .personnel-add-form, .personnel-table-wrap, .personnel-table,
+  .work-notes, .work-note, .customer-messages, .customer-message, .design-progress-view,
+  .design-schedule, .schedule-analysis, .schedule-timeline, .document-library, .three-d-library,
+  .document-day__header, .document-day__content, .document-library__table-wrap, .document-library__table, .three-d-library__folder,
+  .add-dialog, .security-dialog, .project-menu, .personnel-row-menu, .work-note__menu-panel,
+  .workflow-sync-panel, .vietnam-date-picker__calendar, .audio-chunk__transcript,
+  .construction-photos, .construction-photos__dialog, .construction-photos__grid a,
+  .customer-portal__login, .customer-portal__project > header, .customer-portal__progress
+) {
+  background: var(--paper);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] :is(
+  .work-notes__list, .customer-messages__list, .customer-message__body, .work-note--new,
+  .record-detail__footer, .functional-floor, .information-table thead th, .functional-table thead th,
+  .design-progress-table th, .personnel-table th, .document-library__table th, .customer-portal th,
+  .design-progress-view__footer, .design-progress-insights, .design-schedule--disabled, .document-library__days,
+  .workflow-readonly-label, .audio-note, .completion-review__comment, .personnel-permissions,
+  .message-task-lines, .id-preview, .construction-photos__thumbnail, .pancake-config
+) {
+  background: var(--gm-raised);
+  border-color: var(--line);
+  color: var(--gm-muted);
+}
+
+:root[data-theme="dark"] :is(
+  .customer-result-row, .customer-search-suggestions li, .workflow-files__heading, .workflow-file,
+  .workflow-customer-search__results button, .information-table th, .information-table td, .functional-table th,
+  .functional-table td, .design-schedule .design-progress-table th, .design-schedule .design-progress-table td,
+  .personnel-table th, .personnel-table td, .document-day, .document-library__table th, .document-library__table td,
+  .three-d-library__folder li, .audio-chunk, .schedule-timeline footer, .workflow-sync-panel__items article,
+  .customer-portal td, .customer-portal th, .permission-option
+) { border-color: var(--line); }
+
+:root[data-theme="dark"] :is(
+  h1, h2, h3, h4, legend, .workspace-header__project strong, .overview-metric strong,
+  .customer-result__identity b, .customer-entry b, .gateway-notes .sidebar-note b, .sidebar-note b,
+  .sidebar-notes__toggle b, .sidebar-customer-group__identity b, .record-detail__heading h2,
+  .information-table__section th, .design-progress-table td b, .personnel-table td b,
+  .customer-message__header b, .document-day__trigger b, .completion-review__item b,
+  .customer-portal__brand b, .audio-chunk__transcript p
+) { color: var(--ink); }
+
+:root[data-theme="dark"] :is(
+  small, label, .field-code, .sidebar-label, .nav-row__icon, .overview-metric > span,
+  .overview-metric > span .workspace-icon, .customer-directory-heading p, .customer-result__date,
+  .customer-result__arrow, .customer-period > span, .customer-period > span b, .customer-search > .workspace-icon,
+  .customer-search-empty, .customer-search-suggestions p, .record-detail__heading span, .record-detail__zalo-group > span,
+  .workflow-customer-search__results p, .workflow-customer-search__results b, .dynamic-information > p,
+  .record-detail__footer span, .record-detail--inline .record-detail__footer > span:last-child,
+  .work-notes__heading p:not(.eyebrow), .customer-messages__heading p:not(.eyebrow), .work-notes__empty, .customer-messages__empty,
+  .customer-message__body p, .customer-message__body p small, .customer-message__status-actions > span,
+  .information-table td, .functional-table td, .design-progress-table td, .personnel-table td, .design-progress-view__heading span,
+  .design-schedule__heading span, .design-schedule--disabled p:not(.eyebrow), .design-schedule--disabled > span,
+  .schedule-legend, .schedule-analysis ol, .schedule-analysis header > span, .schedule-timeline header p,
+  .schedule-timeline > header > span, .document-library__heading p:last-child, .document-library__empty, .document-library__table td,
+  .three-d-library__heading p, .personnel-workspace__heading > div > p:last-child:not(.eyebrow),
+  .security-dialog > p:not(.eyebrow), .drive-config-dialog__hint, .install-help-dialog ol, .permission-option p,
+  .vietnam-date-picker__days > span, .workflow-sync-panel__items p, .workflow-files__heading span,
+  .workflow-files__empty, .audio-note__meta, .audio-note__empty, .audio-chunk__transcript b,
+  .construction-photos__header p, .construction-photos__status, .construction-photos__empty, .customer-portal__login > p
+) { color: var(--gm-muted); }
+
+:root[data-theme="dark"] :is(input:not([type="checkbox"], [type="radio"], [type="file"]), textarea, select) {
+  background-color: var(--gm-field);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .customer-search input { background: transparent; }
+:root[data-theme="dark"] :is(input, textarea)::placeholder { color: var(--gm-subtle); }
+:root[data-theme="dark"] :is(input[type="checkbox"], input[type="radio"]) { accent-color: #dd8191; }
+:root[data-theme="dark"] .workflow-edit-scope:disabled :is(input, textarea, select) { color: var(--gm-muted); -webkit-text-fill-color: var(--gm-muted); }
+:root[data-theme="dark"] :is(button, a, input, select, textarea, summary):focus-visible { outline-color: var(--gm-link); }
+
+:root[data-theme="dark"] :is(
+  .pwa-action, .export-button, .login-google, .document-library__refresh, .document-library__open-file,
+  .document-library__load-day, .document-day__actions button, .design-progress-add-row, .design-progress-content__actions button,
+  .workflow-upload-button, .workflow-files__heading button, .audio-import-button, .audio-delete-button, .audio-resume-button,
+  .search-clear, .line-list-editor__actions button, .floor-cell button, .work-note__more, .work-note__cancel,
+  .work-notes__actions > button, .customer-messages__actions button, .customer-message__status-actions button,
+  .project-menu button, .personnel-row-menu button, .work-note__menu-panel button, .room-suggestions button,
+  .dialog-actions > button:not(.add-button), .workspace-location-field button, .workflow-sync-panel__items button,
+  .completion-review__actions button, .desktop-update-banner .desktop-update-banner__dismiss,
+  .construction-photos__secondary, .construction-photos__dialog-heading button
+) {
+  background: var(--gm-raised);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] :is(
+  .pwa-action, .export-button, .login-google, .customer-result, .personnel-entry, .sidebar-note, .nav-row,
+  .sidebar-customer-group__trigger, .customer-search-suggestions button, .workflow-customer-search__results button,
+  .document-day__trigger, .document-day__actions button, .document-library__refresh, .document-library__open-file,
+  .room-suggestions button, .project-menu button, .personnel-row-menu button, .work-note__menu-panel button,
+  .vietnam-date-picker__calendar button, .vietnam-date-picker__trigger, .construction-photos__days summary,
+  .construction-photos__secondary
+):hover { background: var(--gm-hover); color: var(--ink); }
+
+:root[data-theme="dark"] :is(.add-button, .pwa-action--update) { background: #a52e45; border-color: #cf6679; color: #fff; }
+:root[data-theme="dark"] :is(.add-button, .pwa-action--update):hover:not(:disabled) { background: #bc4158; color: #fff; }
+:root[data-theme="dark"] :is(.work-note__publish, .construction-photos__primary, .completion-review__actions .completion-review__approve) { color: #fff; }
+:root[data-theme="dark"] :is(.nav-row, .dialog-close, .more-button, .customer-result-more, .vietnam-date-picker__trigger, .construction-photos__days summary) { color: var(--gm-muted); }
+:root[data-theme="dark"] :is(.sidebar, .personnel-sidebar) .nav-row:not(.nav-row--active, :hover) { background: transparent; }
+:root[data-theme="dark"] .personnel-table td::before { color: var(--gm-subtle); }
+:root[data-theme="dark"] :is(.nav-row--active, .nav-row--active:hover, .customer-context--back, .personnel-back, .work-note__accept, .customer-result__folder) {
+  background: var(--gm-red-soft);
+  border-color: #744a55;
+  color: var(--gm-red);
+}
+:root[data-theme="dark"] :is(.nav-row--active .nav-row__icon, .project-menu__delete, .personnel-row-menu__delete, .work-note__menu-delete, .login-dialog__links button, .customer-portal__error, .workflow-sync-panel__items [role="alert"]) { color: var(--gm-red); }
+:root[data-theme="dark"] :is(.pwa-action--notifications-enabled, .customer-link--topbar, .customer-message--resolved .customer-message__state, .customer-message--resolved .customer-message__status-actions .is-selected) {
+  background: var(--gm-green-soft);
+  border-color: #4b775f;
+  color: var(--gm-green);
+}
+:root[data-theme="dark"] :is(.drive-status, .design-progress-view__status, .work-notes__actions > span, .permission-option small.is-granted) { color: var(--gm-green); }
+:root[data-theme="dark"] :is(.document-day--expanded .document-day__trigger, .document-day__trigger em, .personnel-entry__icon, .workflow-file__icon, .workflow-sync-panel > summary b) { background: var(--gm-raised); color: var(--gm-muted); }
+:root[data-theme="dark"] :is(.document-library__table a, .three-d-library__folder li a, .three-d-library__open, .script-link, .construction-photos__drive, .construction-photos__source) { color: var(--gm-link); }
+:root[data-theme="dark"] :is(.document-library__table a, .three-d-library__folder li a):hover { color: var(--ink); }
+:root[data-theme="dark"] :is(.construction-photos__album svg, .construction-photos__album span, .construction-photos__folder-icon, .customer-message__body p b) { color: var(--gm-red); }
+:root[data-theme="dark"] :is(.work-note__message-context, .work-note-pending, .message-task-line.is-selected, .customer-message--processing .customer-message__state, .customer-message--processing .customer-message__status-actions .is-selected) { background: var(--gm-blue-soft); border-color: #52719b; color: var(--gm-link); }
+:root[data-theme="dark"] :is(.work-note__message-context b, .work-note-pending small) { color: var(--gm-link); }
+:root[data-theme="dark"] :is(.completion-review__pending, .workflow-item-status--warning, .document-day__actions .document-day__lock--locked) { color: var(--gm-amber); }
+:root[data-theme="dark"] :is(.workflow-item-status button, .workflow-archive-retry, .document-day__actions .document-day__lock--locked) { background: var(--gm-amber-soft); border-color: #785b36; color: var(--gm-amber); }
+:root[data-theme="dark"] :is(.desktop-update-banner, .construction-photos__error, .construction-photos__failed-shots li, .customer-message--alert .customer-message__state, .audio-chunk__summary) { background: var(--gm-red-soft); border-color: #744a55; color: var(--gm-red); }
+:root[data-theme="dark"] :is(.desktop-update-banner p, .audio-chunk__summary ul, .work-note-composer > p, .document-day__actions .document-day__delete:hover:not(:disabled)) { color: var(--gm-red); }
+:root[data-theme="dark"] .message-task-line { background-color: var(--paper); color: var(--gm-muted) !important; }
+:root[data-theme="dark"] .message-task-line.is-selected { background-color: var(--gm-blue-soft); }
+:root[data-theme="dark"] .message-task-line b { color: var(--gm-red); }
+:root[data-theme="dark"] .vietnam-date-picker__calendar button[aria-pressed="true"] { background: #385b93; color: #fff; }
+
+:root[data-theme="dark"] .work-note__status--black { color: var(--gm-subtle); }
+:root[data-theme="dark"] .sidebar-notes__dot--black { background-color: var(--gm-subtle); }
+:root[data-theme="dark"] .work-note__status--red { color: #ff8c8c; }
+:root[data-theme="dark"] .work-note__status--orange { color: #efb472; }
+:root[data-theme="dark"] .work-note__status--green { color: #8cdfa6; }
+:root[data-theme="dark"] .work-note__status--purple { color: #c6a2ff; }
+:root[data-theme="dark"] :is(.schedule-timeline__vertical-grid, .schedule-timeline__horizontal-grid, .schedule-timeline__axis) { stroke: var(--line); }
+:root[data-theme="dark"] :is(.schedule-timeline__tick, .schedule-timeline__work-label, .schedule-timeline__axis-title) { fill: var(--gm-muted); }
+
+/* Keep the alert signals visible without flashing a light surface. */
+:root[data-theme="dark"] :is(.work-note--assignment-pending, .sidebar-note--assignment-pending, .customer-message--alert) {
+  animation-name: gm-dark-alert;
+}
+:root[data-theme="dark"] .customer-message--processing { animation-name: gm-dark-processing; }
+@keyframes gm-dark-alert { 50% { background-color: #422a34; border-color: #bb6b7c; } }
+@keyframes gm-dark-processing { 50% { background-color: #273a55; border-color: #6a90bf; } }

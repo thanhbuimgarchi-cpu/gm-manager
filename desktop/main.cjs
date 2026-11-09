@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog, Tray, Menu, nativeImage } = require("electron");
+const { app, BrowserWindow, Notification, ipcMain, shell, session, dialog, Tray, Menu, nativeImage, nativeTheme } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -11,11 +11,15 @@ const { createUpdatePreparation } = require(path.join(__dirname, "update-prepara
 
 const APP_URL = "https://thanhbuimgarchi-cpu.github.io/gm-manager/";
 const APP_ORIGIN = new URL(APP_URL).origin;
+const DESKTOP_BACKGROUND = { light: "#ffffff", dark: "#1d222b" };
+// Chromium's normal-contrast menu background on Windows.
+const WINDOWS_CAPTION_BACKGROUND = { light: "#ffffff", dark: "#292a2d" };
 // The shared Drive used by the installed PC shortcut is mounted on I:. Keep
 // the older G: locations as fallbacks for machines that still use that mount.
 const WINDOWS_DRIVE_ROOTS = ["I:\\Shared drives", "I:\\My Drive", "G:\\Shared drives", "G:\\My Drive"];
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
+let colorTheme = "light";
 let workspaceFolder;
 let pendingForegroundLaunch = false;
 const pendingProtocolUrls = [];
@@ -97,6 +101,12 @@ async function selectWorkspaceFolder() {
   return validateWorkspaceFolder({ path: selected.filePaths[0] });
 }
 
+function applyWindowCaptionTheme(window) {
+  if (process.platform !== "win32" || !window || window.isDestroyed()) return;
+  const usesSystemColors = nativeTheme?.shouldUseHighContrastColors || nativeTheme?.inForcedColorsMode;
+  window.setAccentColor?.(usesSystemColors ? null : WINDOWS_CAPTION_BACKGROUND[colorTheme]);
+}
+
 function createWindow({ show = true } = {}) {
   const window = new BrowserWindow({
     width: 1440,
@@ -105,6 +115,7 @@ function createWindow({ show = true } = {}) {
     minHeight: 700,
     title: "GM-CRM",
     icon: APP_ICON,
+    backgroundColor: DESKTOP_BACKGROUND[colorTheme],
     show,
     webPreferences: {
       contextIsolation: true,
@@ -114,6 +125,7 @@ function createWindow({ show = true } = {}) {
       preload: path.join(__dirname, "preload.cjs"),
     },
   });
+  applyWindowCaptionTheme(window);
   window.loadURL(APP_URL);
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
@@ -281,6 +293,10 @@ if (singleInstance) app.on("open-url", (event, target) => {
 
 if (singleInstance) app.whenReady().then(() => {
   app.setAppUserModelId("com.mgarchi.gmcrm");
+  if (nativeTheme) {
+    nativeTheme.themeSource = colorTheme;
+    nativeTheme.on("updated", () => applyWindowCaptionTheme(mainWindow));
+  }
   if (process.defaultApp && process.argv.length >= 2) app.setAsDefaultProtocolClient("gmmanager", process.execPath, [path.resolve(process.argv[1])]);
   else app.setAsDefaultProtocolClient("gmmanager");
   const trustedNotificationRequest = (webContents) => isTrustedUrl(webContents.getURL());
@@ -297,6 +313,17 @@ if (singleInstance) app.whenReady().then(() => {
   const deniedStartupSettings = () => ({ supported: false, canChange: false, openAtLogin: false, ok: false, error: "Nguồn yêu cầu không hợp lệ." });
   ipcMain.handle("gmcrm:get-startup-settings", (event) => trustedStartupIpcSender(event) ? backgroundController.getStartupSettings() : deniedStartupSettings());
   ipcMain.handle("gmcrm:set-startup-settings", (event, payload) => trustedStartupIpcSender(event) ? backgroundController.setStartupSettings(payload) : deniedStartupSettings());
+  ipcMain.handle("gmcrm:set-color-theme", (event, theme) => {
+    if (!trustedStartupIpcSender(event) || (theme !== "light" && theme !== "dark")) return false;
+    if (theme === colorTheme) return true;
+    colorTheme = theme;
+    if (nativeTheme) nativeTheme.themeSource = theme;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setBackgroundColor(DESKTOP_BACKGROUND[theme]);
+      applyWindowCaptionTheme(mainWindow);
+    }
+    return true;
+  });
   const deniedUpdate = () => ({ supported: false, updateAvailable: false, ok: false, error: "Nguồn yêu cầu không hợp lệ." });
   ipcMain.handle("gmcrm:get-app-info", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.getAppInfo() : deniedUpdate());
   ipcMain.handle("gmcrm:check-for-updates", (event) => trustedStartupIpcSender(event) ? desktopUpdateController.checkForUpdates() : deniedUpdate());

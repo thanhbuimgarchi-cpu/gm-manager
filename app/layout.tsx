@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import StartupSplash from "./StartupSplash";
 import "./globals.css";
 import "./pwa.css";
 import "./interface.css";
+import "./theme.css";
 
 export const metadata: Metadata = {
   title: "GM Manager | Quản lý dự án",
@@ -15,7 +17,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="vi">
-      <body>{children}</body>
+      <body><StartupSplash>{children}</StartupSplash></body>
     </html>
   );
 }

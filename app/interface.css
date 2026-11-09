@@ -34,6 +34,35 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .brand__mark { gap: 3px; }
 .brand .brand__version { color: var(--gm-subtle); font-size: 8px; letter-spacing: .2px; }
 
+/* Move each label as a unit and keep its row in place. */
+@media (prefers-reduced-motion: no-preference) {
+  :is(
+    .brand__wordmark, .workspace-overview h1, .customer-directory-heading h2, .workspace-header__project strong,
+    .overview-metric > span, .nav-row > span:nth-child(2), .customer-result__identity,
+    .personnel-entry b, .sidebar-customer-group__identity, .sidebar-notes__toggle b, .sidebar-note b,
+    .activity-toggle > span:nth-child(2), .document-day__trigger b
+  ) {
+    translate: 0 var(--gm-label-lift, 0px);
+    transition: translate 150ms ease-out;
+  }
+
+  :is(.workspace-header .pwa-action, .workspace-header__back, .customer-gateway__add) {
+    translate: 0 var(--gm-label-lift, 0px);
+    transition: translate 150ms ease-out, background-color 140ms, border-color 140ms, color 140ms;
+  }
+
+  .gm-touch-lift { --gm-label-lift: -2px; }
+}
+
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+  :is(
+    .brand__wordmark, .workspace-overview h1, .customer-directory-heading h2, .workspace-header__project strong,
+    .workspace-header .pwa-action:enabled, .workspace-header__back, .customer-gateway__add:enabled,
+    .overview-metric, .nav-row, .customer-result, .personnel-entry,
+    .sidebar-customer-group__trigger, .sidebar-notes__toggle, .sidebar-note, .document-day__trigger
+  ):hover { --gm-label-lift: -2px; }
+}
+
 /* One visual language for the primary and secondary actions. */
 .add-button { min-height: 40px; padding: 9px 16px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; line-height: 1.4; box-shadow: 0 2px 3px #811c2920; }
 .add-button:hover:not(:disabled) { background: #881c2b; border-color: #881c2b; box-shadow: 0 3px 8px #811c2930; }
@@ -54,7 +83,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 /* Overview: a wide directory and a persistent, readable activity rail. */
 .customer-gateway { position: static; z-index: auto; grid-column: 1 / -1; min-width: 0; overflow: visible; background: var(--cream); }
-.customer-gateway__header { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); min-height: var(--workspace-header-height); padding: 8px var(--workspace-gutter); border-bottom-color: var(--line); background: rgb(255 255 255 / 97%); box-shadow: 0 1px 5px #1b2d4910; }
+.customer-gateway__header { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); min-height: var(--workspace-header-height); padding: 8px var(--workspace-gutter); border-bottom-color: var(--line); background: var(--gm-header, var(--paper)); box-shadow: 0 1px 5px #1b2d4910; }
 .customer-gateway__brand { min-width: 0; max-width: 100%; margin: 0; transform: none; }
 .workspace-header { z-index: 40; grid-column: 1 / -1; align-items: center; gap: 0 12px; }
 .workspace-header__back { grid-column: 2; justify-self: start; }

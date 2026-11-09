@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
+import { applyColorTheme, colorThemeStorageKey, readColorTheme, type ColorTheme } from "./color-theme";
 import ConstructionPhotos, { requestConstructionPhotoPosition, type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
@@ -510,6 +511,7 @@ type DesktopNotificationBridge = {
   isWindows: boolean;
   isDesktop?: boolean;
   platform?: string;
+  setColorTheme?: (theme: ColorTheme) => Promise<boolean>;
   showNotification: (payload: { title: string; body: string; url: string }) => Promise<boolean>;
   openDrive?: (payload: { projectId: string; houseId?: string; year: number; month: number }) => Promise<string>;
   openFile?: (payload: { projectId: string; houseId?: string; year: number; month: number; snapshotName?: string; fileName: string }) => Promise<string>;
@@ -2158,6 +2160,8 @@ export default function Home() {
   const [renameHouseId, setRenameHouseId] = useState("");
   const [roomSuggestionFor, setRoomSuggestionFor] = useState<string | null>(null);
   const [driveConfigOpen, setDriveConfigOpen] = useState(false);
+  const [appearanceSettingsOpen, setAppearanceSettingsOpen] = useState(false);
+  const [colorTheme, setColorTheme] = useState<ColorTheme>("light");
   const [driveScriptUrl, setDriveScriptUrl] = useState(defaultDriveSyncConfig.scriptUrl);
   const [driveLinkUrl, setDriveLinkUrl] = useState("");
   const [syncingRecordId, setSyncingRecordId] = useState<string | null>(null);
@@ -2291,7 +2295,7 @@ export default function Home() {
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
-  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : appearanceSettingsOpen ? "appearance" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
     if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
@@ -2299,6 +2303,7 @@ export default function Home() {
     else if (unlinkedCustomerMessageId && loggedInEmployee) setUnlinkedCustomerMessageId("");
     else if (customerMessageTaskDraft) setCustomerMessageTaskDraft(null);
     else if (driveConfigOpen) setDriveConfigOpen(false);
+    else if (appearanceSettingsOpen) setAppearanceSettingsOpen(false);
     else if (loginOpen) setLoginOpen(false);
     else if (mobileInstallHelp) setMobileInstallHelp(null);
     else if (notificationSetupOpen) dismissMobileNotificationSetup();
@@ -2308,6 +2313,38 @@ export default function Home() {
     else if (protectedAction) setProtectedAction(null);
     else if (selectedRecordId) setSelectedRecordId(null);
   };
+  useEffect(() => {
+    const theme = readColorTheme();
+    setColorTheme(theme);
+    applyColorTheme(theme);
+    void desktopBridge()?.setColorTheme?.(theme).catch(() => {});
+  }, []);
+  useEffect(() => {
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let control: Element | null = null;
+    let timer = 0;
+    const clearLift = () => {
+      window.clearTimeout(timer);
+      control?.classList.remove("gm-touch-lift");
+      control = null;
+    };
+    const liftOnTouch = (event: PointerEvent) => {
+      if (event.pointerType !== "touch" || !event.isPrimary || reducedMotion.matches) return;
+      const target = event.target instanceof Element ? event.target.closest("button:not(:disabled), a[href]") : null;
+      if (!target?.closest(".crm-shell")) return;
+      clearLift();
+      control = target;
+      control.classList.add("gm-touch-lift");
+      timer = window.setTimeout(clearLift, 200);
+    };
+    document.addEventListener("pointerdown", liftOnTouch, { passive: true });
+    document.addEventListener("pointercancel", clearLift, { passive: true });
+    return () => {
+      document.removeEventListener("pointerdown", liftOnTouch);
+      document.removeEventListener("pointercancel", clearLift);
+      clearLift();
+    };
+  }, []);
   useEffect(() => {
     if (!dialogKey) return;
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3221,8 +3258,24 @@ export default function Home() {
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     {renderDevicePermissionsAction()}
     {renderWindowsStartupAction()}
-    {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
+    {loggedInEmployee && <button type="button" className="pwa-action" onClick={() => {
+      if (isBuiltInAdminLoggedIn) openDriveSettings();
+      else setAppearanceSettingsOpen(true);
+    }}>⚙ Thiết lập</button>}
   </>;
+
+  const renderColorThemeControl = () => (
+    <label className="appearance-theme-control">
+      <span>Chế độ tối</span>
+      <input type="checkbox" checked={colorTheme === "dark"} onChange={(event) => {
+        const theme = event.target.checked ? "dark" : "light";
+        setColorTheme(theme);
+        applyColorTheme(theme);
+        try { window.localStorage.setItem(colorThemeStorageKey, theme); } catch { /* The current theme still applies. */ }
+        void desktopBridge()?.setColorTheme?.(theme).catch(() => {});
+      }} />
+    </label>
+  );
 
   const prepareForDesktopUpdate = async () => {
     if (!workspaceStorageReady) throw new Error("Dữ liệu đang mở. Hãy chờ một chút rồi cập nhật.");
@@ -6517,7 +6570,9 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setDriveConfigOpen(false)}>
           <form className="add-dialog drive-config-dialog" onSubmit={saveDriveConfig} onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
-            <p className="eyebrow">Google Apps Script</p><h2>Kết nối Drive</h2>
+            <h2>Thiết lập</h2>
+            {renderColorThemeControl()}
+            <p className="eyebrow">Kết nối Drive · Google Apps Script</p>
             <p className="drive-config-dialog__hint">Dán Web app URL. Kết nối Drive được nhớ trên thiết bị này. Token Pancake được lưu trong Script Properties, không lưu trên GitHub hay trình duyệt.</p>
             <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
             <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
@@ -6532,6 +6587,16 @@ export default function Home() {
             </fieldset>}
             <button className="add-button" type="submit">Lưu kết nối</button>
           </form>
+        </div>
+      )}
+
+      {appearanceSettingsOpen && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setAppearanceSettingsOpen(false)}>
+          <section className="security-dialog appearance-dialog" role="dialog" aria-modal="true" aria-labelledby="appearance-settings-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setAppearanceSettingsOpen(false)} aria-label="Đóng">×</button>
+            <h2 id="appearance-settings-title">Thiết lập</h2>
+            {renderColorThemeControl()}
+          </section>
         </div>
       )}
 
