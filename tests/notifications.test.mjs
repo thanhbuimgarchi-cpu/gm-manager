@@ -162,12 +162,12 @@ const ts = require("typescript");
 const parsedFrontend = ts.createSourceFile("page.tsx", frontendSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const frontendDeclarations = new Map();
 const visit = (node) => {
-  if (ts.isVariableDeclaration(node) && ["markNotificationsEnabled", "sendTestNotification"].includes(node.name.getText(parsedFrontend))) frontendDeclarations.set(node.name.getText(parsedFrontend), node.getText(parsedFrontend));
+  if (ts.isVariableDeclaration(node) && ["markNotificationsEnabled", "sendTestNotification", "enableDevicePermissions"].includes(node.name.getText(parsedFrontend))) frontendDeclarations.set(node.name.getText(parsedFrontend), node.getText(parsedFrontend));
   ts.forEachChild(node, visit);
 };
 visit(parsedFrontend);
 const frontendNotificationCode = ts.transpileModule(
-  [...frontendDeclarations.values()].map((declaration) => `const ${declaration};`).join("\n").replaceAll("import.meta.env.BASE_URL", JSON.stringify("/gm-manager/")) + "\nglobalThis.enable = sendTestNotification;",
+  [...frontendDeclarations.values()].map((declaration) => `const ${declaration};`).join("\n").replaceAll("import.meta.env.BASE_URL", JSON.stringify("/gm-manager/")) + "\nglobalThis.enable = enableDevicePermissions;",
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
 ).outputText;
 
@@ -183,8 +183,13 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     navigator: { serviceWorker: { ready: ready || Promise.resolve(registration) } },
     Notification, Error,
     desktopBridge: () => desktop,
-    enablingNotifications: false,
-    setEnablingNotifications: (value) => { context.enablingNotifications = value; state.busy = value; },
+    mobileDevice: ios,
+    notificationsEnabled: false,
+    photoLocationGranted: false,
+    devicePermissionsBusy: false,
+    devicePermissionsEnabled: false,
+    allowConstructionPhotoLocation: async () => "",
+    setEnablingNotifications: (value) => { state.busy = value; },
     setNotificationsEnabled: (value) => { state.enabled = value; },
     setNotificationPermission: (value) => { state.permission = value; },
     setNotice: (value) => { state.notice = value; },

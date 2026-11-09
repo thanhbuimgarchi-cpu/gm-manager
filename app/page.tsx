@@ -2135,7 +2135,7 @@ export default function Home() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
-  const [showPhotoLocationAction, setShowPhotoLocationAction] = useState(false);
+  const [mobileDevice, setMobileDevice] = useState(false);
   const [photoLocationGranted, setPhotoLocationGranted] = useState(false);
   const [requestingPhotoLocation, setRequestingPhotoLocation] = useState(false);
   const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
@@ -2576,7 +2576,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!isMobileDevice()) return;
-    setShowPhotoLocationAction(true);
+    setMobileDevice(true);
     let active = true;
     let permission: PermissionStatus | undefined;
     const refreshLocationPermission = () => setPhotoLocationGranted(permission?.state === "granted");
@@ -3003,7 +3003,6 @@ export default function Home() {
   };
 
   const sendTestNotification = async () => {
-    if (enablingNotifications) return;
     setEnablingNotifications(true);
     try {
       const desktop = desktopBridge();
@@ -3019,7 +3018,7 @@ export default function Home() {
           try { window.localStorage.setItem(mobileNotificationSetupKey, "pending"); } catch { /* Optional prompt state. */ }
           setNotificationSetupOpen(false);
           setMobileInstallHelp("ios");
-          return;
+          return "Mở GM Manager từ Màn hình chính để bật thông báo trên iPhone.";
         }
         if (!("Notification" in window) || !("serviceWorker" in navigator)) {
           setNotificationPermission("unsupported");
@@ -3054,33 +3053,46 @@ export default function Home() {
         markNotificationsEnabled(true);
       }
       try { if (isMobileDevice()) window.localStorage.setItem(mobileNotificationSetupKey, "complete"); } catch { /* Optional prompt state. */ }
-      setNotice("Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị.");
+      return "";
     } catch (error) {
       markNotificationsEnabled(false);
-      setNotice(error instanceof Error ? error.message : "Không thể bật thông báo trên thiết bị này.");
+      return error instanceof Error ? error.message : "Không thể bật thông báo trên thiết bị này.";
     } finally { setEnablingNotifications(false); }
   };
 
   const allowConstructionPhotoLocation = async () => {
-    if (requestingPhotoLocation) return;
     setRequestingPhotoLocation(true);
     try {
-      // Request directly from the tap; notifications have their own OS prompt.
       const result = await requestConstructionPhotoPosition();
       if (result.status === "ready") {
         setPhotoLocationGranted(true);
-        setNotice("Đã cấp quyền vị trí cho ảnh thi công.");
-      } else if (result.status === "denied") {
-        setPhotoLocationGranted(false);
-        setNotice("Chưa được cấp quyền vị trí. Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt rồi thử lại.");
-      } else {
-        setNotice("Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.");
+        return "";
       }
+      if (result.status === "denied") {
+        setPhotoLocationGranted(false);
+        return "Chưa được cấp quyền vị trí. Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt rồi thử lại.";
+      }
+      return "Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.";
     } catch {
-      setNotice("Không thể lấy vị trí trên thiết bị này.");
+      return "Không thể lấy vị trí trên thiết bị này.";
     } finally {
       setRequestingPhotoLocation(false);
     }
+  };
+
+  const devicePermissionsBusy = enablingNotifications || requestingPhotoLocation;
+  const devicePermissionsEnabled = notificationsEnabled && (!mobileDevice || photoLocationGranted);
+  const enableDevicePermissions = async () => {
+    if (devicePermissionsBusy) return;
+    // Start both requests before awaiting either prompt so they share the tap.
+    const [notificationError, locationError] = await Promise.all([
+      !notificationsEnabled || devicePermissionsEnabled ? sendTestNotification() : "",
+      mobileDevice && !photoLocationGranted ? allowConstructionPhotoLocation() : "",
+    ]);
+    const errors = [notificationError, locationError].filter(Boolean);
+    setNotice(errors.length ? errors.join(" ") : mobileDevice
+      ? "Đã bật thông báo và cấp quyền vị trí."
+      : "Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị.");
   };
 
   const toggleWindowsStartup = async () => {
@@ -3193,16 +3205,20 @@ export default function Home() {
     setLocalWorkspacePath(path);
     setEmployeeLoginError("");
   };
-  const renderPhotoLocationAction = () => showPhotoLocationAction && (
-    <button type="button" className={`pwa-action${photoLocationGranted ? " pwa-action--notifications-enabled" : ""}`} onClick={() => void allowConstructionPhotoLocation()} disabled={requestingPhotoLocation}>
-      {requestingPhotoLocation ? "Đang xin vị trí…" : photoLocationGranted ? "Đã cấp quyền vị trí" : "Cho phép vị trí"}
+  const renderDevicePermissionsAction = (inDialog = false) => (
+    <button type="button" className={inDialog ? "add-button" : `pwa-action${devicePermissionsEnabled ? " pwa-action--notifications-enabled" : ""}`} disabled={devicePermissionsBusy} onClick={() => {
+      if (inDialog) setNotificationSetupOpen(false);
+      void enableDevicePermissions();
+    }}>
+      {devicePermissionsBusy ? "Đang bật…" : mobileDevice
+        ? devicePermissionsEnabled ? "✓ Đã bật thông báo và vị trí" : "◌ Bật thông báo và vị trí"
+        : devicePermissionsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
     </button>
   );
   const renderOverviewActions = () => <>
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
-    <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
-    {renderPhotoLocationAction()}
+    {renderDevicePermissionsAction()}
     {renderWindowsStartupAction()}
     {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
   </>;
@@ -6541,12 +6557,11 @@ export default function Home() {
 
       {notificationSetupOpen && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
-          <section className="security-dialog notification-setup-dialog" role="dialog" aria-label="Bật thông báo" onMouseDown={(event) => event.stopPropagation()}>
+          <section className="security-dialog notification-setup-dialog" role="dialog" aria-modal="true" aria-labelledby="notification-setup-title" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
-            <p className="eyebrow">GM Manager</p><h2>{notificationPermission === "denied" ? "Cho phép thông báo" : "Bật thông báo?"}</h2>
+            <p className="eyebrow">GM Manager</p><h2 id="notification-setup-title">{mobileDevice ? "Thông báo và vị trí" : "Bật thông báo"}</h2>
             <p>{notificationPermission === "unsupported" && isAppleMobileDevice() ? "Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Với iOS 16.0–16.3, bạn vẫn đăng nhập và làm việc được; hãy cập nhật iOS để bật thông báo." : notificationPermission === "denied" && isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo. Sau đó quay lại ứng dụng và nhấn Kiểm tra lại." : "Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Trên iPhone/iPad, hãy mở GM Manager từ Màn hình chính để bật thông báo."}</p>
-            {showPhotoLocationAction && <p>{renderPhotoLocationAction()}</p>}
-            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>{notificationPermission === "denied" ? "Kiểm tra lại" : "Bật thông báo"}</button></div>
+            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button>{renderDevicePermissionsAction(true)}</div>
           </section>
         </div>
       )}

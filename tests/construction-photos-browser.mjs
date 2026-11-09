@@ -118,7 +118,7 @@ async function enterGallery(page) {
   return photos;
 }
 
-async function openWorkspace({ mobile = true, denyCamera = false, manager = false, storageState, controlledLocation = false, distantWeatherRecovery = false } = {}) {
+async function openWorkspace({ mobile = true, denyCamera = false, manager = false, storageState, controlledLocation = false, controlledNotifications = false, distantWeatherRecovery = false } = {}) {
   const context = await browser.newContext({
     ...(mobile ? devices["Pixel 8"] : { viewport: { width: 1280, height: 900 } }),
     serviceWorkers: "block",
@@ -128,13 +128,13 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
     storageState,
   });
   await context.exposeBinding("constructionDispatch", (_source, payload) => dispatch(payload));
-  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin, controlledLocation }) => {
+  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin, controlledLocation, controlledNotifications }) => {
     if (location.origin !== origin) return;
     localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
     localStorage.setItem("gm-manager-personnel-v1", JSON.stringify(personnel));
     localStorage.setItem("gm-manager-personnel-session-email", account);
     localStorage.setItem("gm-manager-workflow-session-v1", JSON.stringify({ account, token, scriptUrl }));
-    window.constructionCameraTest = { calls: 0, tracks: [], lines: [], locationRequests: [], notificationRequests: 0 };
+    window.constructionCameraTest = { calls: 0, tracks: [], lines: [], locationRequests: [], notificationRequests: [] };
     if (controlledLocation) {
       const queryPermission = navigator.permissions.query.bind(navigator.permissions);
       const locationPermission = Object.assign(new EventTarget(), { state: "prompt" });
@@ -159,12 +159,24 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
           activation: navigator.userActivation.isActive,
         });
       };
-      if ("Notification" in window) {
-        Notification.requestPermission = () => {
-          window.constructionCameraTest.notificationRequests++;
-          return Promise.resolve("default");
-        };
-      }
+    }
+    if (controlledNotifications) {
+      let notificationPermission = "default";
+      Object.defineProperty(Notification, "permission", { configurable: true, get: () => notificationPermission });
+      Notification.requestPermission = () => {
+        const probe = window.constructionCameraTest;
+        probe.notificationRequests.push(navigator.userActivation.isActive);
+        return new Promise((resolve) => {
+          probe.grantNotifications = () => {
+            notificationPermission = "granted";
+            resolve(notificationPermission);
+          };
+        });
+      };
+      Object.defineProperty(navigator.serviceWorker, "ready", {
+        configurable: true,
+        value: Promise.resolve({ active: {}, showNotification: async () => {} }),
+      });
     }
     const fillText = CanvasRenderingContext2D.prototype.fillText;
     CanvasRenderingContext2D.prototype.fillText = function (text, ...args) {
@@ -179,7 +191,7 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
       window.constructionCameraTest.tracks.push(...stream.getTracks());
       return stream;
     };
-  }, { account: manager ? managerAccount : account, personnel, years, token: manager ? managerToken : token, scriptUrl, denyCamera, origin, controlledLocation });
+  }, { account: manager ? managerAccount : account, personnel, years, token: manager ? managerToken : token, scriptUrl, denyCamera, origin, controlledLocation, controlledNotifications });
   let contextWeatherRequests = 0;
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
@@ -484,24 +496,31 @@ try {
   assert.deepEqual((await capturedStamps(deniedLocation.page)).slice(-2), ["Thời tiết: Chưa có vị trí để tra", "Địa điểm: Không lấy được vị trí"]);
   await deniedLocation.context.close();
 
-  const overview = await openWorkspace({ controlledLocation: true });
+  const overview = await openWorkspace({ controlledLocation: true, controlledNotifications: true });
   const overviewActions = overview.page.locator(".workspace-header .customer-gateway__actions");
-  const allowLocation = overviewActions.getByRole("button", { name: "Cho phép vị trí", exact: true });
-  const enableNotifications = overviewActions.getByRole("button", { name: /Bật thông báo/ });
-  await allowLocation.waitFor();
-  await enableNotifications.waitFor();
-  assert.equal(await overview.page.evaluate(() => window.constructionCameraTest.locationRequests.length), 0);
-  await allowLocation.tap();
+  const enablePermissions = overviewActions.getByRole("button", { name: /thông báo và vị trí/i });
+  await enablePermissions.waitFor();
+  assert.equal(await enablePermissions.count(), 1);
+  assert.equal(await overviewActions.getByRole("button", { name: /(?:bật thông báo|cho phép vị trí)$/i }).count(), 0);
+  assert.deepEqual(await overview.page.evaluate(() => {
+    const { locationRequests, notificationRequests } = window.constructionCameraTest;
+    return [locationRequests.length, notificationRequests.length];
+  }), [0, 0]);
+  await enablePermissions.tap();
+  await overview.page.waitForFunction(() => {
+    const { locationRequests, notificationRequests } = window.constructionCameraTest;
+    return locationRequests.length === 1 && notificationRequests.length === 1;
+  });
+  await overview.page.evaluate(() => window.constructionCameraTest.grantNotifications());
   await respondToLocation(overview.page, 0, { code: 1 });
-  await allowLocation.tap();
+  await enablePermissions.tap();
   await respondToLocation(overview.page, 1);
-  await overviewActions.getByRole("button", { name: "Đã cấp quyền vị trí", exact: true }).waitFor();
-  await enableNotifications.waitFor();
-  assert.equal(await overview.page.locator("dialog[open]").count(), 0);
+  await overviewActions.getByRole("button", { name: /^(?:✓\s*)?đã bật thông báo và vị trí$/i }).waitFor();
+  assert.equal(await overview.page.getByRole("dialog").count(), 0);
   assert.deepEqual(await overview.page.evaluate(() => {
     const { calls, locationRequests, notificationRequests } = window.constructionCameraTest;
     return { calls, locationActivations: locationRequests.map((request) => request.activation), notificationRequests };
-  }), { calls: 0, locationActivations: [true, true], notificationRequests: 0 });
+  }), { calls: 0, locationActivations: [true, true], notificationRequests: [true] });
   await overview.context.close();
 
   assert.deepEqual(pageErrors, []);
