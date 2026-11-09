@@ -33,10 +33,20 @@ jobs:
       - name: Build the macOS installer
         working-directory: desktop
         run: |
-          npm exec -- install-electron
-          npm exec electron-builder -- --mac --x64 --publish=never --config.electronDist=node_modules/electron/dist
+          electron_version=$(node -p 'require("electron/package.json").version')
+          archive="electron-v${electron_version}-darwin-x64.zip"
+          archive_path="$RUNNER_TEMP/$archive"
+          checksum=$(node -e 'const hash = require("electron/checksums.json")[process.argv[1]]; if (!/^[a-f0-9]{64}$/.test(hash ?? "")) process.exit(1); console.log(hash)' "$archive")
+          asset_id=$(gh api "repos/electron/electron/releases/tags/v${electron_version}" --jq ".assets[] | select(.name == \"$archive\") | .id")
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          curl --fail --location --silent --show-error --retry 3 --connect-timeout 15 --max-time 180 \
+            -H 'Accept: application/octet-stream' -H 'Cache-Control: no-cache' -H "Authorization: Bearer $GH_TOKEN" \
+            -o "$archive_path" "https://api.github.com/repos/electron/electron/releases/assets/$asset_id?gm-build=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf '%s  %s\n' "$checksum" "$archive_path" | shasum -a 256 -c -
+          npm exec electron-builder -- --mac --x64 --publish=never --config.electronDist="$archive_path"
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GH_TOKEN: ${{ github.token }}
       - name: Publish the current macOS installer
         env:
           GH_TOKEN: ${{ github.token }}
