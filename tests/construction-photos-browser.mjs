@@ -138,20 +138,21 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
     if (controlledLocation) {
       const queryPermission = navigator.permissions.query.bind(navigator.permissions);
       const locationPermission = Object.assign(new EventTarget(), { state: "prompt" });
+      const setLocationPermission = (state) => {
+        locationPermission.state = state;
+        locationPermission.dispatchEvent(new Event("change"));
+      };
+      window.constructionCameraTest.setLocationPermission = setLocationPermission;
       navigator.permissions.query = (descriptor) => descriptor.name === "geolocation" ? Promise.resolve(locationPermission) : queryPermission(descriptor);
       navigator.geolocation.getCurrentPosition = (success, error, options) => {
         const { calls, locationRequests } = window.constructionCameraTest;
         locationRequests.push({
           success: (position) => {
-            locationPermission.state = "granted";
-            locationPermission.dispatchEvent(new Event("change"));
+            setLocationPermission("granted");
             success(position);
           },
           error: (failure) => {
-            if (failure.code === 1) {
-              locationPermission.state = "denied";
-              locationPermission.dispatchEvent(new Event("change"));
-            }
+            if (failure.code === 1 && !failure.keepPrompt) setLocationPermission("denied");
             error(failure);
           },
           options,
@@ -244,13 +245,13 @@ async function openLocationCamera(options = {}) {
   return { ...project, camera, shutter };
 }
 
-async function respondToLocation(page, index, { code, accuracy = 10 } = {}) {
+async function respondToLocation(page, index, { code, accuracy = 10, keepPrompt = false } = {}) {
   await page.waitForFunction((index) => window.constructionCameraTest.locationRequests.length > index, index);
-  await page.evaluate(({ index, code, accuracy }) => {
+  await page.evaluate(({ index, code, accuracy, keepPrompt }) => {
     const request = window.constructionCameraTest.locationRequests[index];
-    if (code) request.error({ code });
+    if (code) request.error({ code, keepPrompt });
     else request.success({ coords: { latitude: 21.02851, longitude: 105.85417, accuracy }, timestamp: Date.now() });
-  }, { index, code, accuracy });
+  }, { index, code, accuracy, keepPrompt });
 }
 
 const capturedStamps = (page) => page.evaluate(() => window.constructionCameraTest.lines);
@@ -507,20 +508,42 @@ try {
     return [locationRequests.length, notificationRequests.length];
   }), [0, 0]);
   await enablePermissions.tap();
-  await overview.page.waitForFunction(() => {
+  const permissionsDialog = overview.page.getByRole("dialog", { name: "Thông báo và vị trí", exact: true });
+  await permissionsDialog.waitFor();
+  assert.deepEqual(await overview.page.evaluate(() => {
     const { locationRequests, notificationRequests } = window.constructionCameraTest;
-    return locationRequests.length === 1 && notificationRequests.length === 1;
+    return [locationRequests.length, notificationRequests.length];
+  }), [0, 0]);
+
+  await permissionsDialog.getByRole("button", { name: "Bật thông báo", exact: true }).tap();
+  await overview.page.waitForFunction(() => {
+    return window.constructionCameraTest.notificationRequests.length === 1;
   });
+  assert.equal(await overview.page.evaluate(() => window.constructionCameraTest.locationRequests.length), 0);
   await overview.page.evaluate(() => window.constructionCameraTest.grantNotifications());
-  await respondToLocation(overview.page, 0, { code: 1 });
-  await enablePermissions.tap();
-  await respondToLocation(overview.page, 1);
+  await permissionsDialog.getByRole("button", { name: "Gửi thử", exact: true }).waitFor();
+
+  const allowLocation = permissionsDialog.getByRole("button", { name: "Cho phép vị trí", exact: true });
+  await allowLocation.tap();
+  await respondToLocation(overview.page, 0, { code: 1, keepPrompt: true });
+  await permissionsDialog.getByText(/Chưa chọn quyền/).waitFor();
+  assert.equal(await permissionsDialog.getByText(/Vị trí đang bị chặn/).count(), 0);
+  await allowLocation.tap();
+  await respondToLocation(overview.page, 1, { code: 1 });
+  await permissionsDialog.getByText(/Vị trí đang bị chặn/).waitFor();
+  // A browser-level block can only be reset by the browser or its settings.
+  await overview.page.evaluate(() => window.constructionCameraTest.setLocationPermission("prompt"));
+  await allowLocation.tap();
+  await respondToLocation(overview.page, 2);
+  await permissionsDialog.getByText("Đã cấp", { exact: true }).waitFor();
+  await permissionsDialog.getByRole("button", { name: "Xong", exact: true }).tap();
+  await permissionsDialog.waitFor({ state: "hidden" });
   await overviewActions.getByRole("button", { name: /^(?:✓\s*)?đã bật thông báo và vị trí$/i }).waitFor();
   assert.equal(await overview.page.getByRole("dialog").count(), 0);
   assert.deepEqual(await overview.page.evaluate(() => {
     const { calls, locationRequests, notificationRequests } = window.constructionCameraTest;
     return { calls, locationActivations: locationRequests.map((request) => request.activation), notificationRequests };
-  }), { calls: 0, locationActivations: [true, true], notificationRequests: [true] });
+  }), { calls: 0, locationActivations: [true, true, true], notificationRequests: [true] });
   await overview.context.close();
 
   assert.deepEqual(pageErrors, []);

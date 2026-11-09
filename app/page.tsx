@@ -2136,8 +2136,10 @@ export default function Home() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
   const [mobileDevice, setMobileDevice] = useState(false);
-  const [photoLocationGranted, setPhotoLocationGranted] = useState(false);
+  const [photoLocationPermission, setPhotoLocationPermission] = useState<PermissionState>("prompt");
   const [requestingPhotoLocation, setRequestingPhotoLocation] = useState(false);
+  const [notificationSetupFeedback, setNotificationSetupFeedback] = useState("");
+  const [locationSetupFeedback, setLocationSetupFeedback] = useState("");
   const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
   const [startupSettingsError, setStartupSettingsError] = useState("");
   const [changingStartup, setChangingStartup] = useState(false);
@@ -2299,7 +2301,7 @@ export default function Home() {
     else if (driveConfigOpen) setDriveConfigOpen(false);
     else if (loginOpen) setLoginOpen(false);
     else if (mobileInstallHelp) setMobileInstallHelp(null);
-    else if (notificationSetupOpen) setNotificationSetupOpen(false);
+    else if (notificationSetupOpen) dismissMobileNotificationSetup();
     else if (pendingWorkNoteCompletionId) setPendingWorkNoteCompletionId(null);
     else if (pendingDesignTaskCompletion) setPendingDesignTaskCompletion(null);
     else if (completionFeedback) setCompletionFeedback(null);
@@ -2579,7 +2581,11 @@ export default function Home() {
     setMobileDevice(true);
     let active = true;
     let permission: PermissionStatus | undefined;
-    const refreshLocationPermission = () => setPhotoLocationGranted(permission?.state === "granted");
+    const refreshLocationPermission = () => {
+      if (!permission) return;
+      setPhotoLocationPermission(permission.state);
+      if (permission.state === "granted") setLocationSetupFeedback("");
+    };
     // Older mobile browsers can request a position but cannot query its permission.
     void navigator.permissions?.query({ name: "geolocation" }).then((status) => {
       if (!active) return;
@@ -2587,8 +2593,10 @@ export default function Home() {
       refreshLocationPermission();
       status.addEventListener("change", refreshLocationPermission);
     }).catch(() => {});
+    window.addEventListener("focus", refreshLocationPermission);
     return () => {
       active = false;
+      window.removeEventListener("focus", refreshLocationPermission);
       permission?.removeEventListener("change", refreshLocationPermission);
     };
   }, []);
@@ -2619,6 +2627,7 @@ export default function Home() {
       const enabled = desktopBridge()?.isDesktop ? savedNotificationState === "enabled" : permission === "granted";
       setNotificationPermission(permission);
       markNotificationsEnabled(enabled);
+      if (enabled) setNotificationSetupFeedback("");
     };
     refreshNotificationPermission();
     let reloadingForWorker = false;
@@ -3022,22 +3031,14 @@ export default function Home() {
         }
         if (!("Notification" in window) || !("serviceWorker" in navigator)) {
           setNotificationPermission("unsupported");
-          if (isAppleMobileDevice()) {
-            setNotificationSetupOpen(true);
-            throw new Error("Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Hãy cập nhật iOS rồi mở GM Manager từ Màn hình chính.");
-          }
-          throw new Error("Thiết bị này chưa hỗ trợ thông báo. Trên iPhone, hãy cài ứng dụng vào màn hình chính rồi bật thông báo.");
+          if (isAppleMobileDevice()) throw new Error("Thông báo cần iOS/iPadOS 16.4 trở lên và GM Manager mở từ Màn hình chính.");
+          throw new Error("Trình duyệt này chưa hỗ trợ thông báo.");
         }
         let permission = Notification.permission;
         if (permission === "default") permission = await Notification.requestPermission();
         setNotificationPermission(permission);
-        if (permission !== "granted") {
-          if (permission === "denied" && isAppleMobileDevice()) {
-            setNotificationSetupOpen(true);
-            throw new Error("Thông báo đang bị chặn. Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo rồi quay lại ứng dụng.");
-          }
-          throw new Error("Chưa được cấp quyền thông báo. Hãy cho phép GM Manager trong cài đặt thông báo của trình duyệt.");
-        }
+        if (permission === "denied") throw new Error("Thông báo đang bị chặn trên thiết bị này.");
+        if (permission !== "granted") throw new Error("Chưa chọn quyền. Bấm Bật thông báo rồi chọn Cho phép khi điện thoại hỏi.");
         let timeout = 0;
         const registration = serviceWorkerRegistration.current?.active ? serviceWorkerRegistration.current : await Promise.race([
           navigator.serviceWorker.ready,
@@ -3060,39 +3061,34 @@ export default function Home() {
     } finally { setEnablingNotifications(false); }
   };
 
-  const allowConstructionPhotoLocation = async () => {
+  const requestLocationFromPanel = async () => {
+    if (enablingNotifications || requestingPhotoLocation) return;
+    setLocationSetupFeedback("");
     setRequestingPhotoLocation(true);
     try {
       const result = await requestConstructionPhotoPosition();
       if (result.status === "ready") {
-        setPhotoLocationGranted(true);
-        return "";
+        setPhotoLocationPermission("granted");
+      } else if (result.status === "denied") {
+        const permission = await navigator.permissions?.query({ name: "geolocation" }).then(({ state }) => state).catch(() => undefined);
+        setPhotoLocationPermission(permission === "prompt" ? "prompt" : "denied");
+        if (permission === "prompt") setLocationSetupFeedback("Chưa chọn quyền. Bấm Cho phép vị trí rồi chọn Cho phép khi điện thoại hỏi.");
+      } else {
+        setLocationSetupFeedback("Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.");
       }
-      if (result.status === "denied") {
-        setPhotoLocationGranted(false);
-        return "Chưa được cấp quyền vị trí. Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt rồi thử lại.";
-      }
-      return "Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.";
     } catch {
-      return "Không thể lấy vị trí trên thiết bị này.";
+      setLocationSetupFeedback("Không thể lấy vị trí trên thiết bị này.");
     } finally {
       setRequestingPhotoLocation(false);
     }
   };
 
   const devicePermissionsBusy = enablingNotifications || requestingPhotoLocation;
-  const devicePermissionsEnabled = notificationsEnabled && (!mobileDevice || photoLocationGranted);
-  const enableDevicePermissions = async () => {
+  const devicePermissionsEnabled = notificationsEnabled && (!mobileDevice || photoLocationPermission === "granted");
+  const requestNotificationFromPanel = async () => {
     if (devicePermissionsBusy) return;
-    // Start both requests before awaiting either prompt so they share the tap.
-    const [notificationError, locationError] = await Promise.all([
-      !notificationsEnabled || devicePermissionsEnabled ? sendTestNotification() : "",
-      mobileDevice && !photoLocationGranted ? allowConstructionPhotoLocation() : "",
-    ]);
-    const errors = [notificationError, locationError].filter(Boolean);
-    setNotice(errors.length ? errors.join(" ") : mobileDevice
-      ? "Đã bật thông báo và cấp quyền vị trí."
-      : "Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị.");
+    setNotificationSetupFeedback("");
+    setNotificationSetupFeedback(await sendTestNotification() || "Đã gửi thông báo kiểm tra.");
   };
 
   const toggleWindowsStartup = async () => {
@@ -3205,14 +3201,19 @@ export default function Home() {
     setLocalWorkspacePath(path);
     setEmployeeLoginError("");
   };
-  const renderDevicePermissionsAction = (inDialog = false) => (
-    <button type="button" className={inDialog ? "add-button" : `pwa-action${devicePermissionsEnabled ? " pwa-action--notifications-enabled" : ""}`} disabled={devicePermissionsBusy} onClick={() => {
-      if (inDialog) setNotificationSetupOpen(false);
-      void enableDevicePermissions();
+  const renderDevicePermissionsAction = () => (
+    <button type="button" className={`pwa-action${devicePermissionsEnabled ? " pwa-action--notifications-enabled" : ""}`} disabled={!mobileDevice && enablingNotifications} aria-haspopup={mobileDevice ? "dialog" : undefined} onClick={() => {
+      if (mobileDevice) {
+        setNotificationSetupFeedback("");
+        setLocationSetupFeedback("");
+        setNotificationSetupOpen(true);
+      } else if (!enablingNotifications) {
+        void sendTestNotification().then((error) => setNotice(error || "Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị."));
+      }
     }}>
-      {devicePermissionsBusy ? "Đang bật…" : mobileDevice
+      {mobileDevice
         ? devicePermissionsEnabled ? "✓ Đã bật thông báo và vị trí" : "◌ Bật thông báo và vị trí"
-        : devicePermissionsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
+        : enablingNotifications ? "Đang bật…" : devicePermissionsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
     </button>
   );
   const renderOverviewActions = () => <>
@@ -6169,10 +6170,16 @@ export default function Home() {
     }
   };
   const customerHeading = isProjectWorkspace && selectedCustomerLocation ? customerDisplayName(selectedCustomerLocation.record) : "";
+  const workspaceEmployeeName = currentWorkflowToken ? loggedInEmployee?.name.trim() : "";
   return (
     <main className={`crm-shell${isProjectWorkspace ? " crm-shell--project" : ""}`}>
       <header className={`customer-gateway__header workspace-header${customerHeading ? " workspace-header--project" : ""}`}>
-        <div className="brand customer-gateway__brand brand--with-logo"><span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span><span className="brand__wordmark">GM Manager</span></div>
+        <div className="brand customer-gateway__brand brand--with-logo">
+          <span className="brand__mark"><img src={`${import.meta.env.BASE_URL}gm-logo-192.png`} alt="GM" /></span>
+          <span className={workspaceEmployeeName ? "brand__wordmark brand__wordmark--employee" : "brand__wordmark"} title={workspaceEmployeeName || undefined}>
+            {workspaceEmployeeName || "GM Manager"}
+          </span>
+        </div>
         {workspaceView !== "overview" && <button type="button" className="workspace-header__back customer-context--back" onClick={returnToOverview}>← Tổng quan</button>}
         {customerHeading && <div className="workspace-header__project">
           <strong title={customerHeading}>{customerHeading}</strong>
@@ -6548,7 +6555,7 @@ export default function Home() {
           <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
-            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>, nhấn <b>Chia sẻ</b>.</li><li>Chọn <b>Thêm vào Màn hình chính</b>. Nếu có tuỳ chọn <b>Mở dưới dạng ứng dụng web</b>, hãy bật rồi nhấn Thêm.</li><li>Đóng Safari, mở <b>GM Manager</b> bằng biểu tượng trên Màn hình chính.</li><li>Trong ứng dụng, nhấn <b>Bật thông báo</b>, rồi chọn <b>Cho phép</b> khi iOS hỏi.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
+            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>, nhấn <b>Chia sẻ</b>.</li><li>Chọn <b>Thêm vào Màn hình chính</b>. Nếu có tuỳ chọn <b>Mở dưới dạng ứng dụng web</b>, hãy bật rồi nhấn Thêm.</li><li>Đóng Safari, mở <b>GM Manager</b> bằng biểu tượng trên Màn hình chính.</li><li>Bấm <b>Bật thông báo và vị trí</b>, chọn <b>Bật thông báo</b> rồi chọn <b>Cho phép</b> khi iOS hỏi.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
             <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : mobileInstallHelp === "ios" ? "Đăng nhập và làm việc trên iOS 16 trở lên. Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
             {mobileInstallHelp !== "desktop" && <div className="dialog-actions"><button type="button" onClick={() => setMobileInstallHelp(null)}>Để sau</button><button type="button" className="add-button" onClick={() => { setMobileInstallHelp(null); promptForMobileNotifications(); }}>Đã cài xong</button></div>}
           </section>
@@ -6559,9 +6566,22 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
           <section className="security-dialog notification-setup-dialog" role="dialog" aria-modal="true" aria-labelledby="notification-setup-title" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
-            <p className="eyebrow">GM Manager</p><h2 id="notification-setup-title">{mobileDevice ? "Thông báo và vị trí" : "Bật thông báo"}</h2>
-            <p>{notificationPermission === "unsupported" && isAppleMobileDevice() ? "Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Với iOS 16.0–16.3, bạn vẫn đăng nhập và làm việc được; hãy cập nhật iOS để bật thông báo." : notificationPermission === "denied" && isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo. Sau đó quay lại ứng dụng và nhấn Kiểm tra lại." : "Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Trên iPhone/iPad, hãy mở GM Manager từ Màn hình chính để bật thông báo."}</p>
-            <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button>{renderDevicePermissionsAction(true)}</div>
+            <h2 id="notification-setup-title">Thông báo và vị trí</h2>
+            <div className="permission-options">
+              <section className="permission-option" aria-labelledby="notification-permission-label">
+                <div><strong id="notification-permission-label">Thông báo</strong><small role="status" className={notificationsEnabled ? "is-granted" : undefined}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "Đã bật" : notificationPermission === "denied" ? "Đang bị chặn" : "Nhắc việc và tin nhắn"}</small></div>
+                <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestNotificationFromPanel()}>{notificationsEnabled ? "Gửi thử" : "Bật thông báo"}</button>
+                {notificationPermission === "denied" ? <p>{isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager → Cho phép thông báo." : "Thông báo đang bị chặn. Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Thông báo."}</p>
+                  : notificationSetupFeedback ? <p role="status">{notificationSetupFeedback}</p> : null}
+              </section>
+              <section className="permission-option" aria-labelledby="location-permission-label">
+                <div><strong id="location-permission-label">Vị trí</strong><small role="status" className={photoLocationPermission === "granted" ? "is-granted" : undefined}>{requestingPhotoLocation ? "Đang lấy vị trí…" : photoLocationPermission === "granted" ? "Đã cấp" : photoLocationPermission === "denied" ? "Đang bị chặn" : "Địa điểm và thời tiết trên ảnh"}</small></div>
+                <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestLocationFromPanel()}>{photoLocationPermission === "granted" ? "Kiểm tra vị trí" : "Cho phép vị trí"}</button>
+                {photoLocationPermission === "denied" ? <p>Vị trí đang bị chặn. {isAppleMobileDevice() ? "Kiểm tra Cài đặt → Quyền riêng tư & Bảo mật → Dịch vụ định vị." : "Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Vị trí."}</p>
+                  : locationSetupFeedback ? <p role="status">{locationSetupFeedback}</p> : null}
+              </section>
+            </div>
+            <div className="dialog-actions"><button type="button" className="add-button" onClick={dismissMobileNotificationSetup}>Xong</button></div>
           </section>
         </div>
       )}

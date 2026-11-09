@@ -91,6 +91,7 @@ if(p.action==='list-documents'){r.snapshots=[{id:'s1',name:'28-10-2026-DV-75',da
 if(p.action==='list-3d-library')r.folders=[];
 setTimeout(()=>event.source.postMessage({channel:'gm-manager-apps-script-response',id,result:r},'*'),p.action==='rename-customer-folder'||p.action==='delete-customer-folder'?250:0);});parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');<\/script>` }));
 const workspaceHeader = page.locator('header.workspace-header');
+const workspaceWordmark = workspaceHeader.locator('.brand__wordmark');
 const overviewBack = page.getByRole('button', { name: '← Tổng quan', exact: true });
 const accountAction = () => workspaceHeader.getByRole('button', { name: /Đăng nhập|Đổi tài khoản/ });
 const notificationAction = () => workspaceHeader.getByRole('button', { name: /Bật thông báo|Thông báo đã bật/i });
@@ -159,6 +160,7 @@ async function assertRestrictedCustomerActions(accountLabel) {
 await page.goto(process.env.GM_TEST_BASE_URL || 'http://127.0.0.1:5173/gm-manager/');
 await page.getByRole('heading',{name:'Tổng quan dự án'}).waitFor();
 await page.locator('.customer-result').first().waitFor();
+assert.equal(await workspaceWordmark.innerText(),'Admin','the signed-in built-in account is named in the workspace header');
 assert.ok(await settingsAction.isVisible(),'admin can open settings from the overview');
 assert.ok(await accountAction().isVisible(),'account switching stays available on the overview');
 assert.ok(await notificationAction().isVisible(),'notifications can still be enabled on the overview');
@@ -390,6 +392,7 @@ await page.screenshot({path:'outputs/interface-qa/desktop-login.png',fullPage:tr
 await login.getByRole('button',{name:'Đăng nhập',exact:true}).click();
 await page.waitForFunction(()=>!document.querySelector('.login-dialog'));
 assert.equal(await page.evaluate(()=>localStorage.getItem('gm-manager-personnel-session-email')),'anh@example.com');
+assert.equal(await workspaceWordmark.innerText(),'Nguyễn Minh Anh','the workspace header follows the active employee after an account switch');
 const notificationCalls=await page.evaluate(()=>window.qaNotificationCalls);
 await page.getByRole('button',{name:/Bật thông báo|Thông báo đã bật/}).click();
 await page.getByRole('button',{name:/Thông báo đã bật/}).waitFor();
@@ -415,6 +418,7 @@ await mobileLogin.getByLabel('Tên nhân viên',{exact:true}).fill('Nguyễn Min
 await mobileLogin.getByLabel('Mã đăng nhập',{exact:true}).fill('00123');
 await mobileLogin.getByRole('button',{name:'Đăng nhập',exact:true}).click();
 await page.waitForFunction(()=>!document.querySelector('.login-dialog'));
+assert.equal(await workspaceWordmark.innerText(),'Nguyễn Minh Anh','the employee name also appears in the phone layout');
 await assertRestrictedCustomerActions('phone employee');
 await page.getByRole('button',{name:/Đổi tài khoản/}).click();
 const adminLogin=page.getByRole('dialog',{name:'Đăng nhập',exact:true});

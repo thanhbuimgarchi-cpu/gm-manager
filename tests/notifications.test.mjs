@@ -162,12 +162,12 @@ const ts = require("typescript");
 const parsedFrontend = ts.createSourceFile("page.tsx", frontendSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const frontendDeclarations = new Map();
 const visit = (node) => {
-  if (ts.isVariableDeclaration(node) && ["markNotificationsEnabled", "sendTestNotification", "enableDevicePermissions"].includes(node.name.getText(parsedFrontend))) frontendDeclarations.set(node.name.getText(parsedFrontend), node.getText(parsedFrontend));
+  if (ts.isVariableDeclaration(node) && ["markNotificationsEnabled", "sendTestNotification", "requestNotificationFromPanel"].includes(node.name.getText(parsedFrontend))) frontendDeclarations.set(node.name.getText(parsedFrontend), node.getText(parsedFrontend));
   ts.forEachChild(node, visit);
 };
 visit(parsedFrontend);
 const frontendNotificationCode = ts.transpileModule(
-  [...frontendDeclarations.values()].map((declaration) => `const ${declaration};`).join("\n").replaceAll("import.meta.env.BASE_URL", JSON.stringify("/gm-manager/")) + "\nglobalThis.enable = enableDevicePermissions;",
+  [...frontendDeclarations.values()].map((declaration) => `const ${declaration};`).join("\n").replaceAll("import.meta.env.BASE_URL", JSON.stringify("/gm-manager/")) + "\nglobalThis.enable = requestNotificationFromPanel;",
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
 ).outputText;
 
@@ -183,16 +183,11 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     navigator: { serviceWorker: { ready: ready || Promise.resolve(registration) } },
     Notification, Error,
     desktopBridge: () => desktop,
-    mobileDevice: ios,
-    notificationsEnabled: false,
-    photoLocationGranted: false,
     devicePermissionsBusy: false,
-    devicePermissionsEnabled: false,
-    allowConstructionPhotoLocation: async () => "",
     setEnablingNotifications: (value) => { state.busy = value; },
     setNotificationsEnabled: (value) => { state.enabled = value; },
     setNotificationPermission: (value) => { state.permission = value; },
-    setNotice: (value) => { state.notice = value; },
+    setNotificationSetupFeedback: (value) => { state.notice = value; },
     setMobileInstallHelp: (value) => { state.installHelp = value; },
     setNotificationSetupOpen: (value) => { state.setupOpen = value; },
     notificationEnabledStorageKey: "gm-manager-notifications-enabled-v1",
@@ -271,7 +266,6 @@ test("iPhone Safari opens Home Screen instructions without requesting an unavail
 test("iOS 16.0–16.3 explains the system limit instead of reporting successful delivery", async () => {
   const fixture = frontendFixture({ ios: true, supported: false });
   await fixture.enable();
-  assert.equal(fixture.state.setupOpen, true);
   assert.equal(fixture.state.permission, "unsupported");
   assert.match(fixture.state.notice, /16\.4/);
   assert.equal(fixture.state.enabled, false);
@@ -282,8 +276,7 @@ test("a denied iOS permission gives settings instructions without trying to prom
   let requests = 0;
   const fixture = frontendFixture({ ios: true, permission: "denied", requestPermission: async () => { requests++; return "granted"; } });
   await fixture.enable();
-  assert.equal(fixture.state.setupOpen, true);
-  assert.match(fixture.state.notice, /Cài đặt → Thông báo → GM Manager/);
+  assert.match(fixture.state.notice, /Thông báo đang bị chặn/);
   assert.equal(requests, 0);
   assert.equal(fixture.state.enabled, false);
 });
