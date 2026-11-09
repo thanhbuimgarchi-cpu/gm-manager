@@ -43,7 +43,8 @@ jobs:
             -H 'Accept: application/octet-stream' -H 'Cache-Control: no-cache' -H "Authorization: Bearer $GH_TOKEN" \
             -o "$archive_path" "https://api.github.com/repos/electron/electron/releases/assets/$asset_id?gm-build=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           printf '%s  %s\n' "$checksum" "$archive_path" | shasum -a 256 -c -
-          npm exec electron-builder -- --mac --x64 --publish=never --config.electronDist="$archive_path"
+          npm exec electron-builder -- --mac --x64 --publish=never \
+            --config.electronDist="$archive_path" --config.dmg.writeUpdateInfo=false
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           GH_TOKEN: ${{ github.token }}
