@@ -2,6 +2,7 @@
 
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
+import ConstructionPhotos, { type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
 import { createWorkflowClient, formatDateInput as formatDesignDateInput, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
@@ -843,7 +844,7 @@ async function postToAppsScript<T extends { ok?: boolean; error?: string }>(conf
     const account = window.localStorage.getItem(personnelSessionEmailKey) ?? "";
     if (!requestPayload.workflowSessionToken && isCurrentWorkflowSession(session, account, config.scriptUrl)) requestPayload.workflowSessionToken = session.token;
   } catch { /* Public reads and login do not require a saved session. */ }
-  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "list-3d-files", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
+  const readAction = ["load-consulting", "list-workflow-files", "list-documents", "list-3d-files", "list-construction-photos", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
   // Use the HtmlService bridge because ContentService's googleusercontent.com
@@ -1563,6 +1564,13 @@ const normalizeSearchText = (value: string) => value
   .replaceAll("đ", "d")
   .trim();
 
+function searchCustomerLocations(locations: CustomerLocation[], query: string, period?: { year: number; month: number }) {
+  const term = normalizeSearchText(query).replace(/\s+/g, " ");
+  if (!term) return period ? locations.filter(({ year, month }) => year === period.year && month === period.month) : [];
+  return locations.filter(({ record }) => [record.name, record.details?.HVT, record.houseId, record.projectId]
+    .some((value) => normalizeSearchText(value ?? "").replace(/\s+/g, " ").includes(term)));
+}
+
 // Bùi Đức Thành is a Pancake test conversation without a real customer
 // folder. Keep one stable internal project key so assignments, cache and
 // notifications can still use the normal workflow without creating a Drive
@@ -1910,7 +1918,7 @@ function isDriveCacheFresh(key: string, maxAgeMs: number) {
   }
 }
 
-function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[]) {
+function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearFolder[], partial = false) {
   const normalizedDriveYears = dedupeWorkspaceYears(driveYears);
   const normalizedLocalYears = dedupeWorkspaceYears(localYears);
   const driveByYear = new Map(normalizedDriveYears.map((year) => [year.year, year]));
@@ -1935,6 +1943,7 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
           // overwrite cached form/progress data.
           const localRecord = localByProjectId.get(record.projectId) ?? (record.houseId ? localByHouseId.get(record.houseId.trim().toLocaleLowerCase("vi")) : undefined);
           const merged = localRecord ? { ...record, ...localRecord } : { ...record };
+          if (partial && record.name && (!merged.name || isPlaceholderCustomerName(merged.name) || merged.name === merged.houseId || merged.name === merged.projectId)) merged.name = record.name;
           for (const field of ["designProgress", "interiorDesignProgress", "acceptanceDesignProgress"] as const) merged[field] = mergeWorkflowDesignRows(localRecord?.[field], record[field]);
           const driveRecordKnown = driveProjectIds.has(record.projectId) || Boolean(record.houseId?.trim() && driveProjectIds.has(record.houseId.trim()));
           return {
@@ -1952,11 +1961,27 @@ function preserveDriveRecordMetadata(driveYears: YearFolder[], localYears: YearF
           };
         });
         const mergedProjectIds = new Set(mergedRecords.map((record) => record.projectId));
-        const pendingLocalRecords = localRecords.filter((record) => record.pendingDriveSync && !mergedProjectIds.has(record.projectId));
-        return { label, records: dedupeMonthRecords([...mergedRecords, ...pendingLocalRecords]) };
+        const retainedLocalRecords = localRecords.filter((record) => (partial || record.pendingDriveSync) && !mergedProjectIds.has(record.projectId));
+        return { label, records: dedupeMonthRecords([...mergedRecords, ...retainedLocalRecords]) };
       }),
     };
   }).map((yearFolder) => ({ ...yearFolder, months: yearFolder.months.map((monthFolder) => ({ ...monthFolder, records: dedupeMonthRecords(monthFolder.records) })) }));
+}
+
+function mergeCustomerSearchYears(searchYears: YearFolder[], localYears: YearFolder[]) {
+  // Older Apps Script deployments return one year row per matched month. A
+  // search result is a partial index, so merge every match without replacing
+  // the full list already loaded for any month.
+  const grouped = new Map<number, Map<string, WorkRecord[]>>();
+  for (const { year, months } of searchYears) {
+    const byMonth = grouped.get(year) ?? new Map<string, WorkRecord[]>();
+    for (const { label, records } of months ?? []) {
+      if (!monthLabels.includes(label)) continue;
+      byMonth.set(label, [...(byMonth.get(label) ?? []), ...(records ?? [])]);
+    }
+    grouped.set(year, byMonth);
+  }
+  return preserveDriveRecordMetadata(Array.from(grouped, ([year, months]) => ({ year, months: Array.from(months, ([label, records]) => ({ label, records })) })), localYears, true);
 }
 
 function mergeSharedWorkspaceYears(sharedYears: YearFolder[], localYears: YearFolder[], driveIndexProjectIds?: Map<string, Set<string>>) {
@@ -2010,6 +2035,7 @@ export default function Home() {
   const [selectedYear, setSelectedYear] = useState(now.year);
   const [selectedMonth, setSelectedMonth] = useState(now.month);
   const [search, setSearch] = useState("");
+  const [customerSearchStatus, setCustomerSearchStatus] = useState<"idle" | "loading" | "failed">("idle");
   const [personnelSearch, setPersonnelSearch] = useState("");
   const [selectedPersonnelCategoryId, setSelectedPersonnelCategoryId] = useState<string | null>(null);
   const [personnelByCategory, setPersonnelByCategory] = useState<Record<string, PersonnelMember[]>>({});
@@ -2025,7 +2051,7 @@ export default function Home() {
   // appears as a real customer or a Drive-backed customer folder.
   const [virtualPancakeLocation, setVirtualPancakeLocation] = useState<CustomerLocation | null>(null);
   const [personnelView, setPersonnelView] = useState(false);
-  const isProjectWorkspace = Boolean(selectedCustomerProjectId || activeFolder === "Tin nhắn");
+  const isProjectWorkspace = Boolean(selectedCustomerProjectId);
   const workspaceView = isProjectWorkspace ? "project" : personnelView ? "personnel" : "overview";
   useEffect(() => {
     if (!isCustomerPortal) window.scrollTo(0, 0);
@@ -2117,6 +2143,7 @@ export default function Home() {
   const [savingPancakeConfig, setSavingPancakeConfig] = useState(false);
   const [sidebarNotesOpen, setSidebarNotesOpen] = useState(true);
   const [sidebarMessagesOpen, setSidebarMessagesOpen] = useState(true);
+  const [unlinkedCustomerMessageId, setUnlinkedCustomerMessageId] = useState("");
   const [sidebarDesignOpen, setSidebarDesignOpen] = useState(true);
   const [mobileActivityOpen, setMobileActivityOpen] = useState(false);
   const [newWorkNote, setNewWorkNote] = useState<WorkNote | null>(null);
@@ -2143,6 +2170,8 @@ export default function Home() {
   const [audioProcessingId, setAudioProcessingId] = useState<string | null>(null);
   const [audioProcessingStatus, setAudioProcessingStatus] = useState("");
   const customerSearchTimer = useRef<number | null>(null);
+  const customerSearchGeneration = useRef(0);
+  const notificationLocationRequested = useRef("");
   const customerCreateRequestsInFlight = useRef(new Set<string>());
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
@@ -2223,11 +2252,12 @@ export default function Home() {
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
-  const dialogKey = addOpen ? "customer" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
     if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
     if (addOpen) setAddOpen(false);
+    else if (unlinkedCustomerMessageId && loggedInEmployee) setUnlinkedCustomerMessageId("");
     else if (customerMessageTaskDraft) setCustomerMessageTaskDraft(null);
     else if (driveConfigOpen) setDriveConfigOpen(false);
     else if (loginOpen) setLoginOpen(false);
@@ -2603,19 +2633,11 @@ export default function Home() {
   ))).sort((a, b) => b.year - a.year || b.month - a.month || customerDisplayName(a.record).localeCompare(customerDisplayName(b.record), "vi")), [years]);
   const customerMessageLocations = useRef(customerLocations);
   customerMessageLocations.current = customerLocations;
-  const customerSearchResults = useMemo(() => {
-    const term = normalizeSearchText(search.trim());
-    const periodCustomers = customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth);
-    return term ? periodCustomers.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)) : periodCustomers;
-  }, [customerLocations, search, selectedMonth, selectedYear]);
-  const workflowSearchResults = useMemo(() => {
-    const term = normalizeSearchText(workflowSearch.trim());
-    if (!term) return [];
-    return customerLocations.filter(({ record }) => normalizeSearchText(`${record.name} ${record.houseId ?? ""} ${record.projectId}`).includes(term)).slice(0, 8);
-  }, [customerLocations, workflowSearch]);
-  const selectedCustomerLocation = customerLocations.find(({ record }) =>
-    record.projectId === selectedCustomerProjectId ||
-    (record.houseId && record.houseId === selectedCustomerProjectId)
+  const customerSearchResults = useMemo(() => searchCustomerLocations(customerLocations, search, { year: selectedYear, month: selectedMonth }), [customerLocations, search, selectedMonth, selectedYear]);
+  const workflowSearchResults = useMemo(() => searchCustomerLocations(customerLocations, workflowSearch).slice(0, 8), [customerLocations, workflowSearch]);
+  const selectedCustomerLocation = customerLocations.find(({ record, year, month }) =>
+    year === selectedYear && month === selectedMonth &&
+    (record.projectId === selectedCustomerProjectId || (record.houseId && record.houseId === selectedCustomerProjectId))
   ) ?? (virtualPancakeLocation?.record.projectId === selectedCustomerProjectId ? virtualPancakeLocation : null);
   const selectCustomer = ({ record, year, month }: CustomerLocation) => {
     setVirtualPancakeLocation(null);
@@ -2660,38 +2682,55 @@ export default function Home() {
   };
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || isCustomerPortal) return;
     const url = new URL(window.location.href);
     const projectId = url.searchParams.get("gmcrmProject");
     const noteId = url.searchParams.get("gmcrmNote");
     const messageId = url.searchParams.get("gmcrmMessage");
     const designTaskId = url.searchParams.get("gmcrmDesignTask");
+    if (!noteId && !messageId && !designTaskId) return;
+    const year = Number(url.searchParams.get("gmcrmYear"));
+    const month = Number(url.searchParams.get("gmcrmMonth"));
+    const scoped = Number.isInteger(year) && year >= 1000 && year <= 9999 && Number.isInteger(month) && month >= 1 && month <= 12;
+    const houseKey = normalizeHouseCode(url.searchParams.get("gmcrmHouse") || projectId);
+    const inScope = scoped ? customerLocations.filter((item) => item.year === year && item.month === month) : customerLocations;
+    const byProject = inScope.filter(({ record }) => record.projectId === projectId);
+    const byHouse = houseKey ? inScope.filter(({ record }) => normalizeHouseCode(record.houseId) === houseKey) : [];
+    const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID ? createVirtualPancakeLocation(year || undefined, month || undefined)
+      : byProject.length === 1 ? byProject[0] : !byProject.length && byHouse.length === 1 ? byHouse[0] : null;
+    if (projectId && !location) {
+      // Notification links may open a fresh device with only the current
+      // month cached. Fetch the requested period without switching the view
+      // to a different record that happens to reuse the same code.
+      if (scoped && driveScriptUrl.trim() && navigator.onLine !== false) {
+        const key = `${year}-${month}-${projectId}-${noteId || messageId || designTaskId}`;
+        if (notificationLocationRequested.current !== key) {
+          notificationLocationRequested.current = key;
+          void loadWorkspaceFromDrive(undefined, true, { mode: "index", year, month, force: true });
+        }
+      }
+      return;
+    }
+    notificationLocationRequested.current = "";
     if (projectId && designTaskId) {
-      const location = customerLocations.find(({ record }) => record.projectId === projectId);
       if (!location) return;
       selectCustomerForWorkflow(location, "Thiết kế");
-      for (const key of ["gmcrmProject", "gmcrmDesignTask", "gmcrmDesignKind", "gmcrmYear", "gmcrmMonth"]) url.searchParams.delete(key);
+      for (const key of ["gmcrmProject", "gmcrmDesignTask", "gmcrmDesignKind", "gmcrmYear", "gmcrmMonth", "gmcrmHouse"]) url.searchParams.delete(key);
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
       return;
     }
     if (messageId) {
-      const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID
-        ? createVirtualPancakeLocation(Number(url.searchParams.get("gmcrmYear")) || undefined, Number(url.searchParams.get("gmcrmMonth")) || undefined)
-        : projectId ? customerLocations.find(({ record }) => record.projectId === projectId) : null;
-      if (projectId && !location) return;
-      setActiveFolder("Tin nhắn");
       if (location) selectCustomerForWorkflow(location, "Tin nhắn");
+      else setUnlinkedCustomerMessageId(messageId);
       url.searchParams.delete("gmcrmProject");
       url.searchParams.delete("gmcrmMessage");
       url.searchParams.delete("gmcrmYear");
       url.searchParams.delete("gmcrmMonth");
+      url.searchParams.delete("gmcrmHouse");
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
       return;
     }
     if (!projectId || !noteId) return;
-    const location = projectId === VIRTUAL_PANCAKE_TEST_PROJECT_ID
-      ? createVirtualPancakeLocation(Number(url.searchParams.get("gmcrmYear")) || undefined, Number(url.searchParams.get("gmcrmMonth")) || undefined)
-      : customerLocations.find(({ record }) => record.projectId === projectId);
     if (!location) return;
     setHighlightWorkNoteId(noteId);
     setActiveFolder("Ghi chú");
@@ -2700,8 +2739,9 @@ export default function Home() {
     url.searchParams.delete("gmcrmNote");
     url.searchParams.delete("gmcrmYear");
     url.searchParams.delete("gmcrmMonth");
+    url.searchParams.delete("gmcrmHouse");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-  }, [customerLocations]);
+  }, [customerLocations, driveScriptUrl, isCustomerPortal]);
 
   const returnToCustomerSearch = () => {
     const currentDate = getVietnamDate();
@@ -2759,30 +2799,34 @@ export default function Home() {
     window.location.reload();
   };
 
-  const workNoteNotificationUrl = (note: AssignedWorkNote) => {
+  const projectNotificationUrl = (location?: { projectId: string; year: number; month: number; houseId?: string }) => {
     const url = new URL(window.location.href);
-    url.searchParams.set("gmcrmProject", note.projectId);
+    for (const key of ["gmcrmProject", "gmcrmNote", "gmcrmMessage", "gmcrmDesignTask", "gmcrmDesignKind", "gmcrmYear", "gmcrmMonth", "gmcrmHouse"]) url.searchParams.delete(key);
+    if (location?.projectId) {
+      url.searchParams.set("gmcrmProject", location.projectId);
+      if (location.year && location.month) {
+        url.searchParams.set("gmcrmYear", String(location.year));
+        url.searchParams.set("gmcrmMonth", String(location.month));
+      }
+      if (location.houseId) url.searchParams.set("gmcrmHouse", location.houseId);
+    }
+    return url;
+  };
+
+  const workNoteNotificationUrl = (note: AssignedWorkNote) => {
+    const url = projectNotificationUrl(note);
     url.searchParams.set("gmcrmNote", note.id);
-    url.searchParams.set("gmcrmYear", String(note.year));
-    url.searchParams.set("gmcrmMonth", String(note.month));
     return url.toString();
   };
 
   const designTaskNotificationUrl = (task: AssignedDesignTask) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("gmcrmProject", task.projectId);
+    const url = projectNotificationUrl(task);
     url.searchParams.set("gmcrmDesignTask", task.id);
     return url.toString();
   };
 
   const customerMessageNotificationUrl = (message: CustomerMessageGroup) => {
-    const url = new URL(window.location.href);
-    const virtualMessage = isVirtualPancakeTestMessage(message);
-    if (virtualMessage) {
-      url.searchParams.set("gmcrmProject", VIRTUAL_PANCAKE_TEST_PROJECT_ID);
-      url.searchParams.set("gmcrmYear", String(message.year || getVietnamDate().year));
-      url.searchParams.set("gmcrmMonth", String(message.month || getVietnamDate().month));
-    } else if (message.projectId) url.searchParams.set("gmcrmProject", message.projectId);
+    const url = projectNotificationUrl(isVirtualPancakeTestMessage(message) ? { projectId: VIRTUAL_PANCAKE_TEST_PROJECT_ID, year: message.year || getVietnamDate().year, month: message.month || getVietnamDate().month } : message);
     url.searchParams.set("gmcrmMessage", message.id);
     return url.toString();
   };
@@ -3094,6 +3138,9 @@ export default function Home() {
   };
   const persist = (nextYears: YearFolder[], syncRemote = true) => {
     const normalizedYears = dedupeWorkspaceYears(nextYears);
+    // Parallel index/search reads must merge onto the most recently applied
+    // workspace even if React has not committed the preceding render yet.
+    yearsRef.current = normalizedYears;
     setYears(normalizedYears);
     saveWorkspace(normalizedYears);
     // If the shared store was empty, the first Drive index loaded on this
@@ -3132,13 +3179,19 @@ export default function Home() {
       const localFingerprint = driveIndexFingerprint(yearsRef.current, year, month);
       if (localFingerprint) driveIndexFingerprints.current.set(indexKey, localFingerprint);
     }
-    const cacheKey = `workspace:${mode}:${year}:${month}:${options.projectId ?? ""}:${normalizeSearchText(options.query ?? "")}`;
+    const authorization: Partial<typeof workflowAuthorization.current> = config.scriptUrl === driveScriptUrl.trim() ? workflowAuthorization.current : {};
+    const searchAudience = authorization.workflowSessionToken || authorization.adminSessionToken ? "staff" : "public";
+    const cacheKey = mode === "search" ? `workspace:search-v3:${searchAudience}:${normalizeSearchText(options.query ?? "").replace(/\s+/g, " ")}` : `workspace:${mode}:${year}:${month}:${options.projectId ?? ""}`;
     const cacheAge = mode === "index" ? DRIVE_INDEX_CACHE_MS : mode === "search" ? DRIVE_SEARCH_CACHE_MS : 0;
-    if (!options.force && cacheAge) {
+    const mergeDriveYears = mode === "search" ? mergeCustomerSearchYears : preserveDriveRecordMetadata;
+    // While online, let the server's root revision determine search
+    // freshness so a create/rename on another device isn't hidden by a
+    // stale per-browser negative result.
+    if (!options.force && cacheAge && (mode !== "search" || navigator.onLine === false)) {
       const cachedYears = readDriveCache<YearFolder[]>(cacheKey, cacheAge);
       if (cachedYears) {
         if (mode === "index") driveIndexFingerprints.current.set(indexKey, driveIndexFingerprint(cachedYears, year, month));
-        persist(preserveDriveRecordMetadata(cachedYears, yearsRef.current), false);
+        persist(mergeDriveYears(cachedYears, yearsRef.current), false);
         return true;
       }
     }
@@ -3146,7 +3199,6 @@ export default function Home() {
     driveRequestsInFlight.current.add(cacheKey);
     if (!quietly) setIsLoadingDrive(true);
     try {
-      const authorization = config.scriptUrl === driveScriptUrl.trim() ? workflowAuthorization.current : {};
       const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; years?: YearFolder[] }>(config, { action: "load-consulting", ...authorization, mode, year, month, query: options.query, projectId: options.projectId, refresh: Boolean(options.force) });
       if (mutationRevision !== customerMutationRevision.current || customerMutationInFlight.current || workflowView.current.account !== loggedInEmployeeEmail) return false;
       if (!response.ok || !result.ok || !result.years) throw new Error(result.error || "Không thể nạp dữ liệu Excel từ Drive.");
@@ -3158,7 +3210,7 @@ export default function Home() {
         const indexedMonth = result.years.find((yearFolder) => yearFolder.year === year)?.months?.find((monthFolder) => monthFolder.label === `T${month}`);
         driveIndexProjectIds.current.set(indexKey, new Set((indexedMonth?.records ?? []).flatMap((record) => [record.projectId, record.houseId?.trim()]).filter(Boolean) as string[]));
       }
-      const driveYears = preserveDriveRecordMetadata(result.years, yearsRef.current);
+      const driveYears = mergeDriveYears(result.years, yearsRef.current);
       if (driveYears.length) {
         if (JSON.stringify(driveYears) !== JSON.stringify(yearsRef.current)) persist(driveYears, false);
         if (!quietly) setNotice(mode === "search" ? "Đã tìm thêm hồ sơ phù hợp trên Drive." : `Đã nạp danh sách khách hàng T${month}/${year} từ Drive.`);
@@ -3508,6 +3560,21 @@ export default function Home() {
       setLoadingCustomerMessages(false);
     }
   };
+  const requestConstructionPhotos = async <T,>(location: CustomerLocation, action: "list-construction-photos" | "upload-construction-photo", upload?: ConstructionPhotoUpload) => {
+    const { response, result } = await postToAppsScript<T & { ok?: boolean; error?: string }>({ scriptUrl: driveScriptUrl.trim() }, {
+      action,
+      workflowSessionToken: currentWorkflowToken,
+      adminSessionToken: currentWorkflowToken,
+      year: location.year,
+      month: location.month,
+      projectId: location.record.projectId,
+      houseId: location.record.houseId,
+      folderId: location.record.driveFolderId,
+      ...upload,
+    });
+    if (!response.ok || !result.ok) throw new Error(result.error || "Không thể đồng bộ ảnh thi công với Drive.");
+    return result;
+  };
   const updateCustomerMessageStatus = async (message: CustomerMessageGroup, status: CustomerMessageStatus) => {
     if (!requireCustomerWorkflowManager()) return;
     if (customerMessageStatusBusyId || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))) return;
@@ -3521,7 +3588,12 @@ export default function Home() {
   };
   const customerLocationForMessage = (message: CustomerMessageGroup) => {
     if (isVirtualPancakeTestMessage(message)) return createVirtualPancakeLocation(message.year, message.month);
-    const candidates = customerLocations.filter((item) => item.year === message.year && item.month === message.month && (message.projectId ? item.record.projectId === message.projectId : customerMessageHouseKey(item.record.houseId ?? "") === customerMessageHouseKey(message.houseId)));
+    const period = customerLocations.filter((item) => item.year === message.year && item.month === message.month);
+    const exact = message.projectId ? period.find((item) => item.record.projectId === message.projectId) : undefined;
+    if (exact) return exact;
+    const houseKey = customerMessageHouseKey(message.houseId);
+    if (!houseKey) return undefined;
+    const candidates = period.filter((item) => customerMessageHouseKey(item.record.houseId ?? "") === houseKey);
     return candidates.length === 1 ? candidates[0] : undefined;
   };
   const openCustomerMessageTask = (message: CustomerMessageGroup) => {
@@ -4088,13 +4160,20 @@ export default function Home() {
   }, [activeFolder, selectedCustomerProjectId, selectedYear, selectedMonth, driveScriptUrl, driveLinkUrl]);
 
   const searchCustomersOnDrive = (value: string) => {
-    const query = value.trim();
-    if (customerSearchTimer.current) window.clearTimeout(customerSearchTimer.current);
-    if (query.length < 2) return;
+    const query = value.trim().replace(/\s+/g, " ");
+    const generation = ++customerSearchGeneration.current;
+    if (customerSearchTimer.current !== null) {
+      window.clearTimeout(customerSearchTimer.current);
+      customerSearchTimer.current = null;
+    }
+    if (query.length < 2) { setCustomerSearchStatus("idle"); return; }
+    setCustomerSearchStatus("loading");
     const isProjectOrHouseCode = /^GM\d/i.test(query) || (/^[A-Za-z0-9-]+$/.test(query) && !query.includes(" "));
     customerSearchTimer.current = window.setTimeout(() => {
       customerSearchTimer.current = null;
-      void loadWorkspaceFromDrive(undefined, true, { mode: "search", query });
+      void loadWorkspaceFromDrive(undefined, true, { mode: "search", query }).then((loaded) => {
+        if (generation === customerSearchGeneration.current) setCustomerSearchStatus(loaded ? "idle" : "failed");
+      });
     }, isProjectOrHouseCode ? 100 : 420);
   };
 
@@ -4207,7 +4286,7 @@ export default function Home() {
     try {
       const config = { scriptUrl: driveScriptUrl.trim() };
       if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string }>(config, {
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; folderId?: string }>(config, {
         action: "create-customer-folder",
         adminSessionToken,
         year: modalYear,
@@ -4216,6 +4295,10 @@ export default function Home() {
         houseId: normalizedHouseId,
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
+      customerMutationRevision.current += 1;
+      clearCustomerDirectoryCache(modalYear, modalMonth);
+      const latest = yearsRef.current.find((year) => year.year === modalYear)?.months[modalMonth - 1]?.records.find((item) => item.projectId === projectId);
+      if (latest && result.folderId) persistRecord({ ...latest, driveFolderId: result.folderId, pendingDriveSync: false }, modalYear, modalMonth);
       setNotice(`Đã tạo thư mục ${normalizedHouseId} trên Drive và giữ hồ sơ trong cache.`);
     } catch (error) {
       setNotice(`Hồ sơ đã lưu trong cache; Drive chưa đồng bộ (${error instanceof Error ? error.message : "lỗi kết nối"}). Có thể nạp lại để thử lại.`);
@@ -4408,7 +4491,7 @@ export default function Home() {
   const clearCustomerDirectoryCache = (year: number, month: number) => {
     try {
       for (const key of Object.keys(window.localStorage)) {
-        if (key.startsWith(`${driveCachePrefix}workspace:`) && key.includes(`:${year}:${month}:`)) window.localStorage.removeItem(key);
+        if (key.startsWith(`${driveCachePrefix}workspace:search`) || (key.startsWith(`${driveCachePrefix}workspace:`) && key.includes(`:${year}:${month}:`))) window.localStorage.removeItem(key);
       }
     } catch { /* A fresh network index still supersedes this browser's cache. */ }
     driveIndexFingerprints.current.delete(`${year}-${month}`);
@@ -5746,35 +5829,32 @@ export default function Home() {
     </div>
   </section>;
 
-  const openAllCustomerMessages = () => {
-    setPersonnelView(false);
-    setVirtualPancakeLocation(null);
-    setSelectedCustomerProjectId(null);
-    setSelectedRecordId(null);
-    setOpenMenuId(null);
-    setActiveFolder("Tin nhắn");
-    setSidebarNotesOpen(true);
-  };
-  const openCustomerMessage = (message: CustomerMessageGroup) => {
-    if (activeFolder !== "Tin nhắn") customerMessageReturnFolder.current = activeFolder;
-    const location = customerLocationForMessage(message);
-    if (location) selectCustomerForWorkflow(location, "Tin nhắn");
-    else {
-      setSelectedCustomerProjectId(null);
-      setSelectedRecordId(null);
-      setActiveFolder("Tin nhắn");
+  const toggleOverviewMessages = () => {
+    if (window.matchMedia("(max-width: 760px)").matches && !mobileActivityOpen) {
+      setMobileActivityOpen(true);
+      setSidebarMessagesOpen(true);
+    } else {
+      setSidebarMessagesOpen((open) => !open);
     }
   };
+  const openCustomerMessage = (message: CustomerMessageGroup) => {
+    const location = customerLocationForMessage(message);
+    if (!location) { setUnlinkedCustomerMessageId(message.id); return; }
+    if (activeFolder !== "Tin nhắn") customerMessageReturnFolder.current = isProjectWorkspace ? activeFolder : "Tư vấn";
+    selectCustomerForWorkflow(location, "Tin nhắn");
+  };
+  const renderCustomerMessageLines = (message: CustomerMessageGroup) => <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>;
+  const unlinkedCustomerMessage = customerMessages.find((message) => message.id === unlinkedCustomerMessageId);
   const messageStatusClass = (status: CustomerMessageStatus) => status === "processing" ? "customer-message--processing" : status === "resolved" ? "customer-message--resolved" : "customer-message--alert";
   const renderCustomerMessagesSummary = (className = "") => !canViewCustomerMessages ? <section className={"sidebar-notes customer-message-summary customer-message-summary--locked " + className} aria-label="Tin nhắn khách bị giới hạn quyền">
-    <button type="button" className="sidebar-notes__toggle" onClick={() => loggedInEmployee ? setNotice("Chỉ Admin và Quản lý chung được xem toàn bộ Tin nhắn khách.") : openEmployeeLogin()}>
-      <span><b>Tin nhắn khách</b><small>Chỉ Admin / Quản lý chung</small></span><em aria-hidden="true">🔒</em>
+    <button type="button" className="sidebar-notes__toggle" onClick={() => openEmployeeLogin()}>
+      <span><b>Tin nhắn khách</b><small>Đăng nhập để xem</small></span><em aria-hidden="true">🔒</em>
     </button>
   </section> : <section className={"sidebar-notes customer-message-summary " + className + (sidebarMessagesOpen ? " sidebar-notes--open" : "")} aria-label="Tin nhắn khách">
-    <div className="sidebar-summary-heading"><button type="button" className="sidebar-notes__toggle" onClick={openAllCustomerMessages}>
-      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span>
-    </button><button type="button" className="sidebar-summary-collapse" aria-label={sidebarMessagesOpen ? "Thu gọn Tin nhắn khách" : "Mở danh sách Tin nhắn khách"} aria-expanded={sidebarMessagesOpen} onClick={() => setSidebarMessagesOpen((isOpen) => !isOpen)}>{sidebarMessagesOpen ? "⌃" : "⌄"}</button></div>
-    <div className="sidebar-notes__list" hidden={!sidebarMessagesOpen}>
+    <button type="button" className="sidebar-notes__toggle" aria-expanded={sidebarMessagesOpen} aria-controls="customer-message-summary-list" onClick={() => setSidebarMessagesOpen((isOpen) => !isOpen)}>
+      <span><b>Tin nhắn khách</b><small>{customerMessages.length} nhóm · tất cả khách hàng</small></span><em aria-hidden="true">{sidebarMessagesOpen ? "⌃" : "⌄"}</em>
+    </button>
+    <div id="customer-message-summary-list" className="sidebar-notes__list" hidden={!sidebarMessagesOpen}>
       {loadingCustomerMessages && !customerMessages.length ? <p className="sidebar-notes__empty">Đang nạp Tin nhắn khách…</p>
         : customerMessagesError && !customerMessages.length ? <p className="sidebar-notes__empty">{customerMessagesError}</p>
           : customerMessages.length ? groupSidebarItems(customerMessages.slice().sort((left, right) => Number(left.status === "resolved") - Number(right.status === "resolved") || right.lastMessageAt.localeCompare(left.lastMessageAt)), (message) => message.projectId ? `project:${message.projectId}` : message.houseId ? `house:${customerMessageHouseKey(message.houseId)}` : `conversation:${message.conversationId || message.groupName || message.id}`).map(({ key, items }) => {
@@ -5789,9 +5869,10 @@ export default function Home() {
     </div>
   </section>;
   const renderCustomerMessages = () => {
-    const visibleMessages = selectedCustomerLocation
-      ? customerMessages.filter((message) => message.year === selectedCustomerLocation.year && message.month === selectedCustomerLocation.month && ((message.projectId && message.projectId === selectedCustomerLocation.record.projectId) || customerMessageHouseKey(message.houseId) === customerMessageHouseKey(selectedCustomerLocation.record.houseId ?? "")))
-      : customerMessages;
+    const visibleMessages = selectedCustomerLocation ? customerMessages.filter((message) => {
+      const location = customerLocationForMessage(message);
+      return location && projectWorkflowScope(location) === projectWorkflowScope(selectedCustomerLocation);
+    }) : [];
     return <section className="customer-messages" aria-label="Tin nhắn khách">
       <header className="customer-messages__heading">
         <h1>Tin nhắn khách</h1>
@@ -5802,7 +5883,7 @@ export default function Home() {
         {loadingCustomerMessages && !visibleMessages.length ? <p className="customer-messages__empty">Đang nạp Tin nhắn khách…</p>
           : visibleMessages.length ? visibleMessages.slice().sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt)).map((message) => <article className={"customer-message " + messageStatusClass(message.status)} key={message.id}>
             <header className="customer-message__header"><div><b>{message.groupName}</b><small>{message.customerName || message.houseId || "Chưa ghép hồ sơ"} · {message.messageCount} tin · {customerMessageDate(message.firstMessageAt)} – {customerMessageDate(message.lastMessageAt)}</small></div><span className="customer-message__state">{customerMessageStatusLabel(message.status)}</span></header>
-            <div className="customer-message__body">{message.messages.map((line) => <p key={line.id}><b>{line.senderName}:</b> {line.content}<small>{customerMessageDate(line.sentAt)}</small></p>)}</div>
+            {renderCustomerMessageLines(message)}
             <fieldset className="customer-message__status-actions workflow-edit-scope" disabled={!canManageCustomerWorkflows}><span>Trạng thái xử lý</span><button type="button" className={message.status === "new" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "new")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Chưa xem</button><button type="button" className={message.status === "processing" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "processing")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đang xử lý</button><button type="button" className={message.status === "resolved" ? "is-selected" : ""} onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id || hasWorkflowPending("message.status", message.id, customerLocationForMessage(message))}>Đã hoàn thành</button><button type="button" className="customer-message__assign" onClick={() => openCustomerMessageTask(message)} disabled={!canAssignCustomerMessages || customerMessageTaskBusy || hasWorkflowPending("message.assign", message.id, customerLocationForMessage(message))} title={canAssignCustomerMessages ? "Giao việc từ tin nhắn khách" : "Chỉ Admin và Quản lý chung được giao việc"}>Giao việc</button></fieldset>{!canManageCustomerWorkflows && <p className="workflow-readonly-label">Chỉ xem · Quản lý xử lý tin nhắn và giao việc</p>}
             {message.archivePending && <div className="workflow-item-status workflow-item-status--warning"><span>Đã hoàn thành · Chờ lưu Excel vào Drive. Tin nhắn vẫn được giữ tại đây.</span><button type="button" onClick={() => void updateCustomerMessageStatus(message, "resolved")} disabled={!canManageCustomerWorkflows || customerMessageStatusBusyId === message.id}>Thử lưu Drive</button></div>}
           </article>) : <p className="customer-messages__empty">Chưa có tin nhắn khách trong phạm vi này.</p>}
@@ -5826,9 +5907,9 @@ export default function Home() {
     </div>
   </section>;
 
-  const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú chưa hoàn thành">
+  const renderOutstandingNotesSummary = (className = "") => canViewNotesSummary ? <section className={`sidebar-notes ${className} ${sidebarNotesOpen ? "sidebar-notes--open" : ""}`} aria-label="Tổng hợp ghi chú">
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarNotesOpen((isOpen) => !isOpen)} aria-expanded={sidebarNotesOpen}>
-      <span><b>Ghi chú chưa hoàn thành</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em>{sidebarNotesOpen ? "⌃" : "⌄"}</em>
+      <span><b>Ghi chú</b><small>{outstandingSidebarNotes.length} công việc · tất cả khách hàng</small></span><em aria-hidden="true">{sidebarNotesOpen ? "⌃" : "⌄"}</em>
     </button>
     <div className="sidebar-notes__list" hidden={!sidebarNotesOpen}>
       {outstandingSidebarNotes.length ? groupSidebarItems(outstandingSidebarNotes, ({ location }) => `${location.year}-${location.month}-${location.record.projectId}`).map(({ key, items }) => <SidebarCustomerGroup key={key} title={customerDisplayName(items[0].location.record)} subtitle={`${items[0].location.record.houseId ? `${items[0].location.record.houseId} · ` : ""}T${items[0].location.month}/${items[0].location.year}`} count={items.length} countLabel="công việc" stateClass={items.some(({ note }) => isAssignedToLoggedInEmployee(note.assigneeEmail) && !note.acceptedAt) ? "sidebar-note--assignment-pending" : ""}>
@@ -5841,9 +5922,9 @@ export default function Home() {
     </div>
   </section> : null;
 
-  const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarDesignOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế chưa hoàn thiện">
+  const renderOutstandingDesignSummary = (className = "") => canViewDesignSummary ? <section className={`sidebar-notes sidebar-design-tasks ${className} ${sidebarDesignOpen ? "sidebar-notes--open" : ""}`} aria-label="Thiết kế">
     <button type="button" className="sidebar-notes__toggle" onClick={() => setSidebarDesignOpen((isOpen) => !isOpen)} aria-expanded={sidebarDesignOpen}>
-      <span><b>Thiết kế chưa hoàn thiện</b><small>{visibleAssignedDesignTasks.length} hạng mục · {canAssignProjectWork ? "bạn đã giao" : "được giao cho bạn"}</small></span><em>{sidebarDesignOpen ? "⌃" : "⌄"}</em>
+      <span><b>Thiết kế</b><small>{visibleAssignedDesignTasks.length} hạng mục · {canAssignProjectWork ? "bạn đã giao" : "được giao cho bạn"}</small></span><em aria-hidden="true">{sidebarDesignOpen ? "⌃" : "⌄"}</em>
     </button>
     <div className="sidebar-notes__list" hidden={!sidebarDesignOpen}>
       {visibleAssignedDesignTasks.length ? groupSidebarItems(visibleAssignedDesignTasks.slice().sort((left, right) => (parseDesignDate(left.plannedDate)?.dayNumber ?? Infinity) - (parseDesignDate(right.plannedDate)?.dayNumber ?? Infinity)), (task) => `${task.year}-${task.month}-${task.projectId}`).map(({ key, items }) => <SidebarCustomerGroup key={key} title={items[0].customerName || items[0].houseId || "Khách hàng"} subtitle={`${items[0].houseId ? `${items[0].houseId} · ` : ""}T${items[0].month}/${items[0].year}`} count={items.length} countLabel="hạng mục thiết kế" stateClass={items.some((task) => isResponsibleForAssignment(task) && !task.acceptedAt) ? "sidebar-note--assignment-pending" : ""}>
@@ -5954,13 +6035,13 @@ export default function Home() {
               <div className="overview-metrics">
                 <div className="overview-metric"><span><WorkspaceIcon name="folder" size={18} />Hồ sơ trong tháng</span><strong>{customerLocations.filter((location) => location.year === selectedYear && location.month === selectedMonth).length}</strong><small>Tháng {selectedMonth} · {selectedYear}</small></div>
                 {canViewNotesSummary && <div className="overview-metric"><span><WorkspaceIcon name="note" size={18} />Công việc đang chờ</span><strong>{outstandingSidebarNotes.length}</strong><small>{outstandingSidebarNotes.filter(({ note }) => note.priority !== "Bình thường").length} công việc ưu tiên cao</small></div>}
-                {canViewCustomerMessages && <button type="button" className="overview-metric" onClick={openAllCustomerMessages}><span><WorkspaceIcon name="message" size={18} />Tin nhắn khách</span><strong>{customerMessages.filter((message) => message.status !== "resolved").length}</strong><small>Mở hộp tin nhắn <span aria-hidden="true">↗</span></small></button>}
+                {canViewCustomerMessages && <button type="button" className="overview-metric" aria-controls="customer-message-summary-list" onClick={toggleOverviewMessages}><span><WorkspaceIcon name="message" size={18} />Tin nhắn khách</span><strong>{customerMessages.filter((message) => message.status !== "resolved").length}</strong><small>Danh sách tin nhắn <span aria-hidden="true">⌄</span></small></button>}
               </div>
               <div className="customer-directory-heading"><h2>Khách hàng</h2>{isBuiltInAdminLoggedIn && <button className="add-button customer-gateway__add" onClick={openAddDialog}><WorkspaceIcon name="plus" size={17} /> Thêm khách hàng</button>}</div>
               <label className="customer-search">
                 <WorkspaceIcon name="search" />
-                <input value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên khách hàng hoặc mã nhà…" aria-label="Tìm khách hàng" />
-                {search && <button type="button" className="search-clear" aria-label="Xóa tìm kiếm khách hàng" onClick={() => setSearch("")}>×</button>}
+                <input value={search} onChange={(event) => { setSearch(event.target.value); searchCustomersOnDrive(event.target.value); }} placeholder="Tìm tên hoặc mã nhà trên tất cả tháng và năm…" aria-label="Tìm khách hàng" />
+                {search && <button type="button" className="search-clear" aria-label="Xóa tìm kiếm khách hàng" onClick={() => { setSearch(""); searchCustomersOnDrive(""); }}>×</button>}
               </label>
 
               <div className="customer-period" aria-label="Chọn thời gian khách hàng">
@@ -5975,7 +6056,7 @@ export default function Home() {
                     <span className="customer-result__identity" title={customerDisplayName(location.record)}><b>{customerDisplayName(location.record)}</b></span>
                   </button><div className="project-actions customer-result-actions"><button type="button" className="more-button customer-result-more" onClick={() => setOpenMenuId((current) => current === `customer:${location.year}-${location.month}-${location.record.id}` ? null : `customer:${location.year}-${location.month}-${location.record.id}`)} aria-label={`Tùy chọn khách hàng ${customerDisplayName(location.record)}`} aria-haspopup="menu" aria-expanded={openMenuId === `customer:${location.year}-${location.month}-${location.record.id}`} disabled={!canManageCustomerWorkflows || customerMutationBusy}>…</button>{openMenuId === `customer:${location.year}-${location.month}-${location.record.id}` && <div className="project-menu customer-result-menu" role="menu" aria-label={`Thao tác ${customerDisplayName(location.record)}`}><button type="button" role="menuitem" onClick={() => startProtectedAction("rename", location.record, location.year, location.month)}>Rename</button>{isBuiltInAdminLoggedIn && <button type="button" role="menuitem" className="project-menu__delete" onClick={() => startProtectedAction("delete", location.record, location.year, location.month)}>Delete</button>}</div>}</div><span className="customer-result__date">T{location.month} / {location.year}</span><button type="button" className="customer-result-open customer-result__arrow" onClick={() => selectCustomer(location)} aria-label={`Mở hồ sơ ${customerDisplayName(location.record)}`}>→</button></div>
                 )) : (
-                  <div className="customer-search-empty"><span>∅</span><p>{search.trim() ? `Không tìm thấy khách hàng phù hợp trong T${selectedMonth}/${selectedYear}.` : `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.`}</p>{isBuiltInAdminLoggedIn && <button onClick={openAddDialog}>Tạo khách hàng mới</button>}</div>
+                  <div className="customer-search-empty"><span>∅</span><p>{!search.trim() ? `Chưa có khách hàng trong T${selectedMonth}/${selectedYear}.` : customerSearchStatus === "loading" ? "Đang tìm trên tất cả tháng và năm…" : customerSearchStatus === "failed" ? "Chưa thể tìm trên Drive. Hãy thử lại." : "Không tìm thấy khách hàng phù hợp."}</p>{isBuiltInAdminLoggedIn && customerSearchStatus !== "loading" && <button onClick={openAddDialog}>Tạo khách hàng mới</button>}</div>
                 )}
               </div>
 
@@ -6118,6 +6199,18 @@ export default function Home() {
               {renderWarrantySchedule()}
             </section>
           </section>
+        ) : activeFolder === "Thi công" ? (
+          <section className="workflow-page">
+            {renderWorkflowCustomerSearch()}
+            {selectedCustomerLocation && (loggedInEmployee && currentWorkflowToken
+              ? <ConstructionPhotos
+                  key={`${projectWorkflowScope(selectedCustomerLocation)}:${loggedInEmployeeEmail}:${driveScriptUrl}:${driveLinkUrl}`}
+                  canCapture
+                  loadPhotos={() => requestConstructionPhotos<{ days?: ConstructionPhotoDay[] }>(selectedCustomerLocation, "list-construction-photos").then((result) => result.days ?? [])}
+                  uploadPhoto={(input) => requestConstructionPhotos<ConstructionPhotoUploadResult>(selectedCustomerLocation, "upload-construction-photo", input)}
+                />
+              : <section className="coming-soon"><h1>Ảnh thi công</h1><p>Đăng nhập để xem và lưu ảnh của hồ sơ.</p><button className="add-button" type="button" onClick={() => openEmployeeLogin()}>Đăng nhập</button></section>)}
+          </section>
         ) : activeFolder === "Tài liệu" ? (
           <section className="document-workspace">
             {renderDocumentLibrary()}
@@ -6149,6 +6242,16 @@ export default function Home() {
             <label>Mã nhà <span className="field-code">(bắt buộc)</span><input required value={houseId} onChange={(event) => setHouseId(event.target.value)} placeholder="Ví dụ: BT-08" /></label>
             <button className="add-button" type="submit" disabled={creatingCustomer}>{creatingCustomer ? "Đang tạo trên Drive…" : "Tạo thư mục"}</button>
           </form>
+        </div>
+      )}
+
+      {dialogKey === "unlinked-message" && (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setUnlinkedCustomerMessageId("")}>
+          <section className="security-dialog" onMouseDown={(event) => event.stopPropagation()}>
+            <button type="button" className="dialog-close" onClick={() => setUnlinkedCustomerMessageId("")} aria-label="Đóng">×</button>
+            <h2>{unlinkedCustomerMessage?.groupName || "Tin nhắn khách"}</h2>
+            {unlinkedCustomerMessage ? renderCustomerMessageLines(unlinkedCustomerMessage) : <p>{loadingCustomerMessages ? "Đang nạp tin nhắn…" : "Tin nhắn hiện không có trong danh sách."}</p>}
+          </section>
         </div>
       )}
 

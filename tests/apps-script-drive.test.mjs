@@ -58,6 +58,43 @@ test("Drive folder matching tolerates Unicode normalization and casing", () => {
   assert.equal(context.normalizeDriveName_(composed), context.normalizeDriveName_(decomposed));
 });
 
+test("global customer search finds workbook-free folders in every period without crossing Drive roots", () => {
+  const makeDirectory = (name, id, children = []) => {
+    const result = { name, id, children, parent: null, trashed: false, getName() { return this.name; }, getId() { return this.id; }, getFolders() { return iterator(this.children); }, getParents() { return iterator(this.parent ? [this.parent] : []); }, isTrashed() { return this.trashed; } };
+    children.forEach((child) => { child.parent = result; });
+    return result;
+  };
+  const january = makeDirectory("TK-105", "january-house");
+  const august = makeDirectory("TK-105", "august-house");
+  const extras = Array.from({ length: 17 }, (_, index) => makeDirectory(`TK-105-${index}`, `extra-${index}`));
+  const past = makeDirectory("TK-105", "past-house");
+  const removed = makeDirectory("TK-105", "trashed-house");
+  removed.trashed = true;
+  const otherRoot = makeDirectory("TK-105", "foreign-house");
+  makeDirectory("Khách hàng", "foreign-root", [makeDirectory("2026", "foreign-year", [makeDirectory("T1", "foreign-month", [otherRoot])])]);
+  const customers = makeDirectory("Khách hàng", "customer-root", [
+    makeDirectory("2026", "year-26", [makeDirectory("T1", "month-01", [january, removed, ...extras]), makeDirectory("T8", "month-08", [august])]),
+    makeDirectory("2025", "year-25", [makeDirectory("T12", "month-12", [past])]),
+  ]);
+  const context = loadContext({ DriveApp: { getFoldersByName: (name) => iterator(name === "TK-105" ? [past, january, otherRoot, august, removed] : []) } });
+  context.latestCustomerWorkbook_ = (customer) => customer === august ? { workbook: "august" } : null;
+  context.customerIndexFromWorkbook_ = () => ({ id: "workbook-august", name: "Đình   Phong", houseId: "OLD-CODE", projectId: "GM2026-PHONG", details: {}, isHydrated: false });
+  const periods = (result) => JSON.parse(JSON.stringify(result.map((year) => [year.year, year.months.map((month) => [month.label, month.records.map((record) => record.driveFolderId)])])));
+  const expected = [[2026, [["T8", ["august-house"]], ["T1", ["january-house", ...extras.map((item) => item.getId())]]]], [2025, [["T12", ["past-house"]]]]];
+  assert.deepEqual(periods(context.searchCustomerIndex_(customers, "TK-105")), expected);
+  assert.deepEqual(periods(context.searchCustomerIndex_(customers, "tk-105")), expected);
+  assert.deepEqual(periods(context.searchCustomerIndex_(customers, "tk-10")), expected);
+  const byName = context.searchCustomerIndex_(customers, "dinh phong");
+  assert.deepEqual(periods(byName), [[2026, [["T8", ["august-house"]]]]]);
+  assert.equal(byName[0].months[0].records[0].houseId, "TK-105");
+  context.writePropertyJson_("gmcrm-workspace-cache-v1", { years: [{ year: 2026, months: [{ label: "T8", records: [{ projectId: "GM2026-PHONG", houseId: "TK-105", driveFolderId: august.getId(), name: "Đinh Ánh", details: { private: "never expose" } }] }, { label: "T1", records: [{ projectId: "TK-105", houseId: "TK-105", driveFolderId: otherRoot.getId(), name: "Khách ngoài Drive" }] }] }] });
+  assert.equal(context.searchCustomerIndex_(customers, "dinh anh").length, 0, "signed-out lookup does not expose names from the shared profile cache");
+  const byCachedName = context.searchCustomerIndex_(customers, "dinh anh", true);
+  assert.deepEqual(periods(byCachedName), [[2026, [["T8", ["august-house"]]]]]);
+  assert.deepEqual(Object.keys(byCachedName[0].months[0].records[0].details), []);
+  assert.equal(context.searchCustomerIndex_(customers, "khach ngoai drive", true).length, 0);
+});
+
 test("Drive root links can be normalized and saved for all devices", () => {
   const values = new Map();
   const folder = { getName: () => "GM Manager" };
@@ -205,10 +242,12 @@ test("an authenticated admin can create a customer and authorization is required
   };
   f.context.ensureProjectFolders_ = (folder) => { assert.equal(folder, newCustomer); foldersInitialized += 1; };
   const request = { year: 2026, month: 9, projectId: "GM-NEW", houseId: "HP-NEW", folderId: newCustomer.getId(), adminSessionToken: f.adminSessionToken };
+  const beforeCreateCacheKey = f.context.driveScopedCacheKey_("customer-search-fixture");
   const created = f.context.createCustomerFolder_(request);
   assert.equal(created.ok, true);
   assert.equal(created.folderId, newCustomer.getId());
   assert.equal(foldersInitialized, 1);
+  assert.notEqual(f.context.driveScopedCacheKey_("customer-search-fixture"), beforeCreateCacheKey, "confirmed creation invalidates root-scoped search and index caches");
   const deletion = { ...request, mutationId: "admin-delete-retry" };
   assert.equal(f.context.deleteCustomerFolder_(deletion).trashed, true);
   assert.throws(() => f.context.deleteCustomerFolder_({ ...deletion, adminSessionToken: undefined }), /Chỉ admin mới có quyền/);
@@ -896,4 +935,112 @@ test("customer portal keeps a published token private and returns only project p
     acceptanceDesignProgress: [],
     warrantyProgress: [{ content: "Kiểm tra", plannedDate: "21/09/2026", actualDate: "22/09/2026" }],
   });
+});
+
+function constructionPhotosFixture() {
+  const fixture = customerMutationFixture();
+  const { context } = fixture;
+  const events = [];
+  let driveReads = 0;
+  let serial = 0;
+  const getFolderById = context.DriveApp.getFolderById;
+  context.DriveApp.getFolderById = (id) => { driveReads += 1; return getFolderById(id); };
+  context.LockService.getScriptLock = () => ({ waitLock: () => events.push("lock"), releaseLock: () => events.push("unlock") });
+  context.json_ = (value) => ({ getContent: () => JSON.stringify(value) });
+  const formatDate = context.Utilities.formatDate;
+  context.Utilities.formatDate = (date, zone, format) => formatDate(date, zone, format).replace("SSS", String(date.getUTCMilliseconds()).padStart(3, "0"));
+  const newBlob = context.Utilities.newBlob;
+  context.Utilities.newBlob = (bytes, mimeType, name) => ({ ...newBlob(bytes), mimeType, name });
+  context.Utilities.base64Decode = (value) => Array.from(Buffer.from(value, "base64"), (byte) => byte > 127 ? byte - 256 : byte);
+  const addPhotoFolderBehavior = (folder) => {
+    const files = [];
+    folder.getFiles = () => iterator(files);
+    folder.getFilesByName = (name) => iterator(files.filter((file) => file.getName() === name));
+    folder.createFolder = (name) => {
+      const child = addPhotoFolderBehavior(fixture.makeFolder(name, `construction-folder-${++serial}`));
+      folder.children.push(child);
+      events.push(`folder:${name}`);
+      return child;
+    };
+    folder.createFile = (blob) => {
+      const id = `construction-file-${++serial}`;
+      const file = { getId: () => id, getName: () => blob.name, getMimeType: () => blob.mimeType, isTrashed: () => false, getDateCreated: () => new Date("2026-11-12T18:00:00.000Z") };
+      files.push(file);
+      events.push(`file:${blob.name}`);
+      return file;
+    };
+    return folder;
+  };
+  addPhotoFolderBehavior(fixture.target);
+  const staff = { name: "Hà Công Trình", email: "construction@example.com", loginCode: "field-code", status: "Có", permissions: ["Thi công"] };
+  const other = { ...staff, name: "Hà Thiết Kế", email: "design@example.com", permissions: ["Thiết kế"] };
+  context.loadPersonnel_ = () => ({ personnel: { staff: [staff, other] } });
+  const login = (member) => context.verifyEmployeeLogin_({ name: member.name, loginCode: member.loginCode }).workflowSessionToken;
+  const scope = { year: 2026, month: 9, projectId: "GM-TARGET", houseId: "HP-587", folderId: fixture.target.getId() };
+  const photo = {
+    capturedAt: "2026-11-09T17:05:26.234Z",
+    uploadId: "test-construction-shot",
+    file: { mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7/8AAAAASUVORK5CYII=" },
+  };
+  return { ...fixture, events, scope, photo, staff, staffToken: login(staff), otherToken: login(other), driveReads: () => driveReads };
+}
+
+test("construction photo API authenticates before Drive and rejects invalid data without making folders", () => {
+  const f = constructionPhotosFixture();
+  const post = (action, payload = {}) => f.context.bridgeDispatch({ ...f.scope, action, ...payload });
+  assert.equal(post("list-construction-photos", { email: f.staff.email }).code, "AUTH_REQUIRED");
+  assert.equal(post("upload-construction-photo", { ...f.photo, workflowSessionToken: "forged" }).code, "AUTH_REQUIRED");
+  assert.equal(post("list-construction-photos", { workflowSessionToken: f.otherToken }).code, "FORBIDDEN");
+  assert.equal(post("upload-construction-photo", { ...f.photo, workflowSessionToken: f.otherToken }).code, "FORBIDDEN");
+  for (const patch of [
+    { capturedAt: "2026-11-31T17:05:26.234Z" },
+    { uploadId: "../photo" },
+    { file: { mimeType: "image/svg+xml", data: "YQ==" } },
+    { file: { mimeType: "image/png", data: "broken==" } },
+    { file: { mimeType: "image/jpeg", data: f.photo.file.data } },
+  ]) {
+    assert.equal(post("upload-construction-photo", { ...f.photo, ...patch, workflowSessionToken: f.staffToken }).code, "VALIDATION");
+  }
+  assert.equal(f.driveReads(), 0);
+  assert.equal(f.target.children.length, 0);
+  assert.equal(post("list-construction-photos", { workflowSessionToken: f.staffToken }).days.length, 0);
+  assert.equal(f.target.children.length, 0, "listing must not create the empty gallery");
+  const wrongScope = post("upload-construction-photo", { ...f.photo, workflowSessionToken: f.staffToken, folderId: f.otherMonthTarget.getId() });
+  assert.equal(wrongScope.ok, false);
+  assert.equal(f.target.children.length, 0);
+  assert.equal(f.otherMonthTarget.children.length, 0);
+});
+
+test("construction photo uploads group by Vietnamese capture date and reuse an existing shot on retry", () => {
+  const f = constructionPhotosFixture();
+  const request = { ...f.scope, ...f.photo, workflowSessionToken: f.staffToken, action: "upload-construction-photo" };
+  const uploaded = f.context.bridgeDispatch(request);
+  assert.equal(uploaded.ok, true);
+  assert.equal(uploaded.date, "10-11-2026");
+  assert.equal(uploaded.photo.capturedAt, f.photo.capturedAt);
+  assert.match(uploaded.photo.name, /^Ảnh thi công 00-05-26-234-.*\.png$/);
+  assert.equal(uploaded.photo.viewUrl, `https://drive.google.com/file/d/${uploaded.photo.id}/view`);
+  assert.match(uploaded.photo.thumbnailUrl, /^https:\/\/drive\.google\.com\/thumbnail\?/);
+  assert.deepEqual(f.events.slice(0, -1), ["lock", "folder:Thi công", "folder:Ảnh thi công", "folder:10-11-2026", `file:${uploaded.photo.name}`]);
+  assert.equal(f.events.at(-1), "unlock");
+  const retry = f.context.bridgeDispatch(request);
+  assert.equal(retry.repeated, true);
+  assert.equal(retry.photo.id, uploaded.photo.id);
+  assert.equal(f.events.filter((event) => event.startsWith("file:")).length, 1);
+  const earlier = f.context.bridgeDispatch({ ...request, capturedAt: "2026-11-09T16:58:12.100Z", uploadId: "test-previous-day-shot" });
+  const later = f.context.bridgeDispatch({ ...request, capturedAt: "2026-11-09T17:07:30.150Z", uploadId: "test-later-same-day-shot" });
+  assert.equal(earlier.date, "09-11-2026");
+  assert.equal(later.folderId, uploaded.folderId);
+  const gallery = f.target.children[0].children[0];
+  gallery.createFolder("31-11-2026");
+  gallery.createFolder("11-11-2026");
+  gallery.children[0].createFile({ name: "not-a-photo.pdf", mimeType: "application/pdf" });
+  const writesBeforeList = f.events.length;
+  const result = f.context.bridgeDispatch({ ...f.scope, workflowSessionToken: f.staffToken, action: "list-construction-photos" });
+  assert.equal(result.ok, true);
+  assert.equal(f.events.length, writesBeforeList, "listing must neither acquire the write lock nor mutate Drive");
+  assert.deepEqual(Array.from(result.days, (day) => day.date), ["10-11-2026", "09-11-2026"]);
+  assert.deepEqual(Array.from(result.days[0].photos, (photo) => photo.id), [later.photo.id, uploaded.photo.id]);
+  assert.equal(result.days[0].photos[1].capturedAt, f.photo.capturedAt, "the stored filename preserves capture time instead of the later upload time");
+  assert.equal(result.days[1].photos[0].id, earlier.photo.id);
 });

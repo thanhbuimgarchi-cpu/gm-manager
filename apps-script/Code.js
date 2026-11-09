@@ -205,6 +205,9 @@ function createCustomerFolder_(payload) {
     } catch (cacheError) { /* A confirmed new Drive folder stays created; first workflow use can import it safely. */ }
   }
   clearCustomerDriveDeletion_({ year: year, month: month, projectId: projectId, houseId: houseId });
+  if (creatingNewCustomer || legacyFolder || deletedScopes.length) {
+    try { bumpCustomerTreeRevision_(); } catch (cacheError) { /* A confirmed folder remains created even if the cache revision cannot be saved. */ }
+  }
   cacheFolder_("gmcrm-customer-folder-" + year + "-" + month + "-" + folderKey, folder);
   return { ok: true, folderId: folder.getId(), folderName: folder.getName(), folderUrl: folder.getUrl(), year: year, month: month, projectId: projectId, houseId: houseId };
 }
@@ -301,8 +304,12 @@ function saveCustomerDriveMutation_(payload, folder, deleted) {
   writePropertyJson_(customerDriveMutationsKey_(), next);
   const stored = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY);
   if (stored && Array.isArray(stored.years)) writePropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY, { ...stored, updatedAt: mutation.updatedAt, years: applyCustomerDriveMutations_(stored.years) });
-  PropertiesService.getScriptProperties().setProperty("gmcrm-customer-tree-revision-" + configuredRootFolderId_(), String(mutation.updatedAt) + "-" + Math.random().toString(36).slice(2, 7));
+  bumpCustomerTreeRevision_();
   return mutation;
+}
+
+function bumpCustomerTreeRevision_() {
+  PropertiesService.getScriptProperties().setProperty("gmcrm-customer-tree-revision-" + configuredRootFolderId_(), String(Date.now()) + "-" + Math.random().toString(36).slice(2, 7));
 }
 
 function clearCustomerDriveDeletion_(payload) {
@@ -430,6 +437,7 @@ function doPost(event) {
       }
     }
     if (payload.action === "list-workflow-files") return json_(listWorkflowFiles_(payload));
+    if (payload.action === "list-construction-photos") return json_(listConstructionPhotos_(payload));
     if (payload.action === "load-work-notes") return json_(loadWorkNotes_(payload));
     if (payload.action === "load-customer-messages") return json_(loadCustomerMessages_(payload));
     if (payload.action === "load-assigned-work-notes") return json_(loadAssignedWorkNotes_(payload));
@@ -449,6 +457,7 @@ function doPost(event) {
       if (payload.action === "create-workflow-date-folder") return json_(createWorkflowDateFolder_(payload));
       if (payload.action === "workflow-command") return json_(workflowCommand_(payload));
       if (payload.action === "upload-workflow-file") return json_(uploadWorkflowFile_(payload));
+      if (payload.action === "upload-construction-photo") return json_(uploadConstructionPhoto_(payload));
       if (payload.action === "save-personnel-cache") return json_(savePersonnelCache_(payload.personnel || {}));
       if (payload.action === "export-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
       if (payload.action === "sync-personnel") return json_(syncPersonnelWorkbook_(payload.personnel || {}));
@@ -687,11 +696,14 @@ function loadConsultingWorkspace_(payload) {
     return { ...result, record: workflowScopeDesignRecord_(current, actor) };
   }
   if (mode === "search") {
-    const query = String(payload.query || "").trim();
-    const cacheKey = "gmcrm-search-" + Utilities.base64EncodeWebSafe(query).slice(0, 120);
+    const query = String(payload.query || "").trim().slice(0, 160);
+    const normalized = customerSearchText_(query);
+    if (normalized.length < 2) return { ok: true, years: [] };
+    const signedIn = Boolean(workflowOptionalActor_(payload));
+    const cacheKey = "gmcrm-search-v3-" + (signedIn ? "staff-" : "public-") + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, normalized, Utilities.Charset.UTF_8));
     const cached = refresh ? null : readCachedJson_(cacheKey);
     if (cached) return cached;
-    const result = { ok: true, years: searchCustomerIndex_(customers, query) };
+    const result = { ok: true, years: searchCustomerIndex_(customers, query, signedIn) };
     cacheJson_(cacheKey, result, 180);
     return result;
   }
@@ -920,11 +932,24 @@ function loadCustomerProgress_(customers, payload) {
   };
 }
 
-function customerIndexFromFolder_(customerFolder, projectId) {
-  const workbook = latestCustomerWorkbook_(customerFolder, projectId);
-  if (!workbook) return null;
-  const record = customerIndexFromWorkbook_(workbook, projectId);
-  record.driveFolderId = customerFolder.getId();
+function customerIndexFromFolder_(customerFolder, projectId, metadata) {
+  const legacy = /^GM\d{2}\d{2}\d{4}/i.test(projectId);
+  const folderId = customerFolder.getId();
+  if (metadata && metadata.name && (metadata.authoritativeName || (metadata.name !== projectId && metadata.name !== metadata.houseId && metadata.name !== metadata.projectId && customerSearchText_(metadata.name) !== "chua co ma nha"))) {
+    return { id: "drive-" + projectId, driveFolderId: folderId, name: metadata.name, houseId: legacy ? metadata.houseId || "" : projectId, projectId: metadata.projectId || projectId, createdAt: metadata.createdAt || "", details: {}, isHydrated: false };
+  }
+  try {
+    const workbook = latestCustomerWorkbook_(customerFolder, projectId);
+    if (workbook) {
+      const record = customerIndexFromWorkbook_(workbook, projectId);
+      record.driveFolderId = folderId;
+      if (!legacy) record.houseId = projectId;
+      if (metadata && metadata.projectId) record.projectId = metadata.projectId;
+      return record;
+    }
+  } catch (error) { /* A missing or unreadable workbook cannot hide an existing project folder. */ }
+  const record = fastCustomerIndexFromFolder_(projectId, customerFolder);
+  if (metadata && metadata.projectId) record.projectId = metadata.projectId;
   return record;
 }
 
@@ -943,77 +968,82 @@ function customerIndexFromWorkbook_(file, projectId) {
   };
 }
 
-function searchCustomerIndex_(customers, query) {
-  const normalized = String(query || "").trim().toLowerCase();
-  if (!normalized) return [];
-  const directProjectMatches = searchExactProjectId_(customers, String(query || "").trim());
-  if (directProjectMatches.length) return directProjectMatches;
-  const resultsByPeriod = {};
-  let resultCount = 0;
+function customerSearchText_(value) {
+  return normalizeDriveName_(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/g, "d");
+}
+
+function addCustomerSearchMatch_(grouped, year, month, record) {
+  if (!grouped[year]) grouped[year] = { year: Number(year), months: [] };
+  const label = "T" + Number(month);
+  let period = grouped[year].months.find(function(item) { return item.label === label; });
+  if (!period) { period = { label: label, records: [] }; grouped[year].months.push(period); }
+  period.records.push(record);
+}
+
+function sortedCustomerSearchYears_(grouped) {
+  return Object.keys(grouped).map(function(key) {
+    const year = grouped[key];
+    year.months.forEach(function(month) { month.records = dedupeCustomerIndexRecords_(month.records); });
+    year.months.sort(function(a, b) { return Number(b.label.slice(1)) - Number(a.label.slice(1)); });
+    return year;
+  }).sort(function(a, b) { return b.year - a.year; });
+}
+
+function customerSearchMetadataByFolder_() {
+  // This cache can contain records from an earlier Drive root. Only use
+  // names and keys when the current Drive traversal confirms the same
+  // physical folder ID and period. Never return cached profile details.
+  const records = new Map();
+  let stored;
+  try { stored = readPropertyJson_(WORKSPACE_CACHE_PROPERTY_KEY); } catch (error) { /* The live Drive folders remain searchable even if the optional shared cache cannot be read. */ }
+  (stored && Array.isArray(stored.years) ? stored.years : []).forEach(function(year) {
+    (Array.isArray(year.months) ? year.months : []).forEach(function(month, index) {
+      const match = /^T(1[0-2]|[1-9])$/.exec(String(month.label || ""));
+      const monthNumber = match ? Number(match[1]) : index + 1;
+      (Array.isArray(month.records) ? month.records : []).forEach(function(record) {
+        if (!record || !record.driveFolderId) return;
+        records.set(Number(year.year) + ":" + monthNumber + ":" + record.driveFolderId, { name: String(record.name || "").trim(), houseId: record.houseId, projectId: record.projectId, createdAt: record.createdAt });
+      });
+    });
+  });
+  customerDriveMutations_().forEach(function(mutation) {
+    if (mutation.deleted || !mutation.folderId) return;
+    const key = Number(mutation.year) + ":" + Number(mutation.month) + ":" + mutation.folderId;
+    const current = records.get(key) || {};
+    const name = String(mutation.name || "").trim();
+    records.set(key, { ...current, projectId: mutation.projectId || current.projectId, houseId: mutation.houseId || current.houseId, ...(name ? { name: name, authoritativeName: true } : {}) });
+  });
+  return records;
+}
+
+function searchCustomerIndex_(customers, query, includeSharedNames = false) {
+  const normalized = customerSearchText_(query);
+  if (normalized.length < 2) return [];
+  const matches = function(value) { return customerSearchText_(value).indexOf(normalized) >= 0; };
+  const grouped = {};
+  const metadata = includeSharedNames ? customerSearchMetadataByFolder_() : new Map();
   const yearFolders = customers.getFolders();
-  while (yearFolders.hasNext() && resultCount < 16) {
+  while (yearFolders.hasNext()) {
     const yearFolder = yearFolders.next();
     const yearName = yearFolder.getName();
-    if (yearName.indexOf("-") === 0 || !/^\d{4}$/.test(yearName)) continue;
+    if (!/^\d{4}$/.test(yearName) || (yearFolder.isTrashed && yearFolder.isTrashed())) continue;
     const monthFolders = yearFolder.getFolders();
-    while (monthFolders.hasNext() && resultCount < 16) {
+    while (monthFolders.hasNext()) {
       const monthFolder = monthFolders.next();
       const match = /^T(1[0-2]|[1-9])$/.exec(monthFolder.getName());
-      if (monthFolder.getName().indexOf("-") === 0 || !match) continue;
+      if (!match || (monthFolder.isTrashed && monthFolder.isTrashed())) continue;
       const customerFolders = monthFolder.getFolders();
-      while (customerFolders.hasNext() && resultCount < 16) {
+      while (customerFolders.hasNext()) {
         const customerFolder = customerFolders.next();
         const projectId = customerFolder.getName();
-        if (projectId.indexOf("-") === 0) continue;
-        const record = customerIndexFromFolder_(customerFolder, projectId);
-        if (!record) continue;
-        const haystack = [record.name, record.houseId, record.projectId].join(" ").toLowerCase();
-        if (haystack.indexOf(normalized) === -1) continue;
-        const periodKey = yearName + "/" + match[1];
-        if (!resultsByPeriod[periodKey]) resultsByPeriod[periodKey] = { year: Number(yearName), months: [{ label: "T" + Number(match[1]), records: [] }] };
-        resultsByPeriod[periodKey].months[0].records.push(record);
-        resultCount += 1;
+        if (projectId.indexOf("-") === 0 || (customerFolder.isTrashed && customerFolder.isTrashed())) continue;
+        const record = customerIndexFromFolder_(customerFolder, projectId, metadata.get(yearName + ":" + match[1] + ":" + customerFolder.getId()));
+        if (!matches(projectId) && ![record.name, record.houseId, record.projectId].some(matches)) continue;
+        addCustomerSearchMatch_(grouped, yearName, match[1], record);
       }
     }
   }
-  return Object.keys(resultsByPeriod).map(function(key) {
-    const result = resultsByPeriod[key];
-    result.months[0].records = dedupeCustomerIndexRecords_(result.months[0].records);
-    return result;
-  }).sort(function(a, b) {
-    return b.year - a.year || Number(b.months[0].label.slice(1)) - Number(a.months[0].label.slice(1));
-  });
-}
-
-function searchExactProjectId_(customers, projectId) {
-  // Drive resolves an exact folder name from its index. This keeps a pasted
-  // house code from triggering a month-by-month scan of every customer.
-  if (!validCustomerFolderKey_(projectId)) return [];
-  const resultsByPeriod = {};
-  const folders = DriveApp.getFoldersByName(projectId);
-  while (folders.hasNext()) {
-    const customerFolder = folders.next();
-    const monthParents = customerFolder.getParents();
-    if (!monthParents.hasNext()) continue;
-    const monthFolder = monthParents.next();
-    const monthMatch = /^T(1[0-2]|[1-9])$/.exec(monthFolder.getName());
-    if (!monthMatch) continue;
-    const yearParents = monthFolder.getParents();
-    if (!yearParents.hasNext()) continue;
-    const yearFolder = yearParents.next();
-    const yearName = yearFolder.getName();
-    if (!/^\d{4}$/.test(yearName)) continue;
-    const customersParents = yearFolder.getParents();
-    if (!customersParents.hasNext() || customersParents.next().getId() !== customers.getId()) continue;
-    const record = customerIndexFromFolder_(customerFolder, projectId);
-    if (!record) continue;
-    const key = yearName + "/" + monthMatch[1];
-    if (!resultsByPeriod[key]) resultsByPeriod[key] = { year: Number(yearName), months: [{ label: "T" + Number(monthMatch[1]), records: [] }] };
-    resultsByPeriod[key].months[0].records.push(record);
-  }
-  return Object.keys(resultsByPeriod).map(function(key) { return resultsByPeriod[key]; }).sort(function(a, b) {
-    return b.year - a.year || Number(b.months[0].label.slice(1)) - Number(a.months[0].label.slice(1));
-  });
+  return sortedCustomerSearchYears_(grouped);
 }
 
 function latestWorkbook_(folder) {
@@ -1706,6 +1736,143 @@ function uploadWorkflowFile_(payload) {
   const file = workflowFolder.createFile(blob);
   CacheService.getScriptCache().remove(driveScopedCacheKey_("gmcrm-files-" + year + "-" + month + "-" + folderKey + "-" + Utilities.base64EncodeWebSafe(workflow)));
   return { ok: true, fileId: file.getId(), fileName: fileName, fileUrl: file.getUrl(), folderUrl: workflowFolder.getUrl() };
+}
+
+const CONSTRUCTION_WORKFLOW_FOLDER = "Thi công";
+const CONSTRUCTION_PHOTOS_FOLDER = "Ảnh thi công";
+const CONSTRUCTION_PHOTOS_TIME_ZONE = "Asia/Ho_Chi_Minh";
+const CONSTRUCTION_PHOTO_MAX_BYTES = 12 * 1024 * 1024;
+const CONSTRUCTION_PHOTO_EXTENSIONS = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
+
+function constructionPhotoProject_(payload) {
+  workflowMayUse_(workflowActor_(payload), CONSTRUCTION_WORKFLOW_FOLDER);
+  const year = Number(payload.year);
+  const month = Number(payload.month);
+  const projectId = String(payload.projectId || "").trim();
+  const houseId = String(payload.houseId || "").trim();
+  const folderId = String(payload.folderId || "").trim();
+  if (!/^\d{4}$/.test(String(year)) || !Number.isInteger(month) || month < 1 || month > 12 || !validCustomerFolderKey_(projectId) || (houseId && !validCustomerFolderKey_(houseId))) {
+    throw workflowError_("VALIDATION", "Thiếu thông tin hồ sơ công trình hợp lệ.");
+  }
+  return { year: year, month: month, projectId: projectId, houseId: houseId, folderId: folderId, driveFolderId: folderId };
+}
+
+function constructionCustomerFolder_(project) {
+  if (isCustomerDriveRecordDeleted_(project)) throw workflowError_("NOT_FOUND", "Hồ sơ công trình đã được xóa trên Drive.");
+  return existingCustomerMutationFolder_(project, customerMutationMonthFolder_(project));
+}
+
+function constructionPhotoDayKey_(folderName) {
+  const parts = /^(\d{2})-(\d{2})-(\d{4})$/.exec(folderName);
+  if (!parts) return "";
+  const key = parts[3] + "-" + parts[2] + "-" + parts[1];
+  const utcDate = new Date(key + "T00:00:00Z");
+  return Number.isFinite(utcDate.getTime()) && utcDate.toISOString().slice(0, 10) === key ? key : "";
+}
+
+function constructionPhotoMetadata_(file, dayKey, capturedAt) {
+  const id = file.getId();
+  const name = file.getName();
+  if (!capturedAt) {
+    // Uploaded filenames store the camera's local capture time. Drive's file
+    // creation time would move an offline photo to the day of upload.
+    const clock = /^Ảnh thi công (\d{2})-(\d{2})-(\d{2})-(\d{3})-/.exec(name);
+    const capture = clock ? new Date(dayKey + "T" + clock[1] + ":" + clock[2] + ":" + clock[3] + "." + clock[4] + "+07:00") : null;
+    capturedAt = capture && Number.isFinite(capture.getTime()) ? capture.toISOString() : file.getDateCreated().toISOString();
+  }
+  return {
+    id: id,
+    name: name,
+    mimeType: file.getMimeType(),
+    capturedAt: capturedAt,
+    viewUrl: driveFileViewUrl_(id),
+    downloadUrl: "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id),
+    thumbnailUrl: "https://drive.google.com/thumbnail?id=" + encodeURIComponent(id) + "&sz=w480",
+  };
+}
+
+function listConstructionPhotos_(payload) {
+  const customer = constructionCustomerFolder_(constructionPhotoProject_(payload));
+  const workflow = findFolder_(customer, CONSTRUCTION_WORKFLOW_FOLDER);
+  const photosFolder = workflow && findFolder_(workflow, CONSTRUCTION_PHOTOS_FOLDER);
+  const days = new Map();
+  const folders = photosFolder && photosFolder.getFolders();
+  while (folders && folders.hasNext()) {
+    const folder = folders.next();
+    if (folder.isTrashed()) continue;
+    const date = folder.getName();
+    const dayKey = constructionPhotoDayKey_(date);
+    if (!dayKey) continue;
+    let day = days.get(dayKey);
+    if (!day) {
+      day = { date: date, folderId: folder.getId(), folderUrl: folder.getUrl(), photos: [] };
+      days.set(dayKey, day);
+    }
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      if (!file.isTrashed() && /^image\//.test(file.getMimeType())) day.photos.push(constructionPhotoMetadata_(file, dayKey));
+    }
+  }
+  return { ok: true, days: Array.from(days.keys()).filter(function(key) { return days.get(key).photos.length > 0; }).sort().reverse().map(function(key) {
+    const day = days.get(key);
+    day.photos.sort(function(a, b) { return b.capturedAt.localeCompare(a.capturedAt) || a.id.localeCompare(b.id); });
+    return day;
+  }) };
+}
+
+function constructionPhotoBytes_(file) {
+  const mimeType = file.mimeType;
+  if (!Object.prototype.hasOwnProperty.call(CONSTRUCTION_PHOTO_EXTENSIONS, mimeType)) throw workflowError_("VALIDATION", "Ảnh phải ở định dạng JPEG, PNG hoặc WebP.");
+  const data = file.data;
+  if (typeof data !== "string" || !data || data.length > Math.ceil(CONSTRUCTION_PHOTO_MAX_BYTES / 3) * 4 || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) {
+    throw workflowError_("VALIDATION", "Dữ liệu ảnh không hợp lệ hoặc vượt quá 12 MB.");
+  }
+  let bytes;
+  try { bytes = Utilities.base64Decode(data); }
+  catch (error) { throw workflowError_("VALIDATION", "Không thể đọc dữ liệu ảnh."); }
+  if (!bytes.length || bytes.length > CONSTRUCTION_PHOTO_MAX_BYTES) throw workflowError_("VALIDATION", "Dữ liệu ảnh không hợp lệ hoặc vượt quá 12 MB.");
+  const startsWith = function(signature, offset) {
+    return bytes.length >= offset + signature.length && signature.every(function(value, index) { return (bytes[offset + index] & 255) === value; });
+  };
+  const matchesMime = {
+    "image/jpeg": function() { return bytes.length >= 5 && startsWith([255, 216, 255], 0) && startsWith([255, 217], bytes.length - 2); },
+    "image/png": function() { return startsWith([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82], 0) && bytes.length >= 33; },
+    "image/webp": function() { return bytes.length >= 20 && startsWith([82, 73, 70, 70], 0) && startsWith([87, 69, 66, 80, 86, 80, 56], 8); },
+  };
+  if (!matchesMime[mimeType]()) throw workflowError_("VALIDATION", "Nội dung tệp không khớp định dạng ảnh đã chọn.");
+  return bytes;
+}
+
+function uploadConstructionPhoto_(payload) {
+  const project = constructionPhotoProject_(payload);
+  const capturedText = typeof payload.capturedAt === "string" ? payload.capturedAt : "";
+  const capture = new Date(capturedText);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(capturedText) || !Number.isFinite(capture.getTime()) || capture.toISOString().slice(0, 19) !== capturedText.slice(0, 19)) {
+    throw workflowError_("VALIDATION", "Thời điểm chụp ảnh không hợp lệ.");
+  }
+  const uploadId = typeof payload.uploadId === "string" ? payload.uploadId : "";
+  if (!/^[A-Za-z0-9_-]{8,96}$/.test(uploadId)) throw workflowError_("VALIDATION", "Mã tải ảnh không hợp lệ.");
+  const file = payload.file || {};
+  const bytes = constructionPhotoBytes_(file);
+  const date = Utilities.formatDate(capture, CONSTRUCTION_PHOTOS_TIME_ZONE, "dd-MM-yyyy");
+  const clock = Utilities.formatDate(capture, CONSTRUCTION_PHOTOS_TIME_ZONE, "HH-mm-ss-SSS");
+  const name = CONSTRUCTION_PHOTOS_FOLDER + " " + clock + "-" + uploadId + CONSTRUCTION_PHOTO_EXTENSIONS[file.mimeType];
+  const customer = constructionCustomerFolder_(project);
+  const workflow = getOrCreateFolder_(customer, CONSTRUCTION_WORKFLOW_FOLDER);
+  const photosFolder = getOrCreateFolder_(workflow, CONSTRUCTION_PHOTOS_FOLDER);
+  const dayFolder = getOrCreateFolder_(photosFolder, date);
+  // The same immutable shot keeps its name across retries, even if the first
+  // response was lost after Drive finished writing it.
+  const existing = dayFolder.getFilesByName(name);
+  let stored = null;
+  while (existing.hasNext() && !stored) {
+    const candidate = existing.next();
+    if (!candidate.isTrashed()) stored = candidate;
+  }
+  const repeated = Boolean(stored);
+  if (!stored) stored = dayFolder.createFile(Utilities.newBlob(bytes, file.mimeType, name));
+  return { ok: true, date: date, folderId: dayFolder.getId(), folderUrl: dayFolder.getUrl(), photo: constructionPhotoMetadata_(stored, constructionPhotoDayKey_(date), capture.toISOString()), repeated: repeated };
 }
 
 const WORK_NOTES_FILE_NAME = "_gmcrm_cong_viec.json";

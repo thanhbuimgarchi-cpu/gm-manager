@@ -27,6 +27,17 @@ const records = [
 const years = [{year:2026,months:Array.from({length:12},(_,i)=>({label:`T${i+1}`,records:i===9?records:[]}))}];
 const notes = [{id:'n1',priority:'Cần lập tức',workType:'Thiết kế',assignee:'Nguyễn Minh Anh',assigneeEmail:'anh@example.com',creatorEmail:'admin',content:'Hoàn thiện phương án mặt bằng tầng 1.\nBổ sung bố trí nội thất phòng khách theo ý kiến khách hàng.',dueDate:'05/11/2026',actualDate:'',status:'Đen',acceptedAt:'',acceptedBy:''}];
 const messages = [{id:'m1',year:2026,month:10,projectId:records[0].projectId,houseId:'DV-75',customerName:'Chị Quỳnh',groupName:'DV-75-GM-Thiết kế',status:'new',firstMessageAt:'2026-10-28T02:00:00Z',lastMessageAt:'2026-10-28T02:30:00Z',messageCount:2,messages:[{id:'ml1',senderName:'Chị Quỳnh',content:'Nhờ bên mình kiểm tra lại phương án mặt bằng phòng khách.',sentAt:'2026-10-28T02:00:00Z'},{id:'ml2',senderName:'Chị Quỳnh',content:'Mình muốn thêm một cửa sổ ở phía sân vườn nhé.',sentAt:'2026-10-28T02:30:00Z'}]}];
+messages.push({id:'unlinked',year:2026,month:10,projectId:'',houseId:'',groupName:'Nhóm thử không có hồ sơ',status:'new',firstMessageAt:messages[0].firstMessageAt,lastMessageAt:messages[0].lastMessageAt,messageCount:1,messages:[{id:'unlinked-line',senderName:'Khách thử',content:'Tin nhắn độc lập.',sentAt:messages[0].lastMessageAt}]});
+async function openMessage(groupName = 'DV-75-GM-Thiết kế') {
+  const summary = page.locator('.customer-message-summary');
+  const toggle = summary.locator('.sidebar-notes__toggle');
+  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+  const group = summary.locator('.sidebar-customer-group').filter({has:page.locator('.sidebar-note').filter({hasText:groupName})});
+  const trigger = group.locator('.sidebar-customer-group__trigger');
+  if (await trigger.getAttribute('aria-expanded') === 'false') await trigger.click();
+  await group.locator('.sidebar-note').filter({hasText:groupName}).click();
+  await page.locator('.customer-message__body').waitFor();
+}
 await context.addInitScript(({years,personnel,notes,fixtureScriptUrl,adminSessionToken,workflowToken}) => {
   if (localStorage.getItem('qa-seeded')) return;
   localStorage.setItem('qa-seeded','1');
@@ -151,11 +162,11 @@ await page.locator('.customer-result').first().waitFor();
 assert.ok(await settingsAction.isVisible(),'admin can open settings from the overview');
 assert.ok(await accountAction().isVisible(),'account switching stays available on the overview');
 assert.ok(await notificationAction().isVisible(),'notifications can still be enabled on the overview');
-const groupedNotes=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__trigger').first();
+const groupedNotes=page.getByLabel('Tổng hợp ghi chú').first().locator('.sidebar-customer-group__trigger').first();
 assert.equal(await groupedNotes.getAttribute('aria-expanded'),'false');
 await groupedNotes.click();
 assert.equal(await groupedNotes.getAttribute('aria-expanded'),'true');
-assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-customer-group__items').first().isVisible());
+assert.ok(await page.getByLabel('Tổng hợp ghi chú').first().locator('.sidebar-customer-group__items').first().isVisible());
 await page.screenshot({path:'outputs/interface-qa/desktop-overview.png',fullPage:true});
 const overflow = () => page.evaluate(()=>({body:document.documentElement.scrollWidth,width:innerWidth}));
 const customerRowHeight = () => page.locator('.customer-result-row').first().evaluate(row => row.getBoundingClientRect().height);
@@ -203,9 +214,20 @@ assert.equal(await minhRow.count(),0);
 const mutationCalls=await bridgeFrame.evaluate(()=>window.qaMutationLog);
 assert.ok(mutationCalls.every(call=>call.year===2026&&call.month===10&&call.mutationId));
 assert.ok(mutationCalls.filter(call=>call.action==='delete-customer-folder').every(call=>call.adminSessionToken===adminSessionToken),'admin delete carries server-issued authorization');
-await page.getByRole('button',{name:'Thu gọn Tin nhắn khách'}).click();
-assert.ok(await page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first().locator('.sidebar-notes__list').isVisible(),'message fold leaves notes open');
-await page.getByRole('button',{name:'Mở danh sách Tin nhắn khách'}).click();
+const messageToggle = page.locator('.customer-message-summary .sidebar-notes__toggle');
+const messageList = page.locator('#customer-message-summary-list');
+await messageToggle.click();
+assert.equal(await messageToggle.getAttribute('aria-expanded'), 'false');
+assert.equal(await messageList.isVisible(), false);
+assert.ok(await page.getByLabel('Tổng hợp ghi chú').first().locator('.sidebar-notes__list').isVisible(),'message fold leaves notes open');
+await page.locator('button.overview-metric').filter({hasText:'Tin nhắn khách'}).click();
+assert.equal(await messageToggle.getAttribute('aria-expanded'), 'true');
+assert.equal(await messageList.isVisible(), true);
+assert.ok(await page.getByRole('heading',{name:'Tổng quan dự án'}).isVisible(),'toggling messages keeps the overview open');
+await openMessage('Nhóm thử không có hồ sơ');
+assert.ok(await page.getByRole('dialog',{name:'Nhóm thử không có hồ sơ'}).isVisible());
+assert.ok(await page.getByRole('heading',{name:'Tổng quan dự án'}).isVisible(),'an unlinked message cannot open a nameless customer workspace');
+await page.keyboard.press('Escape');
 await page.locator('.customer-result').filter({hasText:'DV-75'}).click();
 await page.locator('.record-detail--inline').waitFor();
 const desktopProjectBack = await backButtonPosition(1440);
@@ -254,8 +276,7 @@ await page.getByRole('button',{name:'Tài liệu',exact:true}).click();
 await page.locator('.document-library').waitFor();
 await page.screenshot({path:'outputs/interface-qa/desktop-documents.png',fullPage:true});
 await page.getByRole('button',{name:'← Tổng quan',exact:true}).click();
-await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
-await page.locator('.customer-message__body').waitFor();
+await openMessage();
 assert.ok((await page.locator('.customer-message__body').innerText()).includes('kiểm tra lại phương án'));
 await page.getByRole('button',{name:'Đang xử lý',exact:true}).click();
 await page.screenshot({path:'outputs/interface-qa/desktop-messages.png',fullPage:true});
@@ -348,7 +369,7 @@ await page.evaluate(() => {
   window.gmDesktop={isDesktop:true,isWindows:true,platform:'win32',
     selectWorkspaceFolder:async()=>{window.qaRootChosen=true;return {ok:true,path:'I:\\Shared drives\\GM Manager\\GM Manager'};},
     validateWorkspaceFolder:async()=>({ok:window.qaRootChosen,path:window.qaRootChosen?'I:\\Shared drives\\GM Manager\\GM Manager':'',error:'Chọn thư mục GM Manager hợp lệ.'}),
-    showNotification:async()=>{window.qaNotificationCalls++;return true;},
+    showNotification:async({body})=>{if(body.startsWith('Thông báo đã được bật.'))window.qaNotificationCalls++;return true;},
     openDocumentFolder:async payload=>{window.qaOpenedFolder=payload;return '';},
   };
 });
@@ -378,8 +399,7 @@ await page.evaluate(()=>localStorage.setItem('gm-manager-personnel-session-email
 await page.reload();
 await page.locator('.overview-metrics').waitFor();
 await assertRestrictedCustomerActions('ordinary employee');
-await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
-await page.locator('.customer-message__body').waitFor();
+await openMessage();
 assert.equal(await page.getByRole('button',{name:'Giao việc',exact:true}).count(),0,'employee reads messages without action buttons');
 assert.equal(await page.locator('.customer-message__status-actions').getByRole('button').count(),0,'employees cannot change message state');
 await page.evaluate(()=>localStorage.setItem('gm-manager-personnel-session-email','manager@example.com'));

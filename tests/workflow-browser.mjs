@@ -185,6 +185,16 @@ const page=await context.newPage();
 await page.clock.setFixedTime(new Date(fixedNow));
 const errors=[];page.on('pageerror',error=>errors.push(error.message));
 const baseUrl=process.env.GM_TEST_BASE_URL||'http://127.0.0.1:5173/gm-manager/';
+async function openMessage() {
+  const summary = page.locator('.customer-message-summary');
+  const toggle = summary.locator('.sidebar-notes__toggle');
+  if (await toggle.getAttribute('aria-expanded') === 'false') await toggle.click();
+  const group = summary.locator('.sidebar-customer-group').filter({has:page.locator('.sidebar-note').filter({hasText:message.groupName})});
+  const trigger = group.locator('.sidebar-customer-group__trigger');
+  if (await trigger.getAttribute('aria-expanded') === 'false') await trigger.click();
+  await group.locator('.sidebar-note').filter({hasText:message.groupName}).click();
+  await page.locator('.customer-message__body').waitFor();
+}
 let phase='bootstrap';
 try {
 await page.goto(baseUrl);
@@ -281,7 +291,7 @@ await employeeDesignRow.getByText('Chờ quản lý xác nhận',{exact:true}).w
 assert.equal(await employeeDesignRow.getByRole('button',{name:'Nhận xét',exact:true}).count(),0);
 assert.equal(records[0].designProgress[0].actualDate,'');
 const beforeRead=commandLog.length;
-await overview();await page.locator('.customer-message-summary .sidebar-notes__toggle').click();await page.locator('.customer-message__body').waitFor();
+await overview();await openMessage();
 assert.equal(await page.locator('.customer-message__status-actions').getByRole('button').count(),0);
 assert.equal(commandLog.length,beforeRead,'reading as an employee cannot submit workflow commands');
 await login(manager.name,manager.loginCode);
@@ -351,8 +361,7 @@ assert.ok(await designAssigneeField(privateAdminDesign.content).isVisible(),'adm
 assert.equal(await designAssigneeField('Thiết kế kiểm thử').count(),0,'admin cannot read another manager’s design history');
 phase='message assignment';
 await overview();
-await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
-await page.locator('.customer-message__body').waitFor();
+await openMessage();
 await page.getByRole('button',{name:'Giao việc',exact:true}).click();
 const assignment=page.locator('.message-task-dialog');
 await assignment.getByRole('checkbox').first().check();
@@ -371,8 +380,7 @@ assert.equal(messageAssignment.acceptedAt,'');
 control.messageArchivePending=true;
 phase='message archive pending';
 await overview();
-await page.locator('.customer-message-summary .sidebar-notes__toggle').click();
-await page.locator('.customer-message__body').waitFor();
+await openMessage();
 await page.getByRole('button',{name:'Đã hoàn thành',exact:true}).click();
 await page.waitForFunction(()=>Array.from(document.querySelectorAll('.customer-message')).some(element=>element.textContent.includes('Chọn dòng giao việc này.')));
 assert.ok(message.archivePending,'failed message archive remains pending');
@@ -407,7 +415,7 @@ control.staleAssignedFeed=true;
 await focusPoll();
 assert.ok((await cachedNotes()).some(note=>note.id===delayedNote.id),'an older assignment feed cannot remove a locally acknowledged note');
 assert.ok(await page.locator('textarea[aria-label="Nội dung công việc"]').evaluateAll(inputs=>inputs.some(input=>input.value==='Chỉ thuộc khách A, không được sang B')),'the open editor retains a note acknowledged at a newer project revision');
-const sidebar=page.getByLabel('Tổng hợp ghi chú chưa hoàn thành').first();
+const sidebar=page.getByLabel('Tổng hợp ghi chú').first();
 assert.equal(await sidebar.locator('.sidebar-note').filter({hasText:delayedNote.content}).count(),1,'an older feed cannot hide the acknowledged note from the sidebar');
 control.staleAssignedFeed=false;
 
