@@ -2,7 +2,7 @@
 
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
-import ConstructionPhotos, { type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
+import ConstructionPhotos, { requestConstructionPhotoPosition, type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
 import { createWorkflowClient, formatDateInput as formatDesignDateInput, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
@@ -2135,6 +2135,9 @@ export default function Home() {
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | "unsupported">("default");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
+  const [showPhotoLocationAction, setShowPhotoLocationAction] = useState(false);
+  const [photoLocationGranted, setPhotoLocationGranted] = useState(false);
+  const [requestingPhotoLocation, setRequestingPhotoLocation] = useState(false);
   const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
   const [startupSettingsError, setStartupSettingsError] = useState("");
   const [changingStartup, setChangingStartup] = useState(false);
@@ -2570,6 +2573,25 @@ export default function Home() {
       else desktopUpdateNotificationInFlight.current.delete(version);
     }).catch(() => { desktopUpdateNotificationInFlight.current.delete(version); });
   }, [desktopUpdate?.version, notificationsEnabled, isCustomerPortal]);
+
+  useEffect(() => {
+    if (!isMobileDevice()) return;
+    setShowPhotoLocationAction(true);
+    let active = true;
+    let permission: PermissionStatus | undefined;
+    const refreshLocationPermission = () => setPhotoLocationGranted(permission?.state === "granted");
+    // Older mobile browsers can request a position but cannot query its permission.
+    void navigator.permissions?.query({ name: "geolocation" }).then((status) => {
+      if (!active) return;
+      permission = status;
+      refreshLocationPermission();
+      status.addEventListener("change", refreshLocationPermission);
+    }).catch(() => {});
+    return () => {
+      active = false;
+      permission?.removeEventListener("change", refreshLocationPermission);
+    };
+  }, []);
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
@@ -3039,6 +3061,28 @@ export default function Home() {
     } finally { setEnablingNotifications(false); }
   };
 
+  const allowConstructionPhotoLocation = async () => {
+    if (requestingPhotoLocation) return;
+    setRequestingPhotoLocation(true);
+    try {
+      // Request directly from the tap; notifications have their own OS prompt.
+      const result = await requestConstructionPhotoPosition();
+      if (result.status === "ready") {
+        setPhotoLocationGranted(true);
+        setNotice("Đã cấp quyền vị trí cho ảnh thi công.");
+      } else if (result.status === "denied") {
+        setPhotoLocationGranted(false);
+        setNotice("Chưa được cấp quyền vị trí. Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt rồi thử lại.");
+      } else {
+        setNotice("Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.");
+      }
+    } catch {
+      setNotice("Không thể lấy vị trí trên thiết bị này.");
+    } finally {
+      setRequestingPhotoLocation(false);
+    }
+  };
+
   const toggleWindowsStartup = async () => {
     const desktop = desktopBridge();
     if (!desktop?.isWindows || !desktop.setStartupSettings || !startupSettings?.supported || startupSettings.canChange === false || startupChangeInFlight.current) return;
@@ -3149,10 +3193,16 @@ export default function Home() {
     setLocalWorkspacePath(path);
     setEmployeeLoginError("");
   };
+  const renderPhotoLocationAction = () => showPhotoLocationAction && (
+    <button type="button" className={`pwa-action${photoLocationGranted ? " pwa-action--notifications-enabled" : ""}`} onClick={() => void allowConstructionPhotoLocation()} disabled={requestingPhotoLocation}>
+      {requestingPhotoLocation ? "Đang xin vị trí…" : photoLocationGranted ? "Đã cấp quyền vị trí" : "Cho phép vị trí"}
+    </button>
+  );
   const renderOverviewActions = () => <>
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
     <button type="button" className={`pwa-action ${notificationsEnabled ? "pwa-action--notifications-enabled" : ""}`.trim()} onClick={() => void sendTestNotification()} disabled={enablingNotifications}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}</button>
+    {renderPhotoLocationAction()}
     {renderWindowsStartupAction()}
     {isBuiltInAdminLoggedIn && <button type="button" className="pwa-action" onClick={openDriveSettings}>⚙ Thiết lập</button>}
   </>;
@@ -6495,6 +6545,7 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
             <p className="eyebrow">GM Manager</p><h2>{notificationPermission === "denied" ? "Cho phép thông báo" : "Bật thông báo?"}</h2>
             <p>{notificationPermission === "unsupported" && isAppleMobileDevice() ? "Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên. Với iOS 16.0–16.3, bạn vẫn đăng nhập và làm việc được; hãy cập nhật iOS để bật thông báo." : notificationPermission === "denied" && isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager, bật Cho phép thông báo. Sau đó quay lại ứng dụng và nhấn Kiểm tra lại." : "Nhận nhắc việc và cập nhật trực tiếp trên điện thoại. Trên iPhone/iPad, hãy mở GM Manager từ Màn hình chính để bật thông báo."}</p>
+            {showPhotoLocationAction && <p>{renderPhotoLocationAction()}</p>}
             <div className="dialog-actions"><button type="button" onClick={dismissMobileNotificationSetup}>Để sau</button><button type="button" className="add-button" onClick={() => { setNotificationSetupOpen(false); void sendTestNotification(); }}>{notificationPermission === "denied" ? "Kiểm tra lại" : "Bật thông báo"}</button></div>
           </section>
         </div>
