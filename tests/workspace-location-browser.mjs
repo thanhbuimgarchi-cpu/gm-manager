@@ -16,9 +16,11 @@ const errors = [];
 
 try {
   await mkdir("outputs/workspace-path-qa", { recursive: true });
-  for (const native of [true, false]) {
+  for (const { native, sharedOnly, typedParent } of [
+    { native: true }, { native: false }, { native: false, sharedOnly: true }, { native: false, sharedOnly: true, typedParent: true },
+  ]) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: "block" });
-    await context.addInitScript(({ native, deepPath, canonicalPath, roster }) => {
+    await context.addInitScript(({ native, sharedOnly, deepPath, canonicalPath, roster }) => {
       window.pathQA = { requested: [], pickerCalls: 0 };
       localStorage.setItem("gm-manager-personnel-v1", JSON.stringify(roster));
       // Fake handles contain functions and cannot be cloned into IndexedDB.
@@ -35,11 +37,14 @@ try {
       };
       else {
         const directory = (name, children = {}) => ({ name, kind: "directory", async queryPermission() { return "granted"; }, async requestPermission() { return "granted"; }, async getDirectoryHandle(child) { if (!children[child]) throw new Error("not found"); return children[child]; }, async *values() { yield* Object.values(children); } });
-        const root = directory("GM Manager", { "Khách hàng": directory("Khách hàng"), "Nhân lực": directory("Nhân lực") });
-        const drive = directory("I", { "Shared drives": directory("Shared drives", { "GM Manager": directory("GM Manager", { "GM Manager": root }) }) });
+        const customers = directory("Khách hàng", { "2026": directory("2026") });
+        const root = directory("GM Manager", { "Khách hàng": customers, "Nhân lực": directory("Nhân lực") });
+        const drive = sharedOnly
+          ? directory("I", { "My Drive": directory("My Drive", { "Khách hàng": customers }) })
+          : directory("I", { "Shared drives": directory("Shared drives", { "GM Manager": directory("GM Manager", { "GM Manager": root }) }) });
         window.showDirectoryPicker = async () => { window.pathQA.pickerCalls++; return drive; };
       }
-    }, { native, deepPath, canonicalPath, roster });
+    }, { native, sharedOnly, deepPath, canonicalPath, roster });
     await context.route("**/*", (route) => {
       const url = new URL(route.request().url());
       if (url.origin === new URL(baseUrl).origin) return route.continue();
@@ -66,7 +71,8 @@ try {
     await page.locator(".customer-gateway__actions .pwa-action--login").click();
     const login = page.getByRole("dialog", { name: "Đăng nhập", exact: true });
     const location = login.getByLabel("Vị trí GM Manager", { exact: true });
-    await location.fill(deepPath);
+    const selectedPath = typedParent ? "I:\\My Drive" : sharedOnly ? "Khách hàng" : deepPath;
+    if (!sharedOnly || typedParent) await location.fill(selectedPath);
     if (native) {
       await page.waitForFunction(() => Boolean(window.pathQA.finishRestore));
       await page.evaluate(() => window.pathQA.finishRestore({ ok: true, path: "G:\\Old workspace" }));
@@ -74,17 +80,19 @@ try {
     } else {
       await login.getByRole("button", { name: "Chọn ổ / thư mục", exact: true }).click();
       await page.waitForFunction(() => localStorage.getItem("gm-manager-local-workspace-path-v1"));
-      assert.equal(await location.inputValue(), deepPath);
+      assert.equal(await location.inputValue(), selectedPath);
       assert.equal(await page.evaluate(() => window.pathQA.pickerCalls), 1);
     }
     await login.getByLabel("Tên nhân viên", { exact: true }).fill("Nguyễn Minh Anh");
     await login.getByLabel("Mã đăng nhập", { exact: true }).fill("00123");
-    await location.fill("I:\\Unrelated location");
-    await login.getByRole("button", { name: "Đăng nhập", exact: true }).click();
-    await login.getByRole("alert").waitFor();
-    assert.equal(await page.evaluate(() => localStorage.getItem("gm-manager-personnel-session-email")), null);
-    await location.fill(deepPath);
-    await page.screenshot({ path: `outputs/workspace-path-qa/login-${native ? "native" : "browser"}.png` });
+    if (!typedParent) {
+      await location.fill("I:\\Unrelated location");
+      await login.getByRole("button", { name: "Đăng nhập", exact: true }).click();
+      await login.getByRole("alert").waitFor();
+      assert.equal(await page.evaluate(() => localStorage.getItem("gm-manager-personnel-session-email")), null);
+      await location.fill(selectedPath);
+    }
+    await page.screenshot({ path: `outputs/workspace-path-qa/login-${native ? "native" : typedParent ? "shared-customers-parent" : sharedOnly ? "shared-customers" : "browser"}.png` });
     await login.getByRole("button", { name: "Đăng nhập", exact: true }).click();
     await page.waitForFunction(() => !document.querySelector(".login-dialog"));
     assert.equal(await page.evaluate(() => localStorage.getItem("gm-manager-personnel-session-email")), "anh@example.com");
@@ -92,15 +100,15 @@ try {
     assert.equal(employeeSession.account, "anh@example.com");
     assert.equal(employeeSession.token, workflowToken, "folder validation is followed by server-verified employee authentication");
     if (native) assert.equal(await page.evaluate(() => window.pathQA.requested.at(-1)), deepPath);
-    else assert.equal(await page.evaluate(() => localStorage.getItem("gm-manager-local-workspace-path-v1")), deepPath);
+    else assert.equal(await page.evaluate(() => localStorage.getItem("gm-manager-local-workspace-path-v1")), selectedPath);
     await page.reload();
     await page.locator(".customer-gateway__actions .pwa-action--login").click();
     const restoredLocation = page.getByRole("dialog", { name: "Đăng nhập", exact: true }).getByLabel("Vị trí GM Manager", { exact: true });
-    assert.equal(await restoredLocation.inputValue(), native ? canonicalPath : deepPath, "remember the validated location after reopening the app");
+    assert.equal(await restoredLocation.inputValue(), native ? canonicalPath : selectedPath, "remember the validated location after reopening the app");
     await context.close();
   }
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, nativeTypedPath: true, drivePicker: true, rejectsUnrelatedPath: true, preservesTyping: true, errors }));
+  console.log(JSON.stringify({ passed: true, nativeTypedPath: true, drivePicker: true, sharedCustomersFallback: true, rejectsUnrelatedPath: true, preservesTyping: true, errors }));
 } finally {
   await browser.close();
 }

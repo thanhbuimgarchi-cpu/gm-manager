@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import vm from "node:vm";
@@ -47,22 +47,53 @@ test("a selected storage folder can discover GM Manager below arbitrary team dir
   assert.equal(await helpers.normalizeWorkspaceRoot(selected), root);
 });
 
-test("a directly selected Customers directory can open its exact project without a personnel folder", async (t) => {
+test("a Customers-only share can be discovered from the drive, its parent or a descendant", async (t) => {
   const { temporary } = await fixture(t);
-  const selected = path.join(temporary, "Documents only", "Khách hàng");
-  const documents = path.join(selected, "2026", "T10", "DV 75", "Tài liệu");
-  await mkdir(documents, { recursive: true });
-  assert.equal(await helpers.normalizeWorkspaceRoot(selected), selected);
-  assert.equal(await helpers.findProjectDocumentsAtRoot(selected, { year: 2026, month: 10, houseId: "DV 75" }), documents);
-  assert.equal(await helpers.findProjectDocumentsAtRoot(selected, { year: 2026, month: 9, houseId: "DV 75" }), "");
+  const drive = path.join(temporary, "Other drive");
+  const share = path.join(drive, "Shared with me", "Documents only");
+  const customers = path.join(share, "Khách hàng");
+  const documents = path.join(customers, "2026", "T10", "DV 75", "Tài liệu");
+  const snapshot = path.join(documents, "28-10-2026-DV 75");
+  await mkdir(snapshot, { recursive: true });
+  for (const selected of [drive, share, customers, snapshot]) {
+    assert.equal(await helpers.normalizeWorkspaceRoot(selected), customers);
+  }
+  assert.equal(await helpers.findDocumentSnapshotFolder(customers, { year: 2026, month: 10, houseId: "DV 75", snapshotName: path.basename(snapshot) }), snapshot);
+  assert.equal(await helpers.findProjectDocumentsAtRoot(customers, { year: 2026, month: 9, houseId: "DV 75" }), "");
 });
 
-test("a workspace must contain both customer and personnel folders", async (t) => {
+test("an incomplete GM Manager is accepted through its Customers folder", async (t) => {
   const { temporary } = await fixture(t);
   const incomplete = path.join(temporary, "Incomplete", "GM Manager");
-  await mkdir(path.join(incomplete, "Khách hàng"), { recursive: true });
-  assert.equal(await helpers.normalizeWorkspaceRoot(incomplete), "");
+  const customers = path.join(incomplete, "Khách hàng");
+  await mkdir(customers, { recursive: true });
+  assert.equal(await helpers.normalizeWorkspaceRoot(incomplete), customers);
   assert.equal(await helpers.normalizeWorkspaceRoot("GM Manager"), "");
+});
+
+test("broad searches prefer a full workspace, and ambiguous shares require a narrower selection", async (t) => {
+  const { temporary } = await fixture(t);
+  const drive = path.join(temporary, "Other drive");
+  const first = path.join(drive, "Share A", "Khách hàng");
+  const second = path.join(drive, "Share B", "Khách hàng");
+  await Promise.all([mkdir(first, { recursive: true }), mkdir(second, { recursive: true })]);
+  assert.equal(await helpers.normalizeWorkspaceRoot(drive), "");
+  assert.equal(await helpers.normalizeWorkspaceRoot(first), first);
+  const nearest = path.join(drive, "Khách hàng");
+  await mkdir(nearest);
+  assert.equal(await helpers.normalizeWorkspaceRoot(drive), nearest);
+  const complete = path.join(drive, "Shared with team", "Project data", "GM Manager");
+  await Promise.all([mkdir(path.join(complete, "Khách hàng"), { recursive: true }), mkdir(path.join(complete, "Nhân lực"), { recursive: true })]);
+  assert.equal(await helpers.normalizeWorkspaceRoot(drive), complete);
+});
+
+test("shared Customers discovery does not follow links outside the selected drive", async (t) => {
+  const { temporary } = await fixture(t);
+  const drive = path.join(temporary, "Other drive");
+  const outside = path.join(temporary, "Outside", "Khách hàng");
+  await Promise.all([mkdir(drive), mkdir(outside, { recursive: true })]);
+  await symlink(outside, path.join(drive, "Khách hàng"), process.platform === "win32" ? "junction" : "dir");
+  assert.equal(await helpers.normalizeWorkspaceRoot(drive), "");
 });
 
 test("document paths use the selected year, month, house and snapshot only", async (t) => {
@@ -151,4 +182,13 @@ test("native selection persists its root and IPC only accepts the application or
   for (let attempt = 0; opened.length < 3 && attempt < 30; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(opened.at(-1), alternateSnapshot);
   assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, alternateRoot);
+
+  const sharedDrive = path.join(temporary, "Customers share");
+  const sharedCustomers = path.join(sharedDrive, "Khách hàng");
+  const sharedSnapshot = path.join(sharedCustomers, "2026", "T10", "DV 75", "Tài liệu", payload.snapshotName);
+  await mkdir(sharedSnapshot, { recursive: true });
+  assert.equal((await ipcHandlers.get("gmcrm:validate-workspace-folder")(trusted, { path: sharedDrive })).path, sharedCustomers);
+  assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, sharedCustomers);
+  assert.equal(await ipcHandlers.get("gmcrm:open-document-folder")(trusted, payload), "");
+  assert.equal(opened.at(-1), sharedSnapshot);
 });

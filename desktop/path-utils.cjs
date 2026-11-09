@@ -49,14 +49,16 @@ async function normalizeWorkspaceRoot(value) {
   // A pasted path may point at Customers, a month, or a document day. Resolve
   // an existing workspace ancestor before searching below the selected drive.
   let ancestor = selected;
+  let selectedCustomers = "";
   while (true) {
     const workspace = await workspaceAt(ancestor);
     if (workspace) return workspace;
+    if (!selectedCustomers && sameDriveEntryName(path.basename(ancestor), "Khách hàng")) selectedCustomers = ancestor;
     const parent = path.dirname(ancestor);
     if (parent === ancestor) break;
     ancestor = parent;
   }
-  if (sameDriveEntryName(path.basename(selected), "Khách hàng")) return selected;
+  if (selectedCustomers) return selectedCustomers;
   // Try the common Drive layouts first, then inspect directories only. Both
   // search limits keep an entire-drive selection responsive on large disks.
   const candidates = [
@@ -78,10 +80,25 @@ async function normalizeWorkspaceRoot(value) {
   const queue = [{ folder: selected, depth: 0 }];
   const visited = new Set();
   const skipped = new Set(["$recycle.bin", "system volume information", "windows", "node_modules", ".git", ".dropbox.cache"]);
+  const customersFallbacks = new Set();
+  let fallbackDepth = Infinity;
   for (let index = 0; index < queue.length && visited.size < 2048; index++) {
     const { folder, depth } = queue[index];
     if (visited.has(folder)) continue;
     visited.add(folder);
+    if (sameDriveEntryName(path.basename(folder), "Khách hàng")) {
+      if (depth <= fallbackDepth) {
+        try {
+          const customers = await fs.realpath(folder);
+          if (isWithinRoot(selected, customers) && sameDriveEntryName(path.basename(customers), "Khách hàng") && (await fs.stat(customers)).isDirectory()) {
+            customersFallbacks.add(customers);
+            fallbackDepth = depth;
+          }
+        } catch { /* Keep looking if the shared folder disappeared. */ }
+      }
+      // Project subdirectories do not need to be inspected to find a workspace.
+      continue;
+    }
     const workspace = await workspaceAt(folder);
     if (workspace) return workspace;
     if (depth >= 8) continue;
@@ -94,7 +111,7 @@ async function normalizeWorkspaceRoot(value) {
       if (isWithinRoot(selected, child)) queue.push({ folder: child, depth: depth + 1 });
     }
   }
-  return "";
+  return customersFallbacks.size === 1 ? customersFallbacks.values().next().value : "";
 }
 
 async function findProjectDocumentsAtRoot(root, payload = {}) {

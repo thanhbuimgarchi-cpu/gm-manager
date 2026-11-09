@@ -89,7 +89,7 @@ async function saveWorkspaceFolder(folder) {
 async function validateWorkspaceFolder(payload = {}) {
   const requested = typeof payload.path === "string" && payload.path.trim() ? payload.path : await readWorkspaceFolder();
   const folder = await normalizeWorkspaceRoot(requested);
-  if (!folder) return { ok: false, path: "", error: "Chưa tìm thấy GM Manager tại đường dẫn này. Hãy nhập đường dẫn tới GM Manager/Khách hàng hoặc chọn thư mục gần dữ liệu hơn." };
+  if (!folder) return { ok: false, path: "", error: "Chưa xác định được thư mục dữ liệu. Hãy chọn trực tiếp thư mục GM Manager hoặc Khách hàng đã được chia sẻ." };
   try { await saveWorkspaceFolder(folder); } catch { return { ok: false, path: "", error: "Không thể lưu vị trí thư mục trên máy này. Hãy thử chọn lại." }; }
   return { ok: true, path: folder };
 }

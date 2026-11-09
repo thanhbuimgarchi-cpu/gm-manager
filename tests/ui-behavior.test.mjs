@@ -96,12 +96,15 @@ test("manager titles survive cached roster normalization without granting simila
   assert.equal(helpers.isPersonnelManager(null), false);
 });
 
-test("browser folder validation requires both workspace folders and accepts the outer Drive root", async () => {
+test("browser folder validation prefers a complete workspace, then accepts a shared Customers folder", async () => {
   const directory = (name, children = {}) => ({name, async getDirectoryHandle(child){if(!children[child])throw new Error("not found");return children[child];}});
+  const sharedCustomers = directory("Khách hàng");
+  const partial = directory("GM Manager", { "Khách hàng": sharedCustomers });
   const valid = directory("GM Manager", {"Khách hàng":directory("Khách hàng"),"Nhân lực":directory("Nhân lực")});
-  const outer = directory("I", {"Shared drives":directory("Shared drives", {"GM Manager":directory("GM Manager", {"GM Manager":valid})})});
+  const outer = directory("I", {"Khách hàng":sharedCustomers,"Shared drives":directory("Shared drives", {"GM Manager":directory("GM Manager", {"GM Manager":valid})})});
   assert.equal(await helpers.verifyBrowserWorkspace(outer),valid);
-  await assert.rejects(helpers.verifyBrowserWorkspace(directory("GM Manager", {"Khách hàng":directory("Khách hàng")})),/Khách hàng và Nhân lực/);
+  assert.equal(await helpers.verifyBrowserWorkspace(partial),sharedCustomers);
+  await assert.rejects(helpers.verifyBrowserWorkspace(directory("Empty")), /GM Manager hoặc Khách hàng/);
 });
 
 test("browser drive selection discovers nested workspaces and accepts an authorized Customers handle", async () => {
@@ -116,6 +119,23 @@ test("browser drive selection discovers nested workspaces and accepts an authori
   assert.equal(await helpers.browserWorkspaceAtPath(drive, "I:"), workspace);
   await assert.rejects(helpers.browserWorkspaceAtPath(workspace, "I:\\Private\\other-workspace"), /vị trí đã cấp quyền/);
   await assert.rejects(helpers.browserWorkspaceAtPath(workspace, "..\\other-workspace"), /không hợp lệ/);
+});
+
+test("browser drive selection finds Customers below a shared container and avoids ambiguous matches", async () => {
+  const directory = (name, children = {}) => ({ name, kind: "directory", async getDirectoryHandle(child) { if (!children[child]) throw new Error("not found"); return children[child]; }, async *values() { yield* Object.values(children); } });
+  const customers = directory("Khách hàng", { "2026": directory("2026") });
+  const container = directory("Dự án chia sẻ", { "Khách hàng": customers });
+  const shared = directory("Shared drives", { "Dự án chia sẻ": container });
+  const drive = directory("I", { "Shared drives": shared });
+  assert.equal(await helpers.verifyBrowserWorkspace(drive), customers);
+  assert.equal(await helpers.browserWorkspaceAtPath(drive, "I:\\Shared drives\\Dự án chia sẻ"), customers);
+  assert.equal(await helpers.browserWorkspaceAtPath(drive, "I:\\Shared drives\\Dự án chia sẻ\\Khách hàng\\2026"), customers);
+  const alternate = directory("Dự án khác", { "Khách hàng": directory("Khách hàng") });
+  const ambiguous = directory("I", { "Dự án chia sẻ": container, "Dự án khác": alternate });
+  await assert.rejects(helpers.verifyBrowserWorkspace(ambiguous), /nhiều thư mục Khách hàng/);
+  assert.equal(await helpers.browserWorkspaceAtPath(ambiguous, "I:\\Dự án chia sẻ"), customers);
+  const nearest = directory("I", { "Khách hàng": customers, "Dự án khác": alternate });
+  assert.equal(await helpers.verifyBrowserWorkspace(nearest), customers);
 });
 
 test("mobile document opening uses the correct PDF/Office MIME with a browser fallback", () => {
