@@ -429,10 +429,6 @@ button.overview-metric:hover { border-color: #cad4e3; box-shadow: 0 4px 16px #24
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .dialog-actions > button:not(.add-button) { min-height: 40px; padding: 8px 14px; border: 1px solid #dfe5ee; border-radius: 8px; background: #fff; color: #718198; font-size: 13px; }
 .security-dialog > p:not(.eyebrow), .drive-config-dialog__hint { color: #7a889e; font-size: 13px; line-height: 1.7; }
-.mobile-download-links { display: grid; gap: 8px; }
-.mobile-download-links .pwa-action { display: flex; align-items: center; min-height: 44px; text-decoration: none; }
-.mobile-download-dialog > p { margin: 12px 0 0; }
-.permission-options { display: grid; gap: 8px; }
 .permission-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
 .permission-option strong, .permission-option small { display: block; }
 .permission-option strong { color: var(--ink); font-size: 14px; }

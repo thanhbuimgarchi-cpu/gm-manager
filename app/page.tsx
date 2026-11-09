@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
 import { applyColorTheme, colorThemeStorageKey, readColorTheme, type ColorTheme } from "./color-theme";
-import ConstructionPhotos, { requestConstructionPhotoPosition, type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
+import ConstructionPhotos, { type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
 import { createWorkflowClient, formatDateInput as formatDesignDateInput, workflowStatus, keepCompletedWorkflow, type WorkflowClient, type WorkflowOutboxEntry } from "./workflow-client";
@@ -688,7 +688,6 @@ const defaultDriveSyncConfig: DriveSyncConfig = {
 };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const macInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-macOS-x64.dmg";
-const mobileInstallerRelease = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/mobile-preview-v1.0.0";
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
 function isAppsScriptUrl(value: string) {
@@ -2139,17 +2138,13 @@ export default function Home() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [enablingNotifications, setEnablingNotifications] = useState(false);
   const [mobileDevice, setMobileDevice] = useState(false);
-  const [photoLocationPermission, setPhotoLocationPermission] = useState<PermissionState>("prompt");
-  const [requestingPhotoLocation, setRequestingPhotoLocation] = useState(false);
   const [notificationSetupFeedback, setNotificationSetupFeedback] = useState("");
-  const [locationSetupFeedback, setLocationSetupFeedback] = useState("");
   const [startupSettings, setStartupSettings] = useState<DesktopStartupSettings | null>(null);
   const [startupSettingsError, setStartupSettingsError] = useState("");
   const [changingStartup, setChangingStartup] = useState(false);
   const startupChangeInFlight = useRef(false);
   const startupSettingsRevision = useRef(0);
   const [mobileInstallHelp, setMobileInstallHelp] = useState<"ios" | "android" | "desktop" | null>(null);
-  const [mobileDownloadPlatform, setMobileDownloadPlatform] = useState<"ios" | "android" | "other" | null>(null);
   const [notificationSetupOpen, setNotificationSetupOpen] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
@@ -2297,7 +2292,7 @@ export default function Home() {
   const refreshVisibleFiles = useRef<() => Promise<void>>(async () => {});
 
   // Keep keyboard focus inside the active dialog, then return to its trigger.
-  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : appearanceSettingsOpen ? "appearance" : loginOpen ? "login" : mobileInstallHelp ? "install" : mobileDownloadPlatform ? "mobile-downloads" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
+  const dialogKey = addOpen ? "customer" : unlinkedCustomerMessageId && loggedInEmployee ? "unlinked-message" : customerMessageTaskDraft ? "message-task" : driveConfigOpen ? "drive" : appearanceSettingsOpen ? "appearance" : loginOpen ? "login" : mobileInstallHelp ? "install" : notificationSetupOpen ? "notifications" : pendingWorkNoteCompletionId ? "complete-note" : pendingDesignTaskCompletion ? "complete-design" : completionFeedback ? "completion-feedback" : protectedAction ? "record-action" : selectedRecordId ? "record-detail" : "";
   const dismissDialog = useRef(() => {});
   dismissDialog.current = () => {
     if (creatingCustomer || customerMessageTaskBusy || employeeAuthBusy || savingPancakeConfig || customerMutationBusy) return;
@@ -2308,7 +2303,6 @@ export default function Home() {
     else if (appearanceSettingsOpen) setAppearanceSettingsOpen(false);
     else if (loginOpen) setLoginOpen(false);
     else if (mobileInstallHelp) setMobileInstallHelp(null);
-    else if (mobileDownloadPlatform) setMobileDownloadPlatform(null);
     else if (notificationSetupOpen) dismissMobileNotificationSetup();
     else if (pendingWorkNoteCompletionId) setPendingWorkNoteCompletionId(null);
     else if (pendingDesignTaskCompletion) setPendingDesignTaskCompletion(null);
@@ -2617,31 +2611,7 @@ export default function Home() {
   }, [desktopUpdate?.version, notificationsEnabled, isCustomerPortal]);
 
   useEffect(() => {
-    if (!isMobileDevice()) return;
-    setMobileDevice(true);
-    let active = true;
-    let permission: PermissionStatus | undefined;
-    const refreshLocationPermission = () => {
-      if (!permission) return;
-      setPhotoLocationPermission(permission.state);
-      if (permission.state === "granted") setLocationSetupFeedback("");
-    };
-    // Older mobile browsers can request a position but cannot query its permission.
-    void navigator.permissions?.query({ name: "geolocation" }).then((status) => {
-      if (!active) return;
-      permission = status;
-      refreshLocationPermission();
-      status.addEventListener("change", refreshLocationPermission);
-    }).catch(() => {});
-    window.addEventListener("focus", refreshLocationPermission);
-    return () => {
-      active = false;
-      window.removeEventListener("focus", refreshLocationPermission);
-      permission?.removeEventListener("change", refreshLocationPermission);
-    };
-  }, []);
-
-  useEffect(() => {
+    setMobileDevice(isMobileDevice());
     const standaloneQuery = window.matchMedia("(display-mode: standalone)");
     const updateInstallState = () => {
       const installed = Boolean(desktopBridge()) || isStandaloneWebApp();
@@ -3101,32 +3071,8 @@ export default function Home() {
     } finally { setEnablingNotifications(false); }
   };
 
-  const requestLocationFromPanel = async () => {
-    if (enablingNotifications || requestingPhotoLocation) return;
-    setLocationSetupFeedback("");
-    setRequestingPhotoLocation(true);
-    try {
-      const result = await requestConstructionPhotoPosition();
-      if (result.status === "ready") {
-        setPhotoLocationPermission("granted");
-      } else if (result.status === "denied") {
-        const permission = await navigator.permissions?.query({ name: "geolocation" }).then(({ state }) => state).catch(() => undefined);
-        setPhotoLocationPermission(permission === "prompt" ? "prompt" : "denied");
-        if (permission === "prompt") setLocationSetupFeedback("Chưa chọn quyền. Bấm Cho phép vị trí rồi chọn Cho phép khi điện thoại hỏi.");
-      } else {
-        setLocationSetupFeedback("Chưa lấy được vị trí. Hãy bật định vị trên điện thoại rồi thử lại.");
-      }
-    } catch {
-      setLocationSetupFeedback("Không thể lấy vị trí trên thiết bị này.");
-    } finally {
-      setRequestingPhotoLocation(false);
-    }
-  };
-
-  const devicePermissionsBusy = enablingNotifications || requestingPhotoLocation;
-  const devicePermissionsEnabled = notificationsEnabled && (!mobileDevice || photoLocationPermission === "granted");
   const requestNotificationFromPanel = async () => {
-    if (devicePermissionsBusy) return;
+    if (enablingNotifications) return;
     setNotificationSetupFeedback("");
     setNotificationSetupFeedback(await sendTestNotification() || "Đã gửi thông báo kiểm tra.");
   };
@@ -3241,26 +3187,29 @@ export default function Home() {
     setLocalWorkspacePath(path);
     setEmployeeLoginError("");
   };
-  const renderDevicePermissionsAction = () => (
-    <button type="button" className={`pwa-action${devicePermissionsEnabled ? " pwa-action--notifications-enabled" : ""}`} disabled={!mobileDevice && enablingNotifications} aria-haspopup={mobileDevice ? "dialog" : undefined} onClick={() => {
-      if (mobileDevice) {
-        setNotificationSetupFeedback("");
-        setLocationSetupFeedback("");
-        setNotificationSetupOpen(true);
-      } else if (!enablingNotifications) {
+  const showNotificationPermissionHelp = mobileDevice && notificationPermission === "denied";
+  const renderNotificationAction = () => (
+    <button
+      type="button"
+      className={`pwa-action${notificationsEnabled ? " pwa-action--notifications-enabled" : ""}`}
+      disabled={enablingNotifications}
+      aria-haspopup={showNotificationPermissionHelp ? "dialog" : undefined}
+      onClick={() => {
+        if (showNotificationPermissionHelp) {
+          setNotificationSetupFeedback("");
+          setNotificationSetupOpen(true);
+          return;
+        }
         void sendTestNotification().then((error) => setNotice(error || "Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị."));
-      }
-    }}>
-      {mobileDevice
-        ? devicePermissionsEnabled ? "✓ Đã bật thông báo và vị trí" : "◌ Bật thông báo và vị trí"
-        : enablingNotifications ? "Đang bật…" : devicePermissionsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
+      }}
+    >
+      {enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
     </button>
   );
   const renderOverviewActions = () => <>
     {!isAppInstalled && <button type="button" className="pwa-action" onClick={() => void installGMCRM()}>⇩ Cài ứng dụng</button>}
-    <button type="button" className="pwa-action" aria-haspopup="dialog" onClick={() => setMobileDownloadPlatform(isAppleMobileDevice() ? "ios" : /android/i.test(navigator.userAgent) ? "android" : "other")}>⇩ Tải bản cài</button>
     <button type="button" className="pwa-action pwa-action--login" onClick={() => openEmployeeLogin()}>◉ {loggedInEmployeeEmail ? "Đổi tài khoản" : "Đăng nhập"}</button>
-    {renderDevicePermissionsAction()}
+    {renderNotificationAction()}
     {renderWindowsStartupAction()}
     {loggedInEmployee && <button type="button" className="pwa-action" onClick={() => {
       if (isBuiltInAdminLoggedIn) openDriveSettings();
@@ -6619,27 +6568,31 @@ export default function Home() {
         </div>
       )}
 
-      {mobileDownloadPlatform && (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileDownloadPlatform(null)}>
-          <section className="security-dialog mobile-download-dialog" role="dialog" aria-modal="true" aria-labelledby="mobile-download-title" onMouseDown={(event) => event.stopPropagation()}>
-            <button type="button" className="dialog-close" onClick={() => setMobileDownloadPlatform(null)} aria-label="Đóng">×</button>
-            <h2 id="mobile-download-title">Tải bản cài điện thoại</h2>
-            <div className="mobile-download-links">
-              {mobileDownloadPlatform === "ios" && <button type="button" className="pwa-action" onClick={() => { setMobileDownloadPlatform(null); setMobileInstallHelp("ios"); }}>Thêm GM Manager vào Màn hình chính</button>}
-              {mobileDownloadPlatform !== "ios" && <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-Android-1.0.0.apk`}>Tải APK cho Android 7 trở lên</a>}
-              {mobileDownloadPlatform !== "android" && <a className="pwa-action" href={`${mobileInstallerRelease}/GM-Manager-iPhone-unsigned.ipa`}>Tải IPA cho iPhone / iPad</a>}
-            </div>
-            {mobileDownloadPlatform === "android" ? <p>Mở trang bằng Chrome rồi tải APK. Khi tải xong, vào <b>Tệp tải xuống</b> trong Chrome và mở file. Nếu Android hỏi, chọn <b>Cho phép từ nguồn này</b>.</p> : <p>File IPA cần ký bằng tài khoản Apple trước khi cài lên iPhone hoặc iPad.</p>}
-          </section>
-        </div>
-      )}
-
       {mobileInstallHelp && (
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setMobileInstallHelp(null)}>
           <section className="security-dialog install-help-dialog" role="dialog" aria-label="Cài GM-CRM" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={() => setMobileInstallHelp(null)} aria-label="Đóng">×</button>
             <p className="eyebrow">{mobileInstallHelp === "ios" ? "iPhone / iPad" : mobileInstallHelp === "android" ? "Android" : "Máy tính Windows / macOS"}</p><h2>Cài GM-CRM</h2>
-            {mobileInstallHelp === "ios" ? <ol><li>Mở trang này bằng <b>Safari</b>, nhấn <b>Chia sẻ</b>.</li><li>Chọn <b>Thêm vào Màn hình chính</b>. Nếu có tuỳ chọn <b>Mở dưới dạng ứng dụng web</b>, hãy bật rồi nhấn Thêm.</li><li>Đóng Safari, mở <b>GM Manager</b> bằng biểu tượng trên Màn hình chính.</li><li>Bấm <b>Bật thông báo và vị trí</b>, chọn <b>Bật thông báo</b> rồi chọn <b>Cho phép</b> khi iOS hỏi.</li></ol> : mobileInstallHelp === "android" ? <ol><li>Mở trang bằng <b>Chrome</b>.</li><li>Nhấn dấu <b>⋮</b> ở góc trên.</li><li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li></ol> : <ol><li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li><li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ; nếu chưa thấy, mở menu <b>⋮</b>.</li><li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li></ol>}
+            {mobileInstallHelp === "ios" ? (
+              <ol>
+                <li>Mở trang này bằng <b>Safari</b>, nhấn <b>Chia sẻ</b>.</li>
+                <li>Chọn <b>Thêm vào Màn hình chính</b>. Nếu có tuỳ chọn <b>Mở dưới dạng ứng dụng web</b>, hãy bật rồi nhấn Thêm.</li>
+                <li>Đóng Safari, mở <b>GM Manager</b> bằng biểu tượng trên Màn hình chính.</li>
+                <li>Bấm <b>Bật thông báo</b> rồi chọn <b>Cho phép</b> khi iOS hỏi.</li>
+              </ol>
+            ) : mobileInstallHelp === "android" ? (
+              <ol>
+                <li>Mở trang bằng <b>Chrome</b>.</li>
+                <li>Nhấn dấu <b>⋮</b> ở góc trên.</li>
+                <li>Chọn <b>Cài đặt ứng dụng</b> hoặc <b>Thêm vào màn hình chính</b>.</li>
+              </ol>
+            ) : (
+              <ol>
+                <li>Mở trang bằng <b>Chrome</b> hoặc <b>Microsoft Edge</b>.</li>
+                <li>Nhấn biểu tượng <b>Cài đặt ứng dụng</b> ở bên phải thanh địa chỉ. Nếu chưa thấy, mở menu <b>⋮</b>.</li>
+                <li>Chọn <b>Cài đặt GM-CRM</b> rồi xác nhận Cài đặt.</li>
+              </ol>
+            )}
             <p>{mobileInstallHelp === "desktop" ? "Trên Windows, nút Cài ứng dụng sẽ tải bộ cài GM-CRM dạng .exe." : mobileInstallHelp === "ios" ? "Đăng nhập và làm việc trên iOS 16 trở lên. Thông báo hệ thống cần iOS/iPadOS 16.4 trở lên." : "Icon GM sẽ xuất hiện trên màn hình chính như một ứng dụng."}</p>
             {mobileInstallHelp !== "desktop" && <div className="dialog-actions"><button type="button" onClick={() => setMobileInstallHelp(null)}>Để sau</button><button type="button" className="add-button" onClick={() => { setMobileInstallHelp(null); promptForMobileNotifications(); }}>Đã cài xong</button></div>}
           </section>
@@ -6650,21 +6603,16 @@ export default function Home() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={dismissMobileNotificationSetup}>
           <section className="security-dialog notification-setup-dialog" role="dialog" aria-modal="true" aria-labelledby="notification-setup-title" onMouseDown={(event) => event.stopPropagation()}>
             <button type="button" className="dialog-close" onClick={dismissMobileNotificationSetup} aria-label="Đóng">×</button>
-            <h2 id="notification-setup-title">Thông báo và vị trí</h2>
-            <div className="permission-options">
-              <section className="permission-option" aria-labelledby="notification-permission-label">
-                <div><strong id="notification-permission-label">Thông báo</strong><small role="status" className={notificationsEnabled ? "is-granted" : undefined}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "Đã bật" : notificationPermission === "denied" ? "Đang bị chặn" : "Nhắc việc và tin nhắn"}</small></div>
-                <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestNotificationFromPanel()}>{notificationsEnabled ? "Gửi thử" : "Bật thông báo"}</button>
-                {notificationPermission === "denied" ? <p>{isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager → Cho phép thông báo." : "Thông báo đang bị chặn. Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Thông báo."}</p>
-                  : notificationSetupFeedback ? <p role="status">{notificationSetupFeedback}</p> : null}
-              </section>
-              <section className="permission-option" aria-labelledby="location-permission-label">
-                <div><strong id="location-permission-label">Vị trí</strong><small role="status" className={photoLocationPermission === "granted" ? "is-granted" : undefined}>{requestingPhotoLocation ? "Đang lấy vị trí…" : photoLocationPermission === "granted" ? "Đã cấp" : photoLocationPermission === "denied" ? "Đang bị chặn" : "Địa điểm và thời tiết trên ảnh"}</small></div>
-                <button type="button" className="pwa-action" disabled={devicePermissionsBusy} onClick={() => void requestLocationFromPanel()}>{photoLocationPermission === "granted" ? "Kiểm tra vị trí" : "Cho phép vị trí"}</button>
-                {photoLocationPermission === "denied" ? <p>Vị trí đang bị chặn. {isAppleMobileDevice() ? "Kiểm tra Cài đặt → Quyền riêng tư & Bảo mật → Dịch vụ định vị." : "Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Vị trí."}</p>
-                  : locationSetupFeedback ? <p role="status">{locationSetupFeedback}</p> : null}
-              </section>
-            </div>
+            <h2 id="notification-setup-title">Thông báo</h2>
+            <section className="permission-option" aria-labelledby="notification-permission-label">
+              <div>
+                <strong id="notification-permission-label">Thông báo</strong>
+                <small role="status" className={notificationsEnabled ? "is-granted" : undefined}>{enablingNotifications ? "Đang bật…" : notificationsEnabled ? "Đã bật" : notificationPermission === "denied" ? "Đang bị chặn" : "Nhắc việc và tin nhắn"}</small>
+              </div>
+              <button type="button" className="pwa-action" disabled={enablingNotifications} onClick={() => void requestNotificationFromPanel()}>{notificationsEnabled ? "Gửi thử" : "Bật thông báo"}</button>
+              {notificationPermission === "denied" ? <p>{isAppleMobileDevice() ? "Vào Cài đặt → Thông báo → GM Manager → Cho phép thông báo." : "Thông báo đang bị chặn. Trong Chrome, bấm biểu tượng bên trái địa chỉ → Quyền → Thông báo."}</p>
+                : notificationSetupFeedback ? <p role="status">{notificationSetupFeedback}</p> : null}
+            </section>
             <div className="dialog-actions"><button type="button" className="add-button" onClick={dismissMobileNotificationSetup}>Xong</button></div>
           </section>
         </div>

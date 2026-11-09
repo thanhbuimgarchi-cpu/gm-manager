@@ -25,29 +25,22 @@ async function fixture({ version = "16_4", standalone = true, permission = "defa
     Object.defineProperty(navigator, "standalone", { configurable: true, value: standalone });
     Object.defineProperty(navigator, "platform", { configurable: true, value: ipad ? "MacIntel" : "iPhone" });
     Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 5 });
-    window.iosQA = { permission: sessionStorage.getItem("ios-qa-permission") || permission, requests: 0, shown: [], userActivation: [], locationRequests: 0, locationActivation: [] };
+    window.iosQA = { permission: sessionStorage.getItem("ios-qa-permission") || permission, requests: 0, shown: [], userActivation: [], locationQueries: 0, locationRequests: 0 };
     if (supported) Object.defineProperty(window, "Notification", { configurable: true, value: {
       get permission() { return window.iosQA.permission; },
       requestPermission() { window.iosQA.requests++; window.iosQA.userActivation.push(navigator.userActivation?.isActive); window.iosQA.permission = "granted"; sessionStorage.setItem("ios-qa-permission", "granted"); return Promise.resolve("granted"); },
     } });
     else delete window.Notification;
-    const locationPermission = Object.assign(new EventTarget(), { state: sessionStorage.getItem("ios-qa-location-permission") || "prompt" });
     const queryPermission = navigator.permissions?.query.bind(navigator.permissions);
     Object.defineProperty(navigator, "permissions", { configurable: true, value: {
       query(descriptor) {
-        if (descriptor.name === "geolocation") return Promise.resolve(locationPermission);
+        if (descriptor.name === "geolocation") window.iosQA.locationQueries++;
         return queryPermission ? queryPermission(descriptor) : Promise.reject(new Error("Unknown permission"));
       },
     } });
     Object.defineProperty(navigator, "geolocation", { configurable: true, value: {
-      getCurrentPosition(success) {
-        window.iosQA.locationRequests++;
-        window.iosQA.locationActivation.push(navigator.userActivation?.isActive);
-        locationPermission.state = "granted";
-        sessionStorage.setItem("ios-qa-location-permission", "granted");
-        locationPermission.dispatchEvent(new Event("change"));
-        queueMicrotask(() => success({ coords: { latitude: 21.02851, longitude: 105.85417, accuracy: 10 }, timestamp: Date.now() }));
-      },
+      getCurrentPosition() { window.iosQA.locationRequests++; },
+      watchPosition() { window.iosQA.locationRequests++; return 1; },
     } });
     const registration = { active: {}, async update() {}, addEventListener() {}, async showNotification(title, options) { window.iosQA.shown.push({ title, options }); } };
     Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { async register() { return registration; }, ready: Promise.resolve(registration), addEventListener() {} } });
@@ -83,18 +76,12 @@ async function fixture({ version = "16_4", standalone = true, permission = "defa
   await page.clock.setFixedTime(new Date("2026-10-28T02:00:00Z"));
   await page.goto(baseUrl);
   await page.locator(".customer-gateway__actions .pwa-action--login").waitFor();
-  return { context, page, permissionsButton: () => page.locator(".customer-gateway__actions").getByRole("button", { name: /thông báo và vị trí/i }) };
+  return { context, page, notificationButton: () => page.locator(".customer-gateway__actions").getByRole("button", { name: /bật thông báo|thông báo đã bật/i }) };
 }
 
-async function openPermissions(app) {
-  await app.permissionsButton().click();
-  const dialog = app.page.getByRole("dialog", { name: "Thông báo và vị trí", exact: true });
-  await dialog.waitFor();
-  return dialog;
+async function assertNoLocationAccess(page) {
+  assert.deepEqual(await page.evaluate(() => [window.iosQA.locationQueries, window.iosQA.locationRequests]), [0, 0]);
 }
-
-const notificationAction = (dialog) => dialog.getByRole("button", { name: "Bật thông báo", exact: true });
-const locationAction = (dialog) => dialog.getByRole("button", { name: "Cho phép vị trí", exact: true });
 
 try {
   await mkdir("outputs/ios-qa", { recursive: true });
@@ -123,61 +110,57 @@ try {
   assert.equal(employeeSession.account, "anh@example.com");
   assert.equal(employeeSession.token, workflowToken, "iOS login persists the server-verified workflow session");
   await safari.page.setViewportSize({ width: 390, height: 844 });
-  const safariPermissions = await openPermissions(safari);
-  await locationAction(safariPermissions).click();
-  await safariPermissions.getByText("Đã cấp", { exact: true }).waitFor();
-  await notificationAction(safariPermissions).click();
-  await safari.page.getByRole("dialog", { name: "Cài GM-CRM" }).waitFor();
-  assert.ok((await safari.page.locator(".install-help-dialog").innerText()).includes("16.4"));
+  assert.equal(await safari.page.getByRole("button", { name: /tải bản cài/i }).count(), 0);
+  await safari.notificationButton().click();
+  const installHelp = safari.page.getByRole("dialog", { name: "Cài GM-CRM" });
+  await installHelp.waitFor();
+  const instructions = await installHelp.innerText();
+  assert.match(instructions, /Thêm vào Màn hình chính/);
+  assert.match(instructions, /16\.4/);
+  assert.doesNotMatch(instructions, /\b(?:IPA|APK)\b|vị trí/i);
   assert.equal(await safari.page.evaluate(() => window.iosQA.requests), 0);
-  assert.equal(await safari.page.evaluate(() => window.iosQA.locationRequests), 1);
+  await assertNoLocationAccess(safari.page);
   await safari.context.close();
 
   const oldIOS = await fixture({ version: "16_0", supported: false });
-  const oldPermissions = await openPermissions(oldIOS);
-  await notificationAction(oldPermissions).click();
-  await oldPermissions.getByText(/Thông báo cần iOS\/iPadOS 16\.4 trở lên/).waitFor();
+  await oldIOS.notificationButton().click();
+  await oldIOS.page.getByText(/Thông báo cần iOS\/iPadOS 16\.4 trở lên/).first().waitFor();
   assert.equal(await oldIOS.page.locator(".pwa-action--notifications-enabled").count(), 0);
+  await assertNoLocationAccess(oldIOS.page);
   await oldIOS.context.close();
 
   for (const version of ["16_4", "18_6"]) {
     const app = await fixture({ version });
-    const permissions = await openPermissions(app);
-    assert.deepEqual(await app.page.evaluate(() => [window.iosQA.requests, window.iosQA.locationRequests]), [0, 0]);
-    await notificationAction(permissions).click();
-    await permissions.getByRole("button", { name: "Gửi thử", exact: true }).waitFor();
-    assert.equal(await app.page.evaluate(() => window.iosQA.locationRequests), 0);
-    await locationAction(permissions).click();
-    await permissions.getByText("Đã cấp", { exact: true }).waitFor();
-    await permissions.getByRole("button", { name: "Xong", exact: true }).click();
-    const granted = app.page.locator(".customer-gateway__actions").getByRole("button", { name: /đã bật thông báo và vị trí/i });
+    assert.equal(await app.page.evaluate(() => window.iosQA.requests), 0);
+    await app.notificationButton().click();
+    const granted = app.page.locator(".customer-gateway__actions").getByRole("button", { name: /thông báo đã bật/i });
     await granted.waitFor();
     const result = await app.page.evaluate(() => ({ ...window.iosQA, saved: localStorage.getItem("gm-manager-notifications-enabled-v1") }));
     assert.equal(result.requests, 1);
     assert.equal(result.shown.length, 1);
     assert.equal(result.saved, "enabled");
     assert.deepEqual(result.userActivation, [true]);
-    assert.equal(result.locationRequests, 1);
-    assert.deepEqual(result.locationActivation, [true]);
+    await assertNoLocationAccess(app.page);
     await app.page.reload();
     await granted.waitFor();
-    assert.deepEqual(await app.page.evaluate(() => [window.iosQA.requests, window.iosQA.locationRequests]), [0, 0]);
+    assert.equal(await app.page.evaluate(() => window.iosQA.requests), 0);
+    await assertNoLocationAccess(app.page);
     await app.context.close();
   }
 
   const denied = await fixture({ permission: "denied", ipad: true });
-  const setup = await openPermissions(denied);
-  await locationAction(setup).click();
-  await setup.getByText("Đã cấp", { exact: true }).waitFor();
-  await notificationAction(setup).click();
-  await setup.getByText(/Vào Cài đặt → Thông báo → GM Manager/).first().waitFor();
+  await denied.notificationButton().click();
+  const setup = denied.page.getByRole("dialog", { name: "Thông báo", exact: true });
+  await setup.getByText(/Vào Cài đặt → Thông báo → GM Manager/).waitFor();
+  assert.doesNotMatch(await setup.innerText(), /vị trí/i);
   assert.equal(await denied.page.evaluate(() => window.iosQA.requests), 0);
   await denied.page.evaluate(() => { window.iosQA.permission = "granted"; window.dispatchEvent(new Event("focus")); });
   await setup.getByRole("button", { name: "Gửi thử", exact: true }).click();
   await denied.page.waitForFunction(() => window.iosQA.shown.length === 1);
+  await assertNoLocationAccess(denied.page);
   await denied.context.close();
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ passed: true, engine: "WebKit", widths: [320, 375, 390, 430, 600, 768, 844, 1024], ios16Login: true, separateInAppPermissionActions: true, unsupportedIOS: true, deniedPermission: true, persistedPermission: true, errors }));
+  console.log(JSON.stringify({ passed: true, engine: "WebKit", widths: [320, 375, 390, 430, 600, 768, 844, 1024], ios16Login: true, homeScreenShortcut: true, notificationOnly: true, unsupportedIOS: true, deniedPermission: true, persistedPermission: true, errors }));
 } finally {
   await browser.close();
 }

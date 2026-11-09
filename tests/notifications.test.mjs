@@ -183,7 +183,7 @@ function frontendFixture({ permission = "granted", requestPermission, desktop = 
     navigator: { serviceWorker: { ready: ready || Promise.resolve(registration) } },
     Notification, Error,
     desktopBridge: () => desktop,
-    devicePermissionsBusy: false,
+    enablingNotifications: false,
     setEnablingNotifications: (value) => { state.busy = value; },
     setNotificationsEnabled: (value) => { state.enabled = value; },
     setNotificationPermission: (value) => { state.permission = value; },

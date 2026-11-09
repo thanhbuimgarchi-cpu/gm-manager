@@ -30,7 +30,6 @@ const years = [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => ({
 const captureTimes = ["2026-11-07T16:59:59.000Z", "2026-11-07T17:00:05.000Z", "2026-11-07T17:00:06.000Z"];
 const captureDates = ["07-11-2026", "08-11-2026", "08-11-2026"];
 const trashedUploadTime = "2026-11-07T17:00:07.000Z";
-const locationTestTime = new Date("2026-11-08T04:00:00.000Z");
 const expectedPhotos = captureTimes.map((capturedAt, index) => ({
   id: `fixture-photo-${index + 1}`,
   name: `Anh-thi-cong-${index + 1}.jpg`,
@@ -72,13 +71,6 @@ async function dispatch(payload) {
       await firstUploadGate;
       return { ok: false, error: "Drive chưa lưu được ảnh. Hãy thử lại." };
     }
-    if (payload.capturedAt.startsWith("2026-11-08T")) {
-      const id = `fixture-location-${uploads.length}`;
-      const folderId = "fixture-location-folder";
-      const folderUrl = `https://drive.google.com/drive/folders/${folderId}`;
-      const photo = { id, name: `${id}.jpg`, mimeType: "image/jpeg", capturedAt: payload.capturedAt, viewUrl: `https://drive.google.com/file/d/${id}/view`, downloadUrl: `https://drive.google.com/uc?export=download&id=${id}` };
-      return { ok: true, date: "08-11-2026", folderId, folderUrl, photo };
-    }
     const index = captureTimes.indexOf(payload.capturedAt);
     assert.ok(index >= 0);
     const date = captureDates[index];
@@ -118,49 +110,23 @@ async function enterGallery(page) {
   return photos;
 }
 
-async function openWorkspace({ mobile = true, denyCamera = false, manager = false, storageState, controlledLocation = false, controlledNotifications = false, distantWeatherRecovery = false } = {}) {
+async function openWorkspace({ mobile = true, denyCamera = false, manager = false, storageState, controlledNotifications = false } = {}) {
   const context = await browser.newContext({
     ...(mobile ? devices["Pixel 8"] : { viewport: { width: 1280, height: 900 } }),
     serviceWorkers: "block",
-    geolocation: { latitude: 21.02851, longitude: 105.85417, accuracy: 10 },
-    permissions: controlledLocation ? ["camera"] : ["camera", "geolocation"],
+    permissions: ["camera"],
     timezoneId: "Asia/Ho_Chi_Minh",
     storageState,
   });
   await context.exposeBinding("constructionDispatch", (_source, payload) => dispatch(payload));
-  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin, controlledLocation, controlledNotifications }) => {
+  await context.addInitScript(({ account, personnel, years, token, scriptUrl, denyCamera, origin, controlledNotifications }) => {
     if (location.origin !== origin) return;
     localStorage.setItem("gm-manager-consulting", JSON.stringify(years));
     localStorage.setItem("gm-manager-personnel-v1", JSON.stringify(personnel));
     localStorage.setItem("gm-manager-personnel-session-email", account);
     localStorage.setItem("gm-manager-workflow-session-v1", JSON.stringify({ account, token, scriptUrl }));
-    window.constructionCameraTest = { calls: 0, tracks: [], lines: [], locationRequests: [], notificationRequests: [] };
-    if (controlledLocation) {
-      const queryPermission = navigator.permissions.query.bind(navigator.permissions);
-      const locationPermission = Object.assign(new EventTarget(), { state: "prompt" });
-      const setLocationPermission = (state) => {
-        locationPermission.state = state;
-        locationPermission.dispatchEvent(new Event("change"));
-      };
-      window.constructionCameraTest.setLocationPermission = setLocationPermission;
-      navigator.permissions.query = (descriptor) => descriptor.name === "geolocation" ? Promise.resolve(locationPermission) : queryPermission(descriptor);
-      navigator.geolocation.getCurrentPosition = (success, error, options) => {
-        const { calls, locationRequests } = window.constructionCameraTest;
-        locationRequests.push({
-          success: (position) => {
-            setLocationPermission("granted");
-            success(position);
-          },
-          error: (failure) => {
-            if (failure.code === 1 && !failure.keepPrompt) setLocationPermission("denied");
-            error(failure);
-          },
-          options,
-          priorCameraCalls: calls,
-          activation: navigator.userActivation.isActive,
-        });
-      };
-    }
+    window.constructionCameraTest = { calls: 0, tracks: [], lines: [], locationRequests: 0, notificationRequests: [] };
+    navigator.geolocation.getCurrentPosition = () => { window.constructionCameraTest.locationRequests++; };
     if (controlledNotifications) {
       let notificationPermission = "default";
       Object.defineProperty(Notification, "permission", { configurable: true, get: () => notificationPermission });
@@ -192,8 +158,7 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
       window.constructionCameraTest.tracks.push(...stream.getTracks());
       return stream;
     };
-  }, { account: manager ? managerAccount : account, personnel, years, token: manager ? managerToken : token, scriptUrl, denyCamera, origin, controlledLocation, controlledNotifications });
-  let contextWeatherRequests = 0;
+  }, { account: manager ? managerAccount : account, personnel, years, token: manager ? managerToken : token, scriptUrl, denyCamera, origin, controlledNotifications });
   await context.route("**/*", (route) => {
     const url = new URL(route.request().url());
     if (url.origin === origin) return route.continue();
@@ -206,27 +171,13 @@ async function openWorkspace({ mobile = true, denyCamera = false, manager = fals
       });
       parent.postMessage({channel:'gm-manager-apps-script-ready'},'*');
       <\/script>` });
-    if (url.hostname === "mapservices.weather.noaa.gov") {
-      weather.push(url);
-      contextWeatherRequests++;
-      if (distantWeatherRecovery && contextWeatherRequests === 1) return route.fulfill({ status: 503 });
-      return route.fulfill({ json: { features: [{ attributes: {
-        station_id: distantWeatherRecovery ? "QA99" : "VVNB",
-        observation_time: controlledLocation ? locationTestTime.getTime() - 5 * 60_000 : Date.parse("2026-11-07T16:55:00Z"),
-        latitude: distantWeatherRecovery ? 22.05 : 21.218,
-        longitude: 105.805,
-        temp_c: 19,
-        wx_string: "-RA",
-        sky_cover: "OVC",
-      } }] } });
-    }
+    if (url.hostname === "mapservices.weather.noaa.gov") weather.push(url);
     return route.abort();
   });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  if (controlledLocation) await page.clock.install({ time: locationTestTime });
-  else await page.clock.setFixedTime(new Date(captureTimes[0]));
+  await page.clock.setFixedTime(new Date(captureTimes[0]));
   await page.goto(baseUrl);
   return { context, page };
 }
@@ -236,25 +187,6 @@ async function openProject(options) {
   const photos = await enterGallery(workspace.page);
   return { ...workspace, photos };
 }
-
-async function openLocationCamera(options = {}) {
-  const project = await openProject({ controlledLocation: true, ...options });
-  await project.photos.getByRole("button", { name: "Chụp ảnh", exact: true }).tap();
-  const camera = project.page.getByRole("dialog", { name: "Chụp ảnh thi công" });
-  const shutter = camera.getByRole("button", { name: "Chụp", exact: true });
-  return { ...project, camera, shutter };
-}
-
-async function respondToLocation(page, index, { code, accuracy = 10, keepPrompt = false } = {}) {
-  await page.waitForFunction((index) => window.constructionCameraTest.locationRequests.length > index, index);
-  await page.evaluate(({ index, code, accuracy, keepPrompt }) => {
-    const request = window.constructionCameraTest.locationRequests[index];
-    if (code) request.error({ code, keepPrompt });
-    else request.success({ coords: { latitude: 21.02851, longitude: 105.85417, accuracy }, timestamp: Date.now() });
-  }, { index, code, accuracy, keepPrompt });
-}
-
-const capturedStamps = (page) => page.evaluate(() => window.constructionCameraTest.lines);
 
 try {
   const { context, page, photos } = await openProject();
@@ -296,17 +228,13 @@ try {
   await camera.waitFor({ state: "hidden" });
   assert.equal(await page.evaluate(() => window.constructionCameraTest.tracks[1]?.readyState), "ended");
   const stamps = await page.evaluate(() => window.constructionCameraTest.lines);
-  const stampedPhotos = Array.from({ length: 3 }, (_, index) => stamps.slice(index * 4, index * 4 + 4)).sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
-  assert.deepEqual(stampedPhotos, [
-    ["Ngày: 07/11/2026", "Giờ: 23:59:59"],
-    ["Ngày: 08/11/2026", "Giờ: 00:00:05"],
-    ["Ngày: 08/11/2026", "Giờ: 00:00:06"],
-  ].map((dateTime) => [...dateTime,
-    "Thời tiết: 19°C · Mưa nhẹ (trạm VVNB)",
-    "Địa điểm: 21.02851, 105.85417",
-  ]));
-  assert.equal(weather.length, 1);
-  assert.ok(!weather[0].searchParams.get("geometry").includes("21.02851"));
+  assert.deepEqual(stamps, [
+    "Ngày: 07/11/2026", "Giờ: 23:59:59",
+    "Ngày: 08/11/2026", "Giờ: 00:00:05",
+    "Ngày: 08/11/2026", "Giờ: 00:00:06",
+  ]);
+  assert.equal(await page.evaluate(() => window.constructionCameraTest.locationRequests), 0);
+  assert.equal(weather.length, 0);
   await photos.getByRole("button", { name: "Thử lưu lại" }).tap();
   await photos.getByText("Đã lưu ảnh vào thư mục 07/11/2026.").waitFor();
   for (const photo of expectedPhotos) {
@@ -440,114 +368,25 @@ try {
   assert.equal(await manager.page.evaluate((key) => localStorage.getItem(key), photoCache.name), null);
   await manager.context.close();
 
-  const slow = await openLocationCamera({ distantWeatherRecovery: true });
-  const initialLocationRequest = await slow.page.evaluate(() => {
-    const { options, priorCameraCalls, activation } = window.constructionCameraTest.locationRequests[0];
-    return { options, priorCameraCalls, activation };
-  });
-  assert.deepEqual(initialLocationRequest, { options: { enableHighAccuracy: false, maximumAge: 60000, timeout: 8000 }, priorCameraCalls: 0, activation: true });
-  const uploadsBeforeSlow = uploads.length;
-  const weatherBeforeSlow = weather.length;
-  await slow.shutter.tap();
-  await slow.page.clock.fastForward(9500);
-  await slow.camera.getByText("Đang lấy vị trí…").waitFor();
-  assert.equal(uploads.length, uploadsBeforeSlow);
-  await slow.shutter.tap();
-  await slow.page.clock.fastForward(11_000);
-  await slow.camera.getByText("Đã lưu 1 ảnh · Đang lưu 1 ảnh", { exact: true }).waitFor();
-  assert.equal(weather.length, weatherBeforeSlow);
-  assert.deepEqual((await capturedStamps(slow.page)).slice(-2), ["Thời tiết: Chưa có vị trí để tra", "Địa điểm: Không lấy được vị trí"]);
-
-  // The original permission request stays alive even after the first photo reaches its wait limit.
-  await respondToLocation(slow.page, 0, { accuracy: 420 });
-  await slow.camera.getByText("Đã lấy vị trí.").waitFor();
-  await slow.camera.getByText("Đã lưu 2 ảnh", { exact: true }).waitFor();
-  assert.deepEqual((await capturedStamps(slow.page)).slice(-2), ["Thời tiết: Không lấy được bản tin NOAA", "Địa điểm: 21.02851, 105.85417 (±420 m)"]);
-  await slow.shutter.tap();
-  await slow.camera.getByText("Đã lưu 3 ảnh", { exact: true }).waitFor();
-  assert.equal(weather.length, weatherBeforeSlow + 2);
-  assert.equal(await slow.page.evaluate(() => window.constructionCameraTest.locationRequests.length), 1);
-  assert.deepEqual((await capturedStamps(slow.page)).slice(-2), ["Thời tiết: 19°C · Mưa nhẹ (trạm QA99, cách 114 km)", "Địa điểm: 21.02851, 105.85417 (±420 m)"]);
-  await slow.context.close();
-
-  const transient = await openLocationCamera();
-  await transient.shutter.tap();
-  await respondToLocation(transient.page, 0, { code: 2 });
-  await respondToLocation(transient.page, 1, { code: 3 });
-  const fallbackOptions = await transient.page.evaluate(() => window.constructionCameraTest.locationRequests[1].options);
-  assert.deepEqual(fallbackOptions, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
-  await transient.camera.getByText("Chưa nhận được vị trí. Hãy cấp quyền hoặc thử lại.").waitFor();
-  await transient.camera.getByText("Đã lưu 1 ảnh", { exact: true }).waitFor();
-  await transient.camera.getByRole("button", { name: "Thử lại vị trí" }).tap();
-  await respondToLocation(transient.page, 2);
-  await transient.camera.getByText("Đã lấy vị trí.").waitFor();
-  await transient.shutter.tap();
-  await transient.camera.getByText("Đã lưu 2 ảnh", { exact: true }).waitFor();
-  assert.deepEqual((await capturedStamps(transient.page)).slice(-2), ["Thời tiết: 19°C · Mưa nhẹ (trạm VVNB)", "Địa điểm: 21.02851, 105.85417"]);
-  await transient.context.close();
-
-  const deniedLocation = await openLocationCamera();
-  const weatherBeforeDenial = weather.length;
-  await respondToLocation(deniedLocation.page, 0, { code: 1 });
-  await deniedLocation.camera.getByText("Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt.").waitFor();
-  await deniedLocation.shutter.tap();
-  await deniedLocation.camera.getByText("Đã lưu 1 ảnh", { exact: true }).waitFor();
-  assert.equal(weather.length, weatherBeforeDenial);
-  assert.equal(await deniedLocation.page.evaluate(() => window.constructionCameraTest.locationRequests.length), 1);
-  assert.deepEqual((await capturedStamps(deniedLocation.page)).slice(-2), ["Thời tiết: Chưa có vị trí để tra", "Địa điểm: Không lấy được vị trí"]);
-  await deniedLocation.context.close();
-
-  const overview = await openWorkspace({ controlledLocation: true, controlledNotifications: true });
+  const overview = await openWorkspace({ controlledNotifications: true });
   const overviewActions = overview.page.locator(".workspace-header .customer-gateway__actions");
-  const enablePermissions = overviewActions.getByRole("button", { name: /thông báo và vị trí/i });
-  await enablePermissions.waitFor();
-  assert.equal(await enablePermissions.count(), 1);
-  assert.equal(await overviewActions.getByRole("button", { name: /(?:bật thông báo|cho phép vị trí)$/i }).count(), 0);
-  assert.deepEqual(await overview.page.evaluate(() => {
-    const { locationRequests, notificationRequests } = window.constructionCameraTest;
-    return [locationRequests.length, notificationRequests.length];
-  }), [0, 0]);
-  await enablePermissions.tap();
-  const permissionsDialog = overview.page.getByRole("dialog", { name: "Thông báo và vị trí", exact: true });
-  await permissionsDialog.waitFor();
-  assert.deepEqual(await overview.page.evaluate(() => {
-    const { locationRequests, notificationRequests } = window.constructionCameraTest;
-    return [locationRequests.length, notificationRequests.length];
-  }), [0, 0]);
-
-  await permissionsDialog.getByRole("button", { name: "Bật thông báo", exact: true }).tap();
-  await overview.page.waitForFunction(() => {
-    return window.constructionCameraTest.notificationRequests.length === 1;
-  });
-  assert.equal(await overview.page.evaluate(() => window.constructionCameraTest.locationRequests.length), 0);
+  const install = overviewActions.getByRole("button", { name: /Cài ứng dụng/i });
+  await install.waitFor();
+  assert.equal(await overviewActions.getByRole("button", { name: /tải bản cài|cho phép vị trí/i }).count(), 0);
+  const enableNotifications = overviewActions.getByRole("button", { name: /Bật thông báo/i });
+  await enableNotifications.tap();
+  await overview.page.waitForFunction(() => window.constructionCameraTest.notificationRequests.length === 1);
   await overview.page.evaluate(() => window.constructionCameraTest.grantNotifications());
-  await permissionsDialog.getByRole("button", { name: "Gửi thử", exact: true }).waitFor();
-
-  const allowLocation = permissionsDialog.getByRole("button", { name: "Cho phép vị trí", exact: true });
-  await allowLocation.tap();
-  await respondToLocation(overview.page, 0, { code: 1, keepPrompt: true });
-  await permissionsDialog.getByText(/Chưa chọn quyền/).waitFor();
-  assert.equal(await permissionsDialog.getByText(/Vị trí đang bị chặn/).count(), 0);
-  await allowLocation.tap();
-  await respondToLocation(overview.page, 1, { code: 1 });
-  await permissionsDialog.getByText(/Vị trí đang bị chặn/).waitFor();
-  // A browser-level block can only be reset by the browser or its settings.
-  await overview.page.evaluate(() => window.constructionCameraTest.setLocationPermission("prompt"));
-  await allowLocation.tap();
-  await respondToLocation(overview.page, 2);
-  await permissionsDialog.getByText("Đã cấp", { exact: true }).waitFor();
-  await permissionsDialog.getByRole("button", { name: "Xong", exact: true }).tap();
-  await permissionsDialog.waitFor({ state: "hidden" });
-  await overviewActions.getByRole("button", { name: /^(?:✓\s*)?đã bật thông báo và vị trí$/i }).waitFor();
+  await overviewActions.getByRole("button", { name: /Thông báo đã bật/i }).waitFor();
   assert.equal(await overview.page.getByRole("dialog").count(), 0);
   assert.deepEqual(await overview.page.evaluate(() => {
     const { calls, locationRequests, notificationRequests } = window.constructionCameraTest;
-    return { calls, locationActivations: locationRequests.map((request) => request.activation), notificationRequests };
-  }), { calls: 0, locationActivations: [true, true, true], notificationRequests: [true] });
+    return { calls, locationRequests, notificationRequests };
+  }), { calls: 0, locationRequests: 0, notificationRequests: [true] });
   await overview.context.close();
 
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraClosesImmediately: true, queuedAcrossNavigation: true, reopenedCameraStaysOpen: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true, offlineMetadata: true, accountIsolation: true, managerDeleteAndConfirm: true, deleteOverlaysPhoto: true, photoNamesHidden: true, staleReadProtection: true, restoreFromDrive: true, lateLocationPermission: true, boundedLocationWait: true, locationRetry: true, locationDenial: true, weatherRetryAndDistantStation: true, overviewLocationPermission: true }));
+  console.log(JSON.stringify({ passed: true, vietnamMidnight: true, largeMobileViewfinder: true, threePhotosWhileUploadPending: true, cameraClosesImmediately: true, queuedAcrossNavigation: true, reopenedCameraStaysOpen: true, sameUploadIdOnRetry: true, desktopView: true, cameraPermissionDenied: true, offlineMetadata: true, accountIsolation: true, managerDeleteAndConfirm: true, deleteOverlaysPhoto: true, photoNamesHidden: true, staleReadProtection: true, restoreFromDrive: true, dateAndTimeOnly: true, noLocationOrWeatherRequests: true, overviewNotificationPermission: true }));
 } finally {
   await browser.close();
 }

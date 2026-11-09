@@ -44,28 +44,9 @@ type PhotoGallery = { days: ConstructionPhotoDay[]; deletedPhotos: PhotoDeletion
 type PhotoToDelete = { day: ConstructionPhotoDay; photo: ConstructionPhoto };
 const photoDeletionGraceMs = 10 * 60_000;
 
-type Position = Pick<GeolocationCoordinates, "latitude" | "longitude" | "accuracy">;
-type PositionResult =
-  | { status: "ready"; position: Position; measuredAt: number }
-  | { status: "denied" | "unavailable" | "timeout" };
-type LocationStatus = "idle" | "checking" | PositionResult["status"];
-const positionMaxAgeMs = 60_000;
-const positionWaitMs = 20_000;
-type WeatherStation = {
-  station_id: string;
-  observation_time: number;
-  latitude: number;
-  longitude: number;
-  temp_c: number | null;
-  wx_string: string | null;
-  sky_cover: string | null;
-  sky_cover_1: string | null;
-  sky_cover_2: string | null;
-};
 type PhotoJob = {
   uploadId: string;
   capturedAt: Date;
-  position: Promise<Position | null>;
   frame?: HTMLCanvasElement | File;
   blob?: Blob;
   previewUrl?: string;
@@ -85,142 +66,8 @@ const captureQueues = new Map<string, CaptureQueue>();
 const vietnamTimeZone = "Asia/Ho_Chi_Minh";
 const photoDate = new Intl.DateTimeFormat("vi-VN", { timeZone: vietnamTimeZone, day: "2-digit", month: "2-digit", year: "numeric" });
 const photoTime = new Intl.DateTimeFormat("vi-VN", { timeZone: vietnamTimeZone, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
-const weatherEndpoint = "https://mapservices.weather.noaa.gov/vector/rest/services/aviation/awc_aviation_weather/MapServer/42/query";
-const weatherAttribution = "https://aviationweather.gov/data/api/";
-const weatherCells = new Map<string, { until: number; stations: Promise<WeatherStation[] | null> }>();
-const weatherStationRangeKm = 175;
-const missingLocation = "Không lấy được vị trí";
-const locationStatusText: Record<LocationStatus, string> = {
-  idle: "Chưa lấy vị trí.",
-  checking: "Đang lấy vị trí…",
-  ready: "Đã lấy vị trí.",
-  denied: "Hãy cho phép GM Manager dùng vị trí trong cài đặt điện thoại hoặc trình duyệt.",
-  unavailable: "Chưa lấy được vị trí. Hãy bật Dịch vụ định vị rồi thử lại.",
-  timeout: "Chưa nhận được vị trí. Hãy cấp quyền hoặc thử lại.",
-};
-
 function onMobile() {
   return /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-}
-
-function locateDevice(geolocation: Geolocation, options: PositionOptions): Promise<PositionResult> {
-  return new Promise((resolve) => {
-    try {
-      geolocation.getCurrentPosition(
-        ({ coords: { latitude, longitude, accuracy }, timestamp }) => {
-          if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
-            resolve({ status: "unavailable" });
-            return;
-          }
-          const measuredAt = Number.isFinite(timestamp) ? Math.min(timestamp, Date.now()) : Date.now();
-          resolve({ status: "ready", position: { latitude, longitude, accuracy }, measuredAt });
-        },
-        ({ code }) => resolve({ status: code === 1 ? "denied" : code === 3 ? "timeout" : "unavailable" }),
-        options,
-      );
-    } catch {
-      resolve({ status: "unavailable" });
-    }
-  });
-}
-
-export async function requestConstructionPhotoPosition(): Promise<PositionResult> {
-  const geolocation = navigator.geolocation;
-  if (!window.isSecureContext || !geolocation) return { status: "unavailable" };
-  const first = await locateDevice(geolocation, { enableHighAccuracy: false, maximumAge: positionMaxAgeMs, timeout: 8000 });
-  if (first.status === "ready" || first.status === "denied") return first;
-  return locateDevice(geolocation, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
-}
-
-function photoLocation(position: Position | null) {
-  if (!position) return missingLocation;
-  const accuracy = Number.isFinite(position.accuracy) && position.accuracy >= 150 ? ` (±${Math.ceil(position.accuracy)} m)` : "";
-  return `${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}${accuracy}`;
-}
-
-function observationDistance(position: Position, station: WeatherStation) {
-  const rad = Math.PI / 180;
-  const latDistance = (position.latitude - station.latitude) * rad;
-  const lonDistance = (position.longitude - station.longitude) * rad;
-  const haversine = Math.sin(latDistance / 2) ** 2 +
-    Math.cos(position.latitude * rad) * Math.cos(station.latitude * rad) * Math.sin(lonDistance / 2) ** 2;
-  return 12742 * Math.asin(Math.min(1, Math.sqrt(haversine)));
-}
-
-function weatherCondition(station: WeatherStation) {
-  const code = station.wx_string || "";
-  if (/TS/.test(code)) return "Dông";
-  if (/SN|SG|PL|IC/.test(code)) return "Tuyết hoặc băng";
-  if (/RA|DZ/.test(code)) return code.startsWith("-") ? "Mưa nhẹ" : "Mưa";
-  if (/FG|BR|HZ/.test(code)) return "Sương mù";
-  const sky = [station.sky_cover, station.sky_cover_1, station.sky_cover_2];
-  if (sky.some((value) => value === "OVC" || value === "BKN")) return "Nhiều mây";
-  if (sky.some((value) => value === "FEW" || value === "SCT")) return "Có mây";
-  if (sky.some((value) => value === "CLR" || value === "SKC" || value === "NSC" || value === "CAVOK")) return "Trời quang";
-  return "";
-}
-
-async function nearbyWeather(position: Position, capturedAt: Date) {
-  // Only a coarse envelope is sent to the public station feed. The photo uses the GPS reading.
-  const lat = Math.round(position.latitude * 4) / 4;
-  const lon = Math.round(position.longitude * 4) / 4;
-  const cell = `${lat},${lon}`;
-  let cached = weatherCells.get(cell);
-  if (!cached || cached.until <= Date.now()) {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 8000);
-    const latitudeMargin = weatherStationRangeKm / 110 + 0.125;
-    const longitudeMargin = latitudeMargin / Math.max(0.2, Math.cos(lat * Math.PI / 180));
-    const query = new URLSearchParams({
-      f: "json",
-      geometry: [Math.max(-180, lon - longitudeMargin), Math.max(-90, lat - latitudeMargin), Math.min(180, lon + longitudeMargin), Math.min(90, lat + latitudeMargin)].map((coordinate) => coordinate.toFixed(3)).join(","),
-      geometryType: "esriGeometryEnvelope",
-      inSR: "4326",
-      spatialRel: "esriSpatialRelIntersects",
-      returnGeometry: "false",
-      outFields: "station_id,observation_time,latitude,longitude,temp_c,wx_string,sky_cover,sky_cover_1,sky_cover_2",
-    });
-    const stations = fetch(`${weatherEndpoint}?${query}`, { signal: controller.signal, referrerPolicy: "no-referrer" })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        const result = await response.json() as { features?: { attributes: WeatherStation }[] };
-        return Array.isArray(result.features) ? result.features.map(({ attributes }) => attributes) : null;
-      })
-      .catch(() => null)
-      .finally(() => window.clearTimeout(timeout));
-    if (weatherCells.size >= 12) {
-      const first = weatherCells.keys().next().value;
-      if (first !== undefined) weatherCells.delete(first);
-    }
-    const entry = { until: Date.now() + 5 * 60_000, stations };
-    cached = entry;
-    weatherCells.set(cell, entry);
-    void stations.then((values) => {
-      if (weatherCells.get(cell) !== entry) return;
-      if (values === null) weatherCells.delete(cell);
-      else if (!values.length) entry.until = Date.now() + 60_000;
-    });
-  }
-  const stations = await cached.stations;
-  if (!stations) return null;
-  const captureTime = capturedAt.getTime();
-  const observation = stations
-    .filter((station) => station && station.station_id && Number.isFinite(station.latitude) && Number.isFinite(station.longitude)
-      && Number.isFinite(station.observation_time) && station.observation_time >= captureTime - 2 * 60 * 60_000
-      && station.observation_time <= captureTime + 5 * 60_000)
-    .map((station) => ({
-      station,
-      distance: observationDistance(position, station),
-      conditions: [station.temp_c !== null && Number.isFinite(station.temp_c) ? `${Math.round(station.temp_c)}°C` : "", weatherCondition(station)].filter(Boolean),
-    }))
-    .filter(({ distance, conditions }) => distance <= weatherStationRangeKm && conditions.length)
-    .sort((left, right) => left.distance - right.distance || right.station.observation_time - left.station.observation_time)[0];
-  if (!observation) return null;
-  const { station, distance, conditions } = observation;
-  return {
-    label: conditions.join(" · "),
-    station: distance > 75 ? `${station.station_id}, cách ${Math.round(distance)} km` : station.station_id,
-  };
 }
 
 function readImage(url: string) {
@@ -254,17 +101,18 @@ async function decodeCapture(file: File) {
   }
 }
 
-async function stampPhoto(canvas: HTMLCanvasElement, capturedAt: Date, position: Position | null) {
-  const [logo, weather] = await Promise.all([
-    readImage(`${import.meta.env.BASE_URL}gm-logo-192.png`),
-    position ? nearbyWeather(position, capturedAt) : null,
-  ]);
+async function stampPhoto(canvas: HTMLCanvasElement, capturedAt: Date) {
+  const logo = await readImage(`${import.meta.env.BASE_URL}gm-logo-192.png`);
   const context = canvas.getContext("2d")!;
   const { width, height } = canvas;
   const shortest = Math.min(width, height);
   const padding = Math.round(shortest * 0.035);
   const fontSize = Math.max(12, Math.round(shortest * 0.034));
   const lineHeight = Math.round(fontSize * 1.42);
+  const lines = [
+    `Ngày: ${photoDate.format(capturedAt)}`,
+    `Giờ: ${photoTime.format(capturedAt)}`,
+  ];
   const logoSize = Math.max(32, Math.round(shortest * 0.14));
   const logoCanvas = document.createElement("canvas");
   logoCanvas.width = logoSize;
@@ -275,31 +123,24 @@ async function stampPhoto(canvas: HTMLCanvasElement, capturedAt: Date, position:
   logoContext.fillStyle = "#fff";
   logoContext.fillRect(0, 0, logoSize, logoSize);
 
-  const bottomShade = context.createLinearGradient(0, height - 5 * lineHeight - padding, 0, height);
+  const shadeHeight = (lines.length + 1) * lineHeight + padding;
+  const bottomShade = context.createLinearGradient(0, height - shadeHeight, 0, height);
   bottomShade.addColorStop(0, "transparent");
   bottomShade.addColorStop(1, "rgba(0,0,0,.82)");
   context.fillStyle = bottomShade;
-  context.fillRect(0, height - 5 * lineHeight - padding, width, 5 * lineHeight + padding);
+  context.fillRect(0, height - shadeHeight, width, shadeHeight);
   context.save();
   context.shadowColor = "rgba(0,0,0,.9)";
   context.shadowBlur = Math.max(3, Math.round(logoSize / 13));
   context.drawImage(logoCanvas, padding, padding);
   context.restore();
 
-  const weatherText = weather ? `${weather.label} (trạm ${weather.station})`
-    : position ? "Không lấy được bản tin NOAA" : "Chưa có vị trí để tra";
-  const lines = [
-    `Ngày: ${photoDate.format(capturedAt)}`,
-    `Giờ: ${photoTime.format(capturedAt)}`,
-    `Thời tiết: ${weatherText}`,
-    `Địa điểm: ${photoLocation(position)}`,
-  ];
   context.fillStyle = "#fff";
   context.font = `700 ${fontSize}px Arial, sans-serif`;
   context.textBaseline = "bottom";
   context.shadowColor = "rgba(0,0,0,.8)";
   context.shadowBlur = 3;
-  lines.forEach((line, index) => context.fillText(line, padding, height - padding - (3 - index) * lineHeight, width - 2 * padding));
+  lines.forEach((line, index) => context.fillText(line, padding, height - padding - (lines.length - index - 1) * lineHeight, width - 2 * padding));
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Không thể lưu ảnh đã chụp.")), "image/jpeg", 0.88);
@@ -424,7 +265,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   const [shots, setShots] = useState(queue.shots);
   const [savedCount, setSavedCount] = useState(0);
   const [cameraError, setCameraError] = useState("");
-  const [locationStatus, setLocationStatus] = useState<LocationStatus>("idle");
   const [nativeAvailable, setNativeAvailable] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
   const deleteDialog = useRef<HTMLDialogElement>(null);
@@ -438,8 +278,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   const listPending = useRef(false);
   const galleryRef = useRef(gallery);
   const galleryBlocked = useRef(false);
-  const locationRequest = useRef<{ startedAt: number; result: Promise<PositionResult> } | null>(null);
-  const latestPosition = useRef<PositionResult | null>(null);
   const nativeOpenedAt = useRef(0);
   const loader = useRef(loadPhotos);
   loader.current = loadPhotos;
@@ -573,42 +411,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     if (dialog.current?.open) dialog.current.close();
   }
 
-  function requestPosition(retry = false) {
-    const startedAt = Date.now();
-    const current = locationRequest.current;
-    if (current && (!retry || startedAt - current.startedAt < positionWaitMs)) return current.result;
-    const previous = latestPosition.current;
-    if (previous?.status === "ready" && startedAt - previous.measuredAt < positionMaxAgeMs) return Promise.resolve(previous);
-    if (previous?.status === "denied" && !retry) return Promise.resolve(previous);
-    setLocationStatus("checking");
-    const revision = lifetime.current;
-    const result = requestConstructionPhotoPosition();
-    locationRequest.current = { startedAt, result };
-    // The browser can still be waiting for permission after this UI timer elapses.
-    const timer = window.setTimeout(() => {
-      if (locationRequest.current?.result === result && revision === lifetime.current) setLocationStatus("timeout");
-    }, positionWaitMs);
-    void result.then((fix) => {
-      window.clearTimeout(timer);
-      if (locationRequest.current?.result !== result) return;
-      locationRequest.current = null;
-      latestPosition.current = fix;
-      if (revision === lifetime.current) setLocationStatus(fix.status);
-    });
-    return result;
-  }
-
-  function positionForShot(): Promise<Position | null> {
-    const request = requestPosition();
-    return new Promise((resolve) => {
-      const timer = window.setTimeout(() => resolve(null), positionWaitMs);
-      void request.then((fix) => {
-        window.clearTimeout(timer);
-        resolve(fix.status === "ready" ? fix.position : null);
-      });
-    });
-  }
-
   async function startCamera() {
     if (!canCapture || !mobile) return;
     const revision = ++cameraRevision.current;
@@ -621,8 +423,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
       setSavedCount(0);
       dialog.current?.showModal();
     }
-    // Ask directly from the camera button gesture. Camera and location grants are separate.
-    void requestPosition(true);
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error("Camera API không khả dụng.");
       const media = await navigator.mediaDevices.getUserMedia({
@@ -647,7 +447,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   }
 
   function queuePhoto(frame: HTMLCanvasElement | File, capturedAt: Date) {
-    const shot: PhotoJob = { uploadId: crypto.randomUUID(), capturedAt, frame, position: positionForShot(), stage: "preparing" };
+    const shot: PhotoJob = { uploadId: crypto.randomUUID(), capturedAt, frame, stage: "preparing" };
     updateShots([...queue.shots, shot]);
     void processShot(shot);
   }
@@ -684,10 +484,9 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
     try {
       let blob = shot.blob;
       if (!blob) {
-        const position = await shot.position;
         const frame = shot.frame instanceof File ? await decodeCapture(shot.frame) : shot.frame;
         if (!frame) throw new Error("Không thể đọc ảnh vừa chụp.");
-        blob = await stampPhoto(frame, shot.capturedAt, position);
+        blob = await stampPhoto(frame, shot.capturedAt);
         frame.width = 0;
       }
       prepared = { ...shot, frame: undefined, blob, stage: "uploading", error: undefined };
@@ -841,18 +640,10 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
       <video ref={video} className="construction-photos__camera" hidden={phase !== "starting" && phase !== "live"} muted autoPlay playsInline
         onCanPlay={(event) => setVideoReady(Boolean(event.currentTarget.videoWidth))} />
       {phase === "starting" && <p className="construction-photos__status" role="status">Đang mở camera…</p>}
-      {(phase === "live" || pendingCount > 0 || savedCount > 0 || failedShots.length > 0) && <div className="construction-photos__capture-status">
-        <p className="construction-photos__status" role="status">
+      {(phase === "live" || pendingCount > 0 || savedCount > 0 || failedShots.length > 0) &&
+        <p className="construction-photos__status construction-photos__capture-status" role="status">
           Đã lưu {savedCount} ảnh{pendingCount > 0 && ` · Đang lưu ${pendingCount} ảnh`}{failedShots.length > 0 && ` · ${failedShots.length} ảnh chưa lưu`}
-        </p>
-        <a className="construction-photos__source" href={weatherAttribution} target="_blank" rel="noreferrer">Thời tiết NOAA</a>
-      </div>}
-      {phase !== "closed" && <div className="construction-photos__capture-status">
-        <p className="construction-photos__status" role="status">{locationStatusText[locationStatus]}</p>
-        {locationStatus !== "ready" && locationStatus !== "checking" && <button type="button" className="construction-photos__secondary" onClick={() => void requestPosition(true)}>
-          {locationStatus === "idle" ? "Lấy vị trí" : "Thử lại vị trí"}
-        </button>}
-      </div>}
+        </p>}
       {cameraError && <p className="construction-photos__status construction-photos__error" role="alert">{cameraError}</p>}
       {queueFull && <p className="construction-photos__status" role="status">Đã đủ ảnh chờ lưu. Chờ ảnh tải lên hoặc thử lưu lại ảnh lỗi để chụp tiếp.</p>}
       {phase !== "closed" && failedShotList}
@@ -864,7 +655,6 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
           <button type="button" className="construction-photos__secondary" onClick={() => void startCamera()}>Thử lại</button>
           {nativeAvailable && <button type="button" className="construction-photos__primary" disabled={queueFull} onClick={() => {
             nativeOpenedAt.current = Date.now();
-            void requestPosition();
             nativeCamera.current?.click();
           }}>Mở camera của thiết bị</button>}
         </>}

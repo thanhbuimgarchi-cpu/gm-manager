@@ -240,16 +240,7 @@
 
 .construction-photos__dialog .construction-photos__status { padding: 10px 0; }
 .construction-photos__dialog .construction-photos__error { margin-top: 8px; padding: 10px; border-radius: 6px; }
-.construction-photos__capture-status {
-  display: flex;
-  flex: none;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  column-gap: 8px;
-}
-
-.construction-photos__source { color: #364c73; font-size: 11px; }
+.construction-photos__capture-status { flex: none; }
 .construction-photos__failed-shots {
   flex: none;
   max-height: min(34dvh, 192px);
