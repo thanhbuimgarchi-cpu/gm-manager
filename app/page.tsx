@@ -3226,7 +3226,7 @@ export default function Home() {
   const renderNotificationAction = () => (
     <button
       type="button"
-      className={`pwa-action${notificationsEnabled ? " pwa-action--notifications-enabled" : ""}`}
+      className={`pwa-action pwa-action--notifications${notificationsEnabled ? " pwa-action--notifications-enabled" : ""}`}
       disabled={enablingNotifications}
       aria-haspopup={showNotificationPermissionHelp ? "dialog" : undefined}
       onClick={() => {

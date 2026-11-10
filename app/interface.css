@@ -71,8 +71,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .pwa-action:hover, .export-button:hover:not(:disabled), .document-library__refresh:hover:not(:disabled), .document-library__open-file:hover:not(:disabled), .document-library__load-day:hover, .design-progress-add-row:hover { border-color: #c2cad8; background: #f6f8fb; color: var(--ink); }
 .pwa-action--update { border-color: var(--accent); background: var(--accent); color: #fff; }
 .pwa-action--update:hover { border-color: #881c2b; background: #881c2b; color: #fff; }
+.pwa-action--notifications:not(.pwa-action--notifications-enabled) {
+  border-color: #df9da7;
+  box-shadow: 0 0 11px rgb(202 57 83 / 30%);
+}
 .pwa-action--notifications-enabled { border-color: #bbdfc9; background: #effaf3; color: #26744a; }
 .pwa-action--notifications-enabled:hover { border-color: #8ec6a4; background: #e6f5ec; color: #23603e; }
+.pwa-action--notifications.pwa-action--notifications-enabled { box-shadow: 0 0 11px rgb(55 168 106 / 42%); }
 .customer-context--back, .personnel-back { color: #a02535; border-color: #f0ccd3; background: #fff4f5; }
 .customer-context--back:hover, .personnel-back:hover { border-color: #d98a99; background: #ffeaee; color: #881d2c; }
 .customer-link--topbar { color: #277247; border-color: #bbdfc9; background: #effaf3; }
