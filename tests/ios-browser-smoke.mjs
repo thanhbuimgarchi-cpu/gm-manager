@@ -76,7 +76,7 @@ async function fixture({ version = "16_4", standalone = true, permission = "defa
   await page.clock.setFixedTime(new Date("2026-10-28T02:00:00Z"));
   await page.goto(baseUrl);
   await page.locator(".customer-gateway__actions .pwa-action--login").waitFor();
-  return { context, page, notificationButton: () => page.locator(".customer-gateway__actions").getByRole("button", { name: /bật thông báo|thông báo đã bật/i }) };
+  return { context, page, notificationButton: () => page.locator(".customer-gateway__actions").getByRole("button", { name: "Bật thông báo", exact: true }) };
 }
 
 async function assertNoLocationAccess(page) {

@@ -3238,7 +3238,7 @@ export default function Home() {
         void sendTestNotification().then((error) => setNotice(error || "Đã bật thông báo và gửi một thông báo kiểm tra đến thiết bị."));
       }}
     >
-      {enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "◌ Bật thông báo"}
+      {enablingNotifications ? "Đang bật…" : notificationsEnabled ? "✓ Thông báo đã bật" : "Bật thông báo"}
     </button>
   );
   const renderOverviewActions = () => <>

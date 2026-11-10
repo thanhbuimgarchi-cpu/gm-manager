@@ -373,7 +373,7 @@ try {
   const install = overviewActions.getByRole("button", { name: /Cài ứng dụng/i });
   await install.waitFor();
   assert.equal(await overviewActions.getByRole("button", { name: /tải bản cài|cho phép vị trí/i }).count(), 0);
-  const enableNotifications = overviewActions.getByRole("button", { name: /Bật thông báo/i });
+  const enableNotifications = overviewActions.getByRole("button", { name: "Bật thông báo", exact: true });
   await enableNotifications.tap();
   await overview.page.waitForFunction(() => window.constructionCameraTest.notificationRequests.length === 1);
   await overview.page.evaluate(() => window.constructionCameraTest.grantNotifications());
