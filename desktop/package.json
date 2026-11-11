@@ -1,6 +1,6 @@
 {
   "name": "gm-crm-desktop",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
   "description": "GM Manager desktop application",
   "main": "main.cjs",

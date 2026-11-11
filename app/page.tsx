@@ -2243,6 +2243,7 @@ export default function Home() {
   const notificationLocationRequested = useRef("");
   const customerCreateRequestsInFlight = useRef(new Set<string>());
   const customerFolderRetries = useRef(new Map<string, { attempts: number; retryAt: number }>());
+  const localDocumentOpenInFlight = useRef(false);
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
   const workspaceSyncTimer = useRef<number | null>(null);
@@ -3033,6 +3034,33 @@ export default function Home() {
     }
   };
 
+  const openLocalDocumentFolder = async (open: () => Promise<string>) => {
+    if (localDocumentOpenInFlight.current) return;
+    localDocumentOpenInFlight.current = true;
+    try {
+      let error = await open();
+      const desktop = desktopBridge();
+      if (/Không tìm thấy|Hãy chọn thư mục GM Manager/.test(error) && desktop?.selectWorkspaceFolder) {
+        setNotice("Hãy chọn thư mục GM Manager hoặc Khách hàng đang có trên máy để mở tài liệu.");
+        const selected = await desktop.selectWorkspaceFolder();
+        if (!selected.ok) {
+          setNotice(selected.canceled ? "Chưa mở tài liệu. Hãy chọn đúng thư mục Drive trên máy khi mở lại." : selected.error || error);
+          return;
+        }
+        workspaceLocationRevision.current += 1;
+        workspacePathEdited.current = false;
+        setLocalWorkspacePath(selected.path);
+        try { window.localStorage.setItem(localWorkspacePathStorageKey, selected.path); } catch { /* The native app also remembers the selected path. */ }
+        error = await open();
+      }
+      setNotice(error);
+    } catch {
+      setNotice("Không thể mở thư mục tài liệu. Hãy kiểm tra vị trí GM Manager đã chọn.");
+    } finally {
+      localDocumentOpenInFlight.current = false;
+    }
+  };
+
   const openDesktopDocuments = async () => {
     const desktop = desktopBridge();
     if (!desktop?.isDesktop || !desktop.openDrive || !selectedCustomerLocation) return;
@@ -3045,13 +3073,12 @@ export default function Home() {
       if (!requireAdminCustomerSession()) return;
       if (!await syncCustomerFolder(location, true, true)) return;
     }
-    const error = await desktop.openDrive({
+    await openLocalDocumentFolder(() => desktop.openDrive!({
       projectId: location.record.projectId,
       houseId: location.record.houseId,
       year: location.year,
       month: location.month,
-    });
-    if (error) setNotice(error);
+    }));
   };
 
   const openDesktopDocumentFile = async (file: DocumentFile, snapshot: DocumentSnapshot) => {
@@ -3065,10 +3092,7 @@ export default function Home() {
     const payload = { projectId: selectedCustomerLocation.record.projectId, houseId: selectedCustomerLocation.record.houseId, year: selectedCustomerLocation.year, month: selectedCustomerLocation.month, snapshotName: snapshot.name };
     const desktop = desktopBridge();
     if (desktop?.openDocumentFolder) {
-      try {
-        const error = await desktop.openDocumentFolder(payload);
-        if (error) setNotice(error);
-      } catch { setNotice("Không thể mở thư mục tài liệu. Hãy kiểm tra vị trí GM Manager đã chọn."); }
+      await openLocalDocumentFolder(() => desktop.openDocumentFolder!(payload));
       return;
     }
     const query = new URLSearchParams(Object.entries(payload).map(([key, value]) => [key, String(value ?? "")]));

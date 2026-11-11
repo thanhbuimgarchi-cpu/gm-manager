@@ -3,7 +3,7 @@ const path = require("node:path");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
-const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder } = require("./path-utils.cjs");
+const { safeDriveEntryName, sameDriveEntryName, isWithinRoot, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder, workspaceLookupRoots } = require("./path-utils.cjs");
 const { createBackgroundController } = require(path.join(__dirname, "background.cjs"));
 const { createDesktopUpdateController } = require(path.join(__dirname, "update.cjs"));
 const { createInstallerHandoff } = require(path.join(__dirname, "install-update.cjs"));
@@ -14,8 +14,6 @@ const APP_ORIGIN = new URL(APP_URL).origin;
 const DESKTOP_BACKGROUND = { light: "#ffffff", dark: "#1d222b" };
 // Chromium's normal-contrast menu background on Windows.
 const WINDOWS_CAPTION_BACKGROUND = { light: "#ffffff", dark: "#292a2d" };
-// The shared Drive used by the installed PC shortcut is mounted on I:. Keep
-// the older G: locations as fallbacks for machines that still use that mount.
 const WINDOWS_DRIVE_ROOTS = ["I:\\Shared drives", "I:\\My Drive", "G:\\Shared drives", "G:\\My Drive"];
 const APP_ICON = app.isPackaged ? path.join(process.resourcesPath, "gm-logo-512.png") : path.join(__dirname, "..", "public", "gm-logo-512.png");
 let mainWindow = null;
@@ -168,37 +166,50 @@ async function googleDriveRoots() {
   return roots;
 }
 
-async function findProjectDocumentsFolder(payload) {
+async function lookupWithinDeadline(deadline, lookup) {
+  const remaining = Math.min(1500, deadline - Date.now());
+  if (remaining <= 0) return "";
+  let timer;
+  try {
+    return await Promise.race([
+      lookup(),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(""), remaining); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+async function* documentWorkspaceRoots(deadline) {
   const selectedRoot = await readWorkspaceFolder();
-  if (selectedRoot) return findProjectDocumentsAtRoot(selectedRoot, payload);
-  const identifiers = [payload.houseId, payload.projectId];
-  const wanted = new Set(identifiers.map((value) => String(value || "").trim()).filter(Boolean));
-  if (!wanted.size) return "";
-  const queue = (await googleDriveRoots()).map((folder) => ({ folder, depth: 0 }));
-  const visited = new Set();
-  while (queue.length && visited.size < 2000) {
-    const { folder, depth } = queue.shift();
-    if (!folder || visited.has(folder)) continue;
-    visited.add(folder);
-    let entries;
-    try {
-      entries = await fs.readdir(folder, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const child = path.join(folder, entry.name);
-      if (wanted.has(entry.name)) {
-        const documentsFolder = path.join(child, "Tài liệu");
-        try {
-          if ((await fs.stat(documentsFolder)).isDirectory()) return documentsFolder;
-        } catch { /* Keep looking: a legacy project folder may not contain Tài liệu. */ }
-      }
-      if (depth < 6) queue.push({ folder: child, depth: depth + 1 });
+  if (selectedRoot) {
+    yield* workspaceLookupRoots(selectedRoot);
+    return;
+  }
+  // Older installations have no saved location. Discover a workspace first,
+  // then use the same exact year/month/customer lookup as a selected root.
+  const found = new Set();
+  for (const drive of await googleDriveRoots()) {
+    if (Date.now() >= deadline) break;
+    const root = await lookupWithinDeadline(deadline, () => normalizeWorkspaceRoot(drive));
+    if (root && !found.has(root)) {
+      found.add(root);
+      yield root;
     }
   }
+}
+
+async function findProjectDocumentsFolder(payload) {
+  const deadline = Date.now() + 6000;
+  for await (const root of documentWorkspaceRoots(deadline)) {
+    const documents = await lookupWithinDeadline(deadline, () => findProjectDocumentsAtRoot(root, payload));
+    if (documents) return documents;
+  }
   return "";
+}
+
+async function missingDocumentsMessage(payload = {}) {
+  if (!await readWorkspaceFolder()) return "Hãy chọn thư mục GM Manager hoặc Khách hàng trong phần đăng nhập trước.";
+  const house = safeDriveEntryName(payload.houseId || payload.projectId) || "hồ sơ";
+  return `Không tìm thấy thư mục Tài liệu của ${house} tại vị trí GM Manager đã chọn. Hãy kiểm tra Drive đã đồng bộ hoặc chọn lại thư mục GM Manager/Khách hàng.`;
 }
 
 async function findDriveFile(documentsFolder, fileName, snapshotName) {
@@ -239,23 +250,21 @@ async function findDriveFile(documentsFolder, fileName, snapshotName) {
       }
     }
   }
-  // A few older Drive Desktop layouts did not preserve the snapshot folder
-  // name. If the selected snapshot path is unavailable, use the project
-  // Tài liệu folder as a compatibility fallback.
-  if (safeSnapshotName) return findDriveFile(documentsFolder, wantedName, "");
   return "";
 }
 
 async function openDocumentFolder(payload = {}) {
-  const selectedRoot = await readWorkspaceFolder();
-  if (!selectedRoot) return "Hãy chọn thư mục GM Manager trong phần đăng nhập trước.";
-  const folder = await findDocumentSnapshotFolder(selectedRoot, payload);
-  if (!folder) return "Không tìm thấy thư mục Tài liệu của hồ sơ hoặc ngày đã chọn tại vị trí GM Manager đã lưu.";
-  if (payload.fileName) {
-    const file = await findDriveFile(folder, payload.fileName, "");
+  let fallbackFolder = "";
+  const deadline = Date.now() + 6000;
+  for await (const root of documentWorkspaceRoots(deadline)) {
+    const folder = await lookupWithinDeadline(deadline, () => findDocumentSnapshotFolder(root, payload));
+    if (!folder) continue;
+    if (!payload.fileName) return shell.openPath(folder);
+    fallbackFolder ||= folder;
+    const file = await lookupWithinDeadline(deadline, () => findDriveFile(folder, payload.fileName, ""));
     if (file) return shell.openPath(path.dirname(file));
   }
-  return shell.openPath(folder);
+  return fallbackFolder ? shell.openPath(fallbackFolder) : missingDocumentsMessage(payload);
 }
 
 async function handleProtocolUrl(value) {
@@ -366,7 +375,7 @@ if (singleInstance) app.whenReady().then(() => {
     const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
     if (!identifiers.length || identifiers.some((value) => !safeDriveEntryName(value))) return "Mã nhà không hợp lệ.";
     const documentsFolder = await findProjectDocumentsFolder(payload);
-    return documentsFolder ? shell.openPath(documentsFolder) : process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
+    return documentsFolder ? shell.openPath(documentsFolder) : missingDocumentsMessage(payload);
   });
   ipcMain.handle("gmcrm:open-file", async (event, payload = {}) => {
     if (!trustedIpcSender(event)) return "Nguồn yêu cầu không hợp lệ.";
@@ -377,11 +386,23 @@ if (singleInstance) app.whenReady().then(() => {
     const identifiers = [houseId, projectId].filter((value, index, values) => value && values.indexOf(value) === index);
     if (!identifiers.length || identifiers.some((value) => !safeDriveEntryName(value))) return "Mã nhà không hợp lệ.";
     if (!fileName) return "Tên tệp không hợp lệ.";
-    const documentsFolder = await findProjectDocumentsFolder(payload);
-    if (!documentsFolder) return process.platform === "darwin" ? "Không tìm thấy Google Drive Desktop hoặc thư mục Tài liệu của mã nhà trên Mac." : "Không tìm thấy thư mục Tài liệu của mã nhà trên ổ I hoặc G.";
-    const filePath = await findDriveFile(documentsFolder, fileName, snapshotName);
-    if (!filePath) return `Không tìm thấy tệp ${fileName} trong thư mục Google Drive trên máy tính.`;
-    return shell.openPath(filePath);
+    if (payload.snapshotName && !snapshotName) return "Ngày tài liệu không hợp lệ.";
+    const documentsFolders = [];
+    const deadline = Date.now() + 6000;
+    for await (const root of documentWorkspaceRoots(deadline)) {
+      const documentsFolder = await lookupWithinDeadline(deadline, () => findProjectDocumentsAtRoot(root, payload));
+      if (!documentsFolder) continue;
+      documentsFolders.push(documentsFolder);
+      const filePath = await lookupWithinDeadline(deadline, () => findDriveFile(documentsFolder, fileName, snapshotName));
+      if (filePath) return shell.openPath(filePath);
+    }
+    // Older Drive Desktop layouts may flatten day folders. Only consider
+    // those files after checking the exact day on every equivalent mount.
+    if (snapshotName) for (const documentsFolder of documentsFolders) {
+      const filePath = await lookupWithinDeadline(deadline, () => findDriveFile(documentsFolder, fileName, ""));
+      if (filePath) return shell.openPath(filePath);
+    }
+    return documentsFolders.length ? `Không tìm thấy tệp ${fileName} trong thư mục Google Drive trên máy tính.` : missingDocumentsMessage(payload);
   });
   const initialProtocolUrl = process.argv.find((argument) => /^gmmanager:\/\//i.test(argument));
   if (initialProtocolUrl) pendingProtocolUrls.push(initialProtocolUrl);

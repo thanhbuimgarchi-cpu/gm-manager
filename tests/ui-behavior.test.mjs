@@ -361,3 +361,67 @@ test("folder recovery requires a valid admin session and skips backed-off record
   await f.context.retry();
   assert.equal(f.calls.length, 5, "a failed batch does not starve the remaining pending customers");
 });
+
+const localDocumentOpenStart = source.indexOf("  const openLocalDocumentFolder = ");
+const localDocumentOpenEnd = source.indexOf("\n  const openDesktopDocuments = ", localDocumentOpenStart);
+assert.ok(localDocumentOpenStart > 0 && localDocumentOpenEnd > localDocumentOpenStart);
+const localDocumentOpenCode = (await transform(
+  source.slice(localDocumentOpenStart, localDocumentOpenEnd) + "\nglobalThis.openFolder = openLocalDocumentFolder;",
+  { loader: "ts", target: "es2022" },
+)).code;
+
+function localDocumentOpenFixture(selectWorkspaceFolder) {
+  const notices = [];
+  const savedPaths = [];
+  const state = vm.createContext({
+    localDocumentOpenInFlight: { current: false },
+    desktopBridge: () => ({ selectWorkspaceFolder }),
+    workspaceLocationRevision: { current: 0 },
+    workspacePathEdited: { current: true },
+    setLocalWorkspacePath: (path) => savedPaths.push(path),
+    localWorkspacePathStorageKey: "workspace-path",
+    window: { localStorage: { setItem: (key, path) => savedPaths.push(path) } },
+    setNotice: (notice) => notices.push(notice),
+  });
+  vm.runInContext(localDocumentOpenCode, state);
+  return { state, notices, savedPaths };
+}
+
+test("an older desktop can reselect its missing Drive workspace and retry the original folder operation", async () => {
+  let choices = 0;
+  let opens = 0;
+  const f = localDocumentOpenFixture(async () => {
+    choices++;
+    return { ok: true, path: "H:/GM Manager" };
+  });
+  await f.state.openFolder(async () => {
+    opens++;
+    return opens === 1 ? "Không tìm thấy thư mục Tài liệu trên ổ I hoặc G." : "";
+  });
+  assert.equal(opens, 2);
+  assert.equal(choices, 1);
+  assert.deepEqual(f.savedPaths, ["H:/GM Manager", "H:/GM Manager"]);
+  assert.equal(f.state.workspaceLocationRevision.current, 1);
+  assert.equal(f.state.workspacePathEdited.current, false);
+  assert.equal(f.notices.at(-1), "");
+});
+
+test("canceling folder selection preserves the workspace and overlapping opens share one picker", async () => {
+  let finishSelection;
+  let choices = 0;
+  let opens = 0;
+  const f = localDocumentOpenFixture(() => {
+    choices++;
+    return new Promise((resolve) => { finishSelection = resolve; });
+  });
+  const open = async () => { opens++; return "Không tìm thấy thư mục Tài liệu."; };
+  const pending = f.state.openFolder(open);
+  await Promise.resolve();
+  await f.state.openFolder(open);
+  assert.equal(opens, 1);
+  assert.equal(choices, 1);
+  finishSelection({ ok: false, canceled: true });
+  await pending;
+  assert.deepEqual(f.savedPaths, []);
+  assert.equal(f.state.localDocumentOpenInFlight.current, false);
+});

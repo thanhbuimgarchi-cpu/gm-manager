@@ -142,4 +142,16 @@ async function findDocumentSnapshotFolder(root, payload = {}) {
   return directoryChild(documents, payload.snapshotName, root);
 }
 
-module.exports = { safeDriveEntryName, sameDriveEntryName, isWithinRoot, directoryChild, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder };
+function workspaceLookupRoots(value) {
+  const root = String(value || "").trim();
+  if (!root || (!path.isAbsolute(root) && !path.win32.isAbsolute(root))) return [];
+  const parts = root.split("\\");
+  if (!/^[a-z]:$/i.test(parts[0]) || parts[1]?.toLowerCase() !== ".shortcut-targets-by-id"
+    || !/^[A-Za-z0-9_-]{10,}$/.test(parts[2] || "") || parts.slice(3).some((part) => !safeDriveEntryName(part))) return [root];
+  // Drive Desktop exposes the same shared folder under each mounted account.
+  // Keep its immutable target ID and path suffix, changing only the volume.
+  const letters = [...new Set([parts[0][0].toUpperCase(), "G", "H", "I", "J", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"])];
+  return letters.map((letter) => `${letter}:${root.slice(2)}`);
+}
+
+module.exports = { safeDriveEntryName, sameDriveEntryName, isWithinRoot, directoryChild, normalizeWorkspaceRoot, findProjectDocumentsAtRoot, findDocumentSnapshotFolder, workspaceLookupRoots };

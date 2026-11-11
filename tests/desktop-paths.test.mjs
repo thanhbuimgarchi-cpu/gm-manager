@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import vm from "node:vm";
@@ -114,12 +114,45 @@ test("unsafe path segments and out-of-root paths are rejected", async (t) => {
   assert.equal(helpers.sameDriveEntryName("Tài liệu", "TÀI LIỆU"), true);
 });
 
+test("equivalent Windows mounts preserve the exact shortcut target and selected root first", () => {
+  const root = String.raw`I:\.shortcut-targets-by-id\1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu\GM Manager`;
+  const roots = helpers.workspaceLookupRoots(root);
+  assert.equal(roots[0], root);
+  assert.equal(roots[1], String.raw`G:\.shortcut-targets-by-id\1jY12yTvgh4ZvpuX6r4coOrOBwdPEDAqu\GM Manager`);
+  assert.equal(roots.length, 26);
+  assert.equal(new Set(roots).size, 26);
+  assert.ok(roots.every((candidate) => candidate.slice(1) === root.slice(1)));
+  const share = root + String.raw`\Khách hàng`;
+  assert.ok(helpers.workspaceLookupRoots(share).every((candidate) => candidate.slice(1) === share.slice(1)));
+  for (const ordinary of [String.raw`I:\Shared drives\GM Manager`, "/Volumes/Google Drive/GM Manager"]) {
+    assert.deepEqual(helpers.workspaceLookupRoots(ordinary), [ordinary]);
+  }
+  assert.deepEqual(helpers.workspaceLookupRoots(""), []);
+  assert.deepEqual(helpers.workspaceLookupRoots("relative/GM Manager"), []);
+});
+
+test("document lookup rejects a customer link escaping the workspace", async (t) => {
+  const { temporary, root } = await fixture(t);
+  const outside = path.join(temporary, "Another account", "Tài liệu");
+  await mkdir(outside, { recursive: true });
+  await symlink(path.dirname(outside), path.join(root, "Khách hàng", "2026", "T10", "OTHER"),
+    process.platform === "win32" ? "junction" : "dir");
+  assert.equal(await helpers.findProjectDocumentsAtRoot(root, { year: 2026, month: 10, houseId: "OTHER" }), "");
+});
+
 test("native selection persists its root and IPC only accepts the application origin", async (t) => {
   const { temporary, root, snapshot } = await fixture(t);
   const ipcHandlers = new Map();
   const appEvents = new Map();
   const opened = [];
   const registrations = [];
+  const mirroredRoots = new Map();
+  let stalledRoot = "";
+  const nativeHelpers = {
+    ...helpers,
+    workspaceLookupRoots: (root) => mirroredRoots.get(root) || helpers.workspaceLookupRoots(root),
+    findProjectDocumentsAtRoot: (root, payload) => root === stalledRoot ? new Promise(() => {}) : helpers.findProjectDocumentsAtRoot(root, payload),
+  };
   let notificationMode = "show";
   class NativeNotification extends EventEmitter {
     static isSupported() { return notificationMode !== "unsupported"; }
@@ -146,7 +179,7 @@ test("native selection persists its root and IPC only accepts the application or
   };
   const source = await readFile(new URL("../desktop/main.cjs", import.meta.url), "utf8");
   vm.runInNewContext(source, {
-    require: (name) => name === "electron" ? electron : name === "./path-utils.cjs" ? helpers : require(name),
+    require: (name) => name === "electron" ? electron : name === "./path-utils.cjs" ? nativeHelpers : require(name),
     __dirname: path.resolve("desktop"), process: { platform: process.platform, argv: [], defaultApp: false }, URL, setTimeout, clearTimeout,
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -191,4 +224,51 @@ test("native selection persists its root and IPC only accepts the application or
   assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, sharedCustomers);
   assert.equal(await ipcHandlers.get("gmcrm:open-document-folder")(trusted, payload), "");
   assert.equal(opened.at(-1), sharedSnapshot);
+
+  const shortcutSuffix = path.join(".shortcut-targets-by-id", "same-remote-folder-123", "GM Manager");
+  const savedRoot = path.join(temporary, "Mount I", shortcutSuffix);
+  const mirrorRoot = path.join(temporary, "Mount G", shortcutSuffix);
+  const mirrorDocuments = path.join(mirrorRoot, "Khách hàng", "2026", "T11", "HG-112", "Tài liệu");
+  const mirrorSnapshot = path.join(mirrorDocuments, "11-11-2026-HG-112");
+  await Promise.all([
+    mkdir(path.join(savedRoot, "Khách hàng"), { recursive: true }),
+    mkdir(path.join(savedRoot, "Nhân lực"), { recursive: true }),
+    mkdir(mirrorSnapshot, { recursive: true }),
+    mkdir(path.join(mirrorRoot, "Nhân lực"), { recursive: true }),
+  ]);
+  mirroredRoots.set(savedRoot, [savedRoot, mirrorRoot]);
+  assert.equal((await ipcHandlers.get("gmcrm:validate-workspace-folder")(trusted, { path: savedRoot })).path, savedRoot);
+  const mirrorPayload = { year: 2026, month: 11, houseId: "HG-112", snapshotName: "11-11-2026-HG-112" };
+  assert.equal(await ipcHandlers.get("gmcrm:open-drive")(trusted, mirrorPayload), "");
+  assert.equal(opened.at(-1), mirrorDocuments, "a stale saved mount can use the exact same shared-folder target");
+
+  const savedDocuments = path.join(savedRoot, "Khách hàng", "2026", "T11", "HG-112", "Tài liệu");
+  await mkdir(path.join(savedDocuments, "10-11-2026-HG-112"), { recursive: true });
+  await writeFile(path.join(savedDocuments, "10-11-2026-HG-112", "drawing.pdf"), "synthetic older file");
+  await writeFile(path.join(mirrorSnapshot, "drawing.pdf"), "synthetic current file");
+  assert.equal(await ipcHandlers.get("gmcrm:open-file")(trusted, { ...mirrorPayload, fileName: "drawing.pdf" }), "");
+  assert.equal(opened.at(-1), path.join(mirrorSnapshot, "drawing.pdf"), "an older same-named file cannot hide the exact day on another mount");
+  assert.equal(await ipcHandlers.get("gmcrm:open-document-folder")(trusted, mirrorPayload), "");
+  assert.equal(opened.at(-1), mirrorSnapshot);
+  await mkdir(path.join(savedDocuments, mirrorPayload.snapshotName));
+  assert.equal(await ipcHandlers.get("gmcrm:open-document-folder")(trusted, { ...mirrorPayload, fileName: "drawing.pdf" }), "");
+  assert.equal(opened.at(-1), mirrorSnapshot, "a present but empty selected-day folder does not stop the mirror file search");
+  assert.equal(await ipcHandlers.get("gmcrm:open-drive")(trusted, mirrorPayload), "");
+  assert.equal(opened.at(-1), savedDocuments, "the selected account stays preferred when its requested folder exists");
+
+  const missingPeriod = await ipcHandlers.get("gmcrm:open-drive")(trusted, { ...mirrorPayload, month: 10 });
+  assert.match(missingPeriod, /chọn lại thư mục/);
+  assert.match(await ipcHandlers.get("gmcrm:open-file")(trusted, { ...mirrorPayload, snapshotName: "../", fileName: "drawing.pdf" }), /không hợp lệ/);
+  const legacyPayload = { ...mirrorPayload, snapshotName: "legacy-flat-day", fileName: "drawing.pdf" };
+  assert.equal(await ipcHandlers.get("gmcrm:open-file")(trusted, legacyPayload), "");
+  assert.equal(opened.at(-1), path.join(savedDocuments, "10-11-2026-HG-112", "drawing.pdf"), "legacy flattened layouts remain readable after exact-day candidates are exhausted");
+  assert.equal(JSON.parse(await readFile(path.join(temporary, "userData", "workspace-location.json"), "utf8")).path, savedRoot);
+
+  stalledRoot = savedRoot;
+  assert.equal(await ipcHandlers.get("gmcrm:open-drive")(trusted, mirrorPayload), "");
+  assert.equal(opened.at(-1), mirrorDocuments, "a disconnected account cannot prevent opening the synchronized equivalent mount");
+  stalledRoot = "";
+  assert.equal((await ipcHandlers.get("gmcrm:validate-workspace-folder")(trusted, { path: alternateRoot })).path, alternateRoot);
+  assert.match(await ipcHandlers.get("gmcrm:open-drive")(trusted, mirrorPayload), /chọn lại thư mục/,
+    "an ordinary selected root cannot switch to an unrelated workspace containing the same house code");
 });
