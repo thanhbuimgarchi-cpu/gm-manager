@@ -160,6 +160,7 @@ type WorkRecord = {
   driveUpdatedAt?: string;
   cacheUpdatedAt?: number;
   pendingDriveSync?: boolean;
+  pendingDriveSyncScope?: string;
   details: Record<string, string>;
   audioNote?: AudioNote;
   isHydrated?: boolean;
@@ -1726,6 +1727,7 @@ function mergeDuplicateWorkRecords(primary: WorkRecord, secondary: WorkRecord) {
     audioNote: winner.audioNote ?? other.audioNote,
     customerShareToken: winner.customerShareToken || other.customerShareToken,
     pendingDriveSync: Boolean(primary.pendingDriveSync || secondary.pendingDriveSync),
+    pendingDriveSyncScope: winner.pendingDriveSyncScope || other.pendingDriveSyncScope,
     cacheUpdatedAt: Math.max(Number(primary.cacheUpdatedAt ?? 0), Number(secondary.cacheUpdatedAt ?? 0)) || undefined,
   };
 }
@@ -2240,6 +2242,7 @@ export default function Home() {
   const customerSearchGeneration = useRef(0);
   const notificationLocationRequested = useRef("");
   const customerCreateRequestsInFlight = useRef(new Set<string>());
+  const customerFolderRetries = useRef(new Map<string, { attempts: number; retryAt: number }>());
   const driveRequestsInFlight = useRef(new Set<string>());
   const workNotesLoadRevision = useRef(0);
   const workspaceSyncTimer = useRef<number | null>(null);
@@ -2278,6 +2281,16 @@ export default function Home() {
   workflowAuthorization.current = { workflowSessionToken: currentWorkflowToken, adminSessionToken: currentWorkflowToken };
   const allPersonnel = useMemo(() => Object.values(personnelByCategory).flat(), [personnelByCategory]);
   const isBuiltInAdminLoggedIn = loggedInEmployeeEmail === builtInAdminAccount;
+  const customerDriveRootScope = JSON.stringify([driveScriptUrl.trim(), driveFolderIdFromUrl(driveLinkUrl) || driveLinkUrl.trim()]);
+  const customerDriveSyncToken = isBuiltInAdminLoggedIn && isCurrentAdminSession(adminSession, driveScriptUrl) ? adminSession!.token : "";
+  const customerDriveSyncContext = useRef({ scope: "", rootScope: "", scriptUrl: "", token: "", ready: false });
+  customerDriveSyncContext.current = {
+    scope: JSON.stringify([customerDriveRootScope, loggedInEmployeeEmail, customerDriveSyncToken]),
+    rootScope: customerDriveRootScope,
+    scriptUrl: driveScriptUrl.trim(),
+    token: customerDriveSyncToken,
+    ready: workspaceStorageReady && !isCustomerPortal && !driveConfigOpen && !savingPancakeConfig && Boolean(customerDriveSyncToken),
+  };
   const loggedInEmployee = isBuiltInAdminLoggedIn ? builtInAdminPersonnel : allPersonnel.find((member) => member.status === "Có" && personnelAssignmentKey(member).toLowerCase() === loggedInEmployeeEmail.toLowerCase()) ?? null;
   const loggedInEmployeeAssignmentKey = loggedInEmployee ? personnelAssignmentKey(loggedInEmployee) : loggedInEmployeeEmail;
   const loggedInEmployeeLegacyAssignmentKey = personnelLegacyAssignmentKey(loggedInEmployee);
@@ -3023,11 +3036,20 @@ export default function Home() {
   const openDesktopDocuments = async () => {
     const desktop = desktopBridge();
     if (!desktop?.isDesktop || !desktop.openDrive || !selectedCustomerLocation) return;
+    const location = selectedCustomerLocation;
+    if (location.record.pendingDriveSync) {
+      if (!isBuiltInAdminLoggedIn) {
+        setNotice("Thư mục khách hàng đang chờ đồng bộ Drive. Hãy liên hệ admin để hoàn tất.");
+        return;
+      }
+      if (!requireAdminCustomerSession()) return;
+      if (!await syncCustomerFolder(location, true, true)) return;
+    }
     const error = await desktop.openDrive({
-      projectId: selectedCustomerLocation.record.projectId,
-      houseId: selectedCustomerLocation.record.houseId,
-      year: selectedCustomerLocation.year,
-      month: selectedCustomerLocation.month,
+      projectId: location.record.projectId,
+      houseId: location.record.houseId,
+      year: location.year,
+      month: location.month,
     });
     if (error) setNotice(error);
   };
@@ -3358,6 +3380,125 @@ export default function Home() {
     });
   };
 
+  const syncCustomerFolder = async (location: CustomerLocation, announce = false, force = false) => {
+    const context = customerDriveSyncContext.current;
+    if (!context.ready || customerMutationInFlight.current
+      || !isCurrentAdminSession({ token: context.token, scriptUrl: context.scriptUrl }, context.scriptUrl)) return false;
+    if (navigator.onLine === false) {
+      if (announce) setNotice("Hồ sơ đã lưu. Ứng dụng sẽ tự tạo thư mục Drive khi có kết nối mạng.");
+      return false;
+    }
+    const { year, month, record } = location;
+    const houseKey = normalizeHouseCode(record.houseId || record.projectId);
+    const key = JSON.stringify([context.scope, year, month, houseKey]);
+    const latestRecord = () => yearsRef.current.find((item) => item.year === year)?.months[month - 1]?.records.find((item) =>
+      item.projectId === record.projectId && item.id === record.id && normalizeHouseCode(item.houseId || item.projectId) === houseKey);
+    const current = latestRecord();
+    if (!current?.pendingDriveSync) return false;
+    if (customerCreateRequestsInFlight.current.has(key)) {
+      if (announce) setNotice("Đang tạo thư mục khách hàng trên Drive. Hãy chờ xác nhận.");
+      return false;
+    }
+    if (current.pendingDriveSyncScope && current.pendingDriveSyncScope !== context.rootScope) {
+      if (announce) setNotice("Hồ sơ đang chờ đồng bộ với thư mục Drive đã chọn lúc tạo. Hãy chọn lại đúng thư mục đó.");
+      return false;
+    }
+    const retry = customerFolderRetries.current.get(key);
+    if (!force && retry && retry.retryAt > Date.now()) return false;
+    const revision = customerMutationRevision.current;
+    const isCurrent = () => customerDriveSyncContext.current.scope === context.scope
+      && customerDriveSyncContext.current.ready && revision === customerMutationRevision.current
+      && !customerMutationInFlight.current && Boolean(latestRecord()?.pendingDriveSync);
+    customerCreateRequestsInFlight.current.add(key);
+    try {
+      // Older pending records have no root binding. Preserve the current root
+      // before retrying so changing the Drive connection cannot copy them elsewhere.
+      if (!current.pendingDriveSyncScope) {
+        const bound = { ...current, pendingDriveSyncScope: context.rootScope, cacheUpdatedAt: Date.now() };
+        persist(yearsRef.current.map((yearFolder) => yearFolder.year !== year ? yearFolder : {
+          ...yearFolder,
+          months: yearFolder.months.map((period, index) => index !== month - 1 ? period : {
+            ...period,
+            records: period.records.map((item) => item === current ? bound : item),
+          }),
+        }));
+      }
+      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; folderId?: string }>({ scriptUrl: context.scriptUrl }, {
+        action: "create-customer-folder",
+        adminSessionToken: context.token,
+        year,
+        month,
+        projectId: record.projectId,
+        houseId: current.houseId,
+      });
+      if (!response.ok || !result.ok || typeof result.folderId !== "string" || !result.folderId.trim()) {
+        throw new Error(result.error || "Drive chưa xác nhận tạo thư mục hồ sơ.");
+      }
+      if (!isCurrent()) return false;
+      const confirmed = latestRecord()!;
+      const updated = { ...confirmed, driveFolderId: result.folderId.trim(), pendingDriveSync: false, pendingDriveSyncScope: undefined, cacheUpdatedAt: Date.now() };
+      customerMutationRevision.current += 1;
+      clearCustomerDirectoryCache(year, month);
+      persist(yearsRef.current.map((yearFolder) => yearFolder.year !== year ? yearFolder : {
+        ...yearFolder,
+        months: yearFolder.months.map((period, index) => index !== month - 1 ? period : {
+          ...period,
+          records: period.records.map((item) => item === confirmed ? updated : item),
+        }),
+      }));
+      customerFolderRetries.current.delete(key);
+      if (announce) setNotice(`Đã tạo thư mục ${confirmed.houseId || confirmed.projectId} trên Drive.`);
+      return true;
+    } catch (error) {
+      if (isCurrent()) {
+        const attempts = (retry?.attempts ?? 0) + 1;
+        customerFolderRetries.current.set(key, { attempts, retryAt: Date.now() + Math.min(15 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 4)) });
+        if (announce) setNotice(`Hồ sơ đã lưu. Thư mục Drive đang chờ đồng bộ (${error instanceof Error ? error.message : "lỗi kết nối"}). Ứng dụng sẽ tự thử lại.`);
+      }
+      return false;
+    } finally {
+      customerCreateRequestsInFlight.current.delete(key);
+    }
+  };
+
+  const retryPendingCustomerFolders = async (force = false) => {
+    const context = customerDriveSyncContext.current;
+    if (!context.ready || customerMutationInFlight.current || navigator.onLine === false) return;
+    const pending: CustomerLocation[] = [];
+    for (const year of yearsRef.current) for (const [index, month] of year.months.entries()) for (const record of month.records) {
+      if (record.pendingDriveSync && (!record.pendingDriveSyncScope || record.pendingDriveSyncScope === context.rootScope)) {
+        const key = JSON.stringify([context.scope, year.year, index + 1, normalizeHouseCode(record.houseId || record.projectId)]);
+        const retry = customerFolderRetries.current.get(key);
+        if (!customerCreateRequestsInFlight.current.has(key) && (force || !retry || retry.retryAt <= Date.now())) pending.push({ year: year.year, month: index + 1, record });
+      }
+    }
+    // Drain a small batch each pass. Slow Drive requests never block cache rendering.
+    for (const location of pending.slice(0, 3)) {
+      if (customerDriveSyncContext.current.scope !== context.scope) return;
+      await syncCustomerFolder(location, force, force);
+    }
+  };
+
+  useEffect(() => {
+    void retryPendingCustomerFolders();
+  }, [years, workspaceStorageReady, customerDriveRootScope, customerDriveSyncToken, loggedInEmployeeEmail, driveConfigOpen, savingPancakeConfig]);
+
+  useEffect(() => {
+    const retry = () => {
+      if (document.visibilityState === "visible") void retryPendingCustomerFolders();
+    };
+    const timer = window.setInterval(retry, 30_000);
+    window.addEventListener("online", retry);
+    window.addEventListener("focus", retry);
+    document.addEventListener("visibilitychange", retry);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("online", retry);
+      window.removeEventListener("focus", retry);
+      document.removeEventListener("visibilitychange", retry);
+    };
+  }, [workspaceStorageReady, customerDriveRootScope, customerDriveSyncToken, loggedInEmployeeEmail, driveConfigOpen, savingPancakeConfig]);
+
   const loadWorkspaceFromDrive = async (configOverride?: DriveSyncConfig, quietly = false, options: { mode?: DriveLoadMode; year?: number; month?: number; query?: string; projectId?: string; force?: boolean } = {}) => {
     if (customerMutationInFlight.current) return false;
     const mutationRevision = customerMutationRevision.current;
@@ -3422,6 +3563,7 @@ export default function Home() {
     const hadRefreshAvailable = driveRefreshAvailable;
     setDriveRefreshAvailable(false);
     try {
+      await retryPendingCustomerFolders(true);
       const refreshed = await loadWorkspaceFromDrive(undefined, false, { force: true });
       if (!refreshed && hadRefreshAvailable) setDriveRefreshAvailable(true);
     } finally {
@@ -4395,8 +4537,7 @@ export default function Home() {
 
   const addCustomer = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const adminSessionToken = requireAdminCustomerSession();
-    if (!adminSessionToken) return;
+    if (!requireAdminCustomerSession()) return;
     const name = customerName.trim();
     const normalizedHouseId = houseId.trim();
     if (!name || creatingCustomer) return;
@@ -4407,7 +4548,7 @@ export default function Home() {
 
     const created = getVietnamDate();
     const baseProjectId = `GM${String(created.day).padStart(2, "0")}${String(created.month).padStart(2, "0")}${created.year}${nameInitials(name)}`;
-    const creationKey = `${modalYear}-${modalMonth}-${normalizeSearchText(normalizedHouseId)}`;
+    const creationKey = JSON.stringify([customerDriveSyncContext.current.scope, modalYear, modalMonth, normalizeHouseCode(normalizedHouseId)]);
     if (customerCreateRequestsInFlight.current.has(creationKey)) return;
     const targetMonthRecords = dedupeMonthRecords(years.find((yearFolder) => yearFolder.year === modalYear)?.months?.[modalMonth - 1]?.records ?? []);
     const normalizedHouseKey = normalizeHouseCode(normalizedHouseId);
@@ -4429,6 +4570,7 @@ export default function Home() {
       name,
       houseId: normalizedHouseId,
       pendingDriveSync: true,
+      pendingDriveSyncScope: existingRecord.pendingDriveSyncScope || customerDriveRootScope,
       cacheUpdatedAt: Date.now(),
     } : {
       id: `${Date.now()}-${projectId}`,
@@ -4438,6 +4580,7 @@ export default function Home() {
       createdAt: `${String(created.day).padStart(2, "0")}/${String(created.month).padStart(2, "0")}/${created.year}`,
       cacheUpdatedAt: Date.now(),
       pendingDriveSync: true,
+      pendingDriveSyncScope: customerDriveRootScope,
       details: {},
       isHydrated: true,
       progressHydrated: true,
@@ -4469,29 +4612,10 @@ export default function Home() {
     setActiveFolder("Tư vấn");
     setAddOpen(false);
     setNotice(`Đã lưu hồ sơ ${normalizedHouseId} vào cache. Đang đồng bộ Drive…`);
-    customerCreateRequestsInFlight.current.add(creationKey);
     setCreatingCustomer(true);
     try {
-      const config = { scriptUrl: driveScriptUrl.trim() };
-      if (!config.scriptUrl) throw new Error("Chưa kết nối Apps Script để tạo thư mục Drive.");
-      const { response, result } = await postToAppsScript<{ ok?: boolean; error?: string; folderId?: string }>(config, {
-        action: "create-customer-folder",
-        adminSessionToken,
-        year: modalYear,
-        month: modalMonth,
-        projectId,
-        houseId: normalizedHouseId,
-      });
-      if (!response.ok || !result.ok) throw new Error(result.error || "Không thể tạo thư mục hồ sơ trên Drive.");
-      customerMutationRevision.current += 1;
-      clearCustomerDirectoryCache(modalYear, modalMonth);
-      const latest = yearsRef.current.find((year) => year.year === modalYear)?.months[modalMonth - 1]?.records.find((item) => item.projectId === projectId);
-      if (latest && result.folderId) persistRecord({ ...latest, driveFolderId: result.folderId, pendingDriveSync: false }, modalYear, modalMonth);
-      setNotice(`Đã tạo thư mục ${normalizedHouseId} trên Drive và giữ hồ sơ trong cache.`);
-    } catch (error) {
-      setNotice(`Hồ sơ đã lưu trong cache; Drive chưa đồng bộ (${error instanceof Error ? error.message : "lỗi kết nối"}). Có thể nạp lại để thử lại.`);
+      await syncCustomerFolder({ record, year: modalYear, month: modalMonth }, true, true);
     } finally {
-      customerCreateRequestsInFlight.current.delete(creationKey);
       setCreatingCustomer(false);
     }
   };
@@ -5682,6 +5806,7 @@ export default function Home() {
     finally { setEmployeeAuthBusy(false); }
   };
   const logoutEmployee = () => {
+    customerDriveSyncContext.current = { ...customerDriveSyncContext.current, ready: false, token: "", scope: "" };
     try { window.localStorage.removeItem(personnelSessionEmailKey); window.localStorage.removeItem(adminSessionStorageKey); window.localStorage.removeItem(workflowSessionStorageKey); } catch { /* Optional device session cleanup. */ }
     workflowClient.current?.resumeForAccount(null);
     setWorkflowSession(null);
@@ -6225,6 +6350,7 @@ export default function Home() {
         {workspaceView !== "overview" && <button type="button" className="workspace-header__back customer-context--back" onClick={returnToOverview}>← Tổng quan</button>}
         {customerHeading && <div className="workspace-header__project">
           <strong title={customerHeading}>{customerHeading}</strong>
+          {isBuiltInAdminLoggedIn && selectedCustomerLocation?.record.pendingDriveSync && <button type="button" className="pwa-action" onClick={() => { if (requireAdminCustomerSession()) void syncCustomerFolder(selectedCustomerLocation, true, true); }}>Đồng bộ thư mục Drive</button>}
           {canManageCustomerWorkflows && selectedRecord && selectedCustomerLocation && <button type="button" className="customer-link customer-link--topbar" onClick={() => void publishCustomerPortalLink(selectedRecord, selectedCustomerLocation)} disabled={syncingRecordId === selectedRecord.id}>↗ Phát hành</button>}
         </div>}
         <div className="customer-gateway__actions">

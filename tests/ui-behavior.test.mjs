@@ -222,3 +222,142 @@ test("unsent design reassignment survives equal revisions until a newer canonica
   assert.equal(merged[0].actualDate, "28/10/2026");
   assert.equal(Boolean(merged[0].assignmentDirty), false);
 });
+
+const customerSyncStart = source.indexOf("  const syncCustomerFolder = ");
+const customerSyncEnd = source.indexOf("\n  useEffect(", customerSyncStart);
+assert.ok(customerSyncStart > 0 && customerSyncEnd > customerSyncStart);
+const customerSyncCode = (await transform(
+  source.slice(customerSyncStart, customerSyncEnd) + "\nglobalThis.sync = syncCustomerFolder; globalThis.retry = retryPendingCustomerFolders;",
+  { loader: "ts", target: "es2022" },
+)).code;
+
+function customerSyncFixture() {
+  const record = { id: "local-customer", projectId: "GM09112026H1", houseId: "HG-112", pendingDriveSync: true, details: { HVT: "Khách hàng" } };
+  const yearsRef = { current: [{ year: 2026, months: Array.from({ length: 12 }, (_, index) => ({ label: `T${index + 1}`, records: index === 10 ? [record] : [] })) }] };
+  const identity = { scope: "admin-session-a", rootScope: "script-and-root-a", scriptUrl: "https://script.google.com/test/exec", token: "valid-admin", ready: true };
+  const state = { current: identity };
+  const calls = [];
+  const notices = [];
+  const invalidated = [];
+  let now = 1000;
+  let respond = async () => ({ response: { ok: true }, result: { ok: true, folderId: "confirmed-drive-folder" } });
+  const mutation = { current: false };
+  const revision = { current: 0 };
+  const context = vm.createContext({
+    Date: class extends Date { static now() { return now; } },
+    navigator: { onLine: true },
+    customerDriveSyncContext: state,
+    customerCreateRequestsInFlight: { current: new Set() },
+    customerFolderRetries: { current: new Map() },
+    customerMutationInFlight: mutation,
+    customerMutationRevision: revision,
+    yearsRef,
+    normalizeHouseCode: (value) => String(value || "").trim().toLowerCase(),
+    isCurrentAdminSession: (session) => session.token === "valid-admin",
+    persist: (years) => { yearsRef.current = years; },
+    postToAppsScript: async (config, payload) => { calls.push({ ...payload }); return respond(config, payload); },
+    clearCustomerDirectoryCache: (year, month) => invalidated.push([year, month]),
+    setNotice: (value) => notices.push(value),
+  });
+  vm.runInContext(customerSyncCode, context);
+  return {
+    context, state, yearsRef, calls, notices, invalidated, mutation, revision,
+    record: () => yearsRef.current[0].months[10].records[0],
+    location: () => ({ year: 2026, month: 11, record: yearsRef.current[0].months[10].records[0] }),
+    respond: (next) => { respond = next; },
+    advance: (milliseconds) => { now += milliseconds; },
+  };
+}
+
+test("pending customer folders retry with backoff and preserve the original identity and latest form edits", async () => {
+  const f = customerSyncFixture();
+  f.respond(async () => ({ response: { ok: true }, result: { ok: false, error: "Drive temporarily unavailable" } }));
+  assert.equal(await f.context.sync(f.location()), false);
+  assert.equal(f.record().pendingDriveSync, true);
+  assert.equal(f.record().pendingDriveSyncScope, "script-and-root-a");
+  await f.context.retry();
+  assert.equal(f.calls.length, 1, "focus and polling cannot immediately repeat a failed write");
+  f.record().details.HVT = "Đã sửa sau khi tạo";
+  f.respond(async () => ({ response: { ok: true }, result: { ok: true, folderId: "confirmed-drive-folder" } }));
+  f.advance(60_000);
+  await f.context.retry();
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls[1], f.calls[0], "recovery reuses the customer id, house code and period");
+  assert.equal(f.record().pendingDriveSync, false);
+  assert.equal(f.record().driveFolderId, "confirmed-drive-folder");
+  assert.equal(f.record().details.HVT, "Đã sửa sau khi tạo");
+  await f.context.retry();
+  assert.equal(f.calls.length, 2);
+});
+
+test("an ok response without a folder id stays pending until an explicit retry confirms Drive creation", async () => {
+  const f = customerSyncFixture();
+  f.respond(async () => ({ response: { ok: true }, result: { ok: true } }));
+  assert.equal(await f.context.sync(f.location(), true), false);
+  assert.equal(f.record().pendingDriveSync, true);
+  assert.equal(f.invalidated.length, 0);
+  assert.match(f.notices[0], /đang chờ đồng bộ/);
+  f.respond(async () => ({ response: { ok: true }, result: { ok: true, folderId: "confirmed-drive-folder" } }));
+  await f.context.retry(true);
+  assert.equal(f.calls.length, 2, "a deliberate retry bypasses the transient-error backoff");
+  assert.equal(f.record().pendingDriveSync, false);
+});
+
+test("overlapping folder retries send one request and a late result cannot recreate a deleted customer", async () => {
+  const f = customerSyncFixture();
+  let finish;
+  f.respond(() => new Promise((resolve) => { finish = resolve; }));
+  const pending = f.context.sync(f.location());
+  await f.context.sync(f.location());
+  await f.context.retry(true);
+  assert.equal(f.calls.length, 1);
+  f.yearsRef.current[0].months[10].records = [];
+  f.revision.current += 1;
+  finish({ response: { ok: true }, result: { ok: true, folderId: "deleted-drive-folder" } });
+  assert.equal(await pending, false);
+  assert.equal(f.yearsRef.current[0].months[10].records.length, 0);
+  assert.equal(f.invalidated.length, 0);
+});
+
+test("logout, account/root changes, and rename discard stale folder responses", async () => {
+  for (const change of [
+    (f) => { f.state.current = { ...f.state.current, scope: "logged-out", token: "", ready: false }; },
+    (f) => { f.state.current = { ...f.state.current, scope: "another-account", token: "", ready: false }; },
+    (f) => { f.state.current = { ...f.state.current, scope: "other-root-session", rootScope: "script-and-root-b" }; },
+    (f) => { f.record().houseId = "HG-NEW"; f.revision.current += 1; },
+  ]) {
+    const f = customerSyncFixture();
+    let finish;
+    f.respond(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = f.context.sync(f.location(), true);
+    change(f);
+    finish({ response: { ok: true }, result: { ok: true, folderId: "stale-folder" } });
+    assert.equal(await pending, false);
+    assert.equal(f.record().pendingDriveSync, true);
+    assert.equal(f.record().driveFolderId, undefined);
+    assert.equal(f.notices.length, 0);
+    if (f.record().houseId === "HG-112") {
+      await f.context.retry();
+      assert.equal(f.calls.length, 1, "a pending record bound to its former root cannot create a folder in another root");
+    }
+  }
+});
+
+test("folder recovery requires a valid admin session and skips backed-off records so later customers can recover", async () => {
+  const f = customerSyncFixture();
+  f.state.current.ready = false;
+  await f.context.retry(true);
+  assert.equal(f.calls.length, 0);
+  f.state.current.ready = true;
+  f.state.current.token = "expired-session";
+  await f.context.retry(true);
+  assert.equal(f.calls.length, 0);
+  f.state.current.token = "valid-admin";
+  const records = f.yearsRef.current[0].months[10].records;
+  for (let index = 1; index <= 4; index++) records.push({ ...records[0], id: `record-${index}`, projectId: `project-${index}`, houseId: `TEST-${index}` });
+  f.respond(async () => ({ response: { ok: true }, result: { ok: false, error: "Unavailable" } }));
+  await f.context.retry();
+  assert.equal(f.calls.length, 3);
+  await f.context.retry();
+  assert.equal(f.calls.length, 5, "a failed batch does not starve the remaining pending customers");
+});
