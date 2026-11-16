@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState, type ChangeEvent } from "react";
+import { onRealtimeChange } from "./realtime-client";
 import "./construction-photos.css";
 
 export type ConstructionPhoto = {
@@ -379,7 +380,9 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
   useEffect(() => {
     setMobile(onMobile());
     void refresh();
+    const unsubscribe = onRealtimeChange("photos", () => { void refresh(); });
     return () => {
+      unsubscribe();
       listRevision.current++;
       cameraRevision.current++;
       lifetime.current++;

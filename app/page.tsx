@@ -3,6 +3,7 @@
 import { ChangeEvent, FormEvent, Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
 import { applyColorTheme, colorThemeStorageKey, readColorTheme, type ColorTheme } from "./color-theme";
+import { connectRealtime, onRealtimeChange, publishRealtimeChange, type RealtimeClient } from "./realtime-client";
 import ConstructionPhotos, { type ConstructionPhotoDay, type ConstructionPhotoUpload, type ConstructionPhotoUploadResult } from "./ConstructionPhotos";
 import SidebarCustomerGroup, { groupSidebarItems } from "./SidebarCustomerGroup";
 import VietnamDatePicker from "./VietnamDatePicker";
@@ -708,20 +709,40 @@ const personnelStatuses: PersonnelStatus[] = ["Có", "Không", "Ngưng"];
 // The currently deployed Apps Script still verifies its historical token. It is
 // supplied automatically for compatibility, so users only ever enter the URL.
 const deployedAppsScriptCompatibilityToken = "010101";
-const defaultDriveSyncConfig: DriveSyncConfig = {
+const realtimeUrl = import.meta.env.VITE_GM_REALTIME_URL?.trim() || "";
+const legacyDriveSyncConfig: DriveSyncConfig = {
   scriptUrl: "https://script.google.com/macros/s/AKfycby_JquY7zgNJGE3eDDnQ-l0BWqVdiBhaDYt0Fx4fw1PBqK6FyyZxQWigc3yCUTGdKN1/exec",
   driveUrl: defaultDriveFolderUrl,
 };
+const defaultDriveSyncConfig = { ...legacyDriveSyncConfig, scriptUrl: realtimeUrl || legacyDriveSyncConfig.scriptUrl };
 const windowsInstallerUrl = "https://github.com/thanhbuimgarchi-cpu/gm-manager/releases/download/desktop-latest/GM-CRM-Setup.exe";
 const APP_VERSION = import.meta.env.VITE_APP_VERSION || "development";
 
-function isAppsScriptUrl(value: string) {
+function isWorkspaceEndpoint(value: string) {
+  if (realtimeUrl) return value === realtimeUrl;
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "script.google.com" && url.pathname.startsWith("/macros/s/");
   } catch {
     return false;
   }
+}
+
+let signedRealtime: { token: string; client: RealtimeClient } | undefined;
+let anonymousRealtime: RealtimeClient | undefined;
+
+function realtimeConnection(token: string) {
+  if (!token) return anonymousRealtime ??= connectRealtime({ url: realtimeUrl });
+  if (signedRealtime?.token !== token || signedRealtime.client.status === "closed") {
+    signedRealtime?.client.close();
+    signedRealtime = { token, client: connectRealtime({
+      url: realtimeUrl,
+      token,
+      onInvalidate: publishRealtimeChange,
+      onStatusChange: (status) => { if (status === "ready") publishRealtimeChange(); },
+    }) };
+  }
+  return signedRealtime.client;
 }
 
 function isDriveUrl(value: string) {
@@ -894,13 +915,25 @@ async function postViaAppsScriptBridge<T>(scriptUrl: string, payload: Record<str
 }
 
 async function postToAppsScript<T extends { ok?: boolean; error?: string }>(config: DriveSyncConfig, payload: Record<string, unknown>): Promise<{ response: Response; result: T }> {
-  if (!isAppsScriptUrl(config.scriptUrl)) throw new Error("Hãy kết nối Google Apps Script trước khi dùng Drive.");
-  const requestPayload: Record<string, unknown> = { ...payload, token: deployedAppsScriptCompatibilityToken };
+  if (!isWorkspaceEndpoint(config.scriptUrl)) throw new Error("Địa chỉ kết nối máy chủ không hợp lệ.");
+  const requestPayload: Record<string, unknown> = { ...payload };
   try {
     const session = JSON.parse(window.localStorage.getItem(workflowSessionStorageKey) || "null");
     const account = window.localStorage.getItem(personnelSessionEmailKey) ?? "";
     if (!requestPayload.workflowSessionToken && isCurrentWorkflowSession(session, account, config.scriptUrl)) requestPayload.workflowSessionToken = session.token;
   } catch { /* Public reads and login do not require a saved session. */ }
+  if (realtimeUrl) {
+    const login = payload.action === "verify-employee-login";
+    const sessionToken = login ? "" : String(requestPayload.workflowSessionToken || requestPayload.adminSessionToken || "");
+    if (login) {
+      delete requestPayload.workflowSessionToken;
+      delete requestPayload.adminSessionToken;
+    }
+    const timeoutMs = String(payload.action || "").includes("audio") ? 180_000 : 90_000;
+    const { status, result } = await realtimeConnection(sessionToken).request<T>(requestPayload, { timeoutMs });
+    return { response: new Response(null, { status }), result };
+  }
+  requestPayload.token = deployedAppsScriptCompatibilityToken;
   const readAction = ["load-consulting", "list-workflow-files", "list-documents", "list-3d-files", "list-construction-photos", "load-personnel", "customer-portal-share", "load-assigned-work-notes", "load-assigned-design-tasks", "load-customer-messages", "load-workspace-cache"].includes(String(payload.action || ""));
   const retryLimit = readAction ? 4 : 2;
   let lastError: unknown;
@@ -3613,11 +3646,13 @@ export default function Home() {
     // The per-request key in loadWorkspaceFromDrive prevents overlapping scans.
     refreshWorkspace();
     const refreshTimer = window.setInterval(refreshWorkspace, 30_000);
+    const unsubscribe = onRealtimeChange("workspace", refreshWorkspace);
     document.addEventListener("visibilitychange", refreshWorkspace);
     window.addEventListener("focus", refreshWorkspace);
     window.addEventListener("online", refreshWorkspace);
     return () => {
       window.clearInterval(refreshTimer);
+      unsubscribe();
       document.removeEventListener("visibilitychange", refreshWorkspace);
       window.removeEventListener("focus", refreshWorkspace);
       window.removeEventListener("online", refreshWorkspace);
@@ -3665,11 +3700,13 @@ export default function Home() {
     };
     refresh();
     const timer = window.setInterval(refresh, 10_000);
+    const unsubscribe = onRealtimeChange("workspace", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
     return () => {
       window.clearInterval(timer);
+      unsubscribe();
       document.removeEventListener("visibilitychange", refresh);
       window.removeEventListener("focus", refresh);
       window.removeEventListener("online", refresh);
@@ -3908,7 +3945,7 @@ export default function Home() {
       });
       if (!response.ok || !result.ok) throw new Error(result.error || "Không thể nạp Tin nhắn khách.");
       if (!result.configured) {
-        setCustomerMessagesError("Chưa cấu hình Pancake trong Apps Script.");
+        setCustomerMessagesError("Chưa cấu hình Pancake trên máy chủ.");
         return;
       }
       const next = (Array.isArray(result.messages) ? result.messages : []).map(reconcileWorkflowMessage).filter(workflowMessageVisible);
@@ -4499,11 +4536,13 @@ export default function Home() {
     const wake = () => { void refresh(); };
     if (activeFolder === "Tài liệu") timer = window.setTimeout(wake, 3_000);
     else void refresh();
+    const unsubscribe = onRealtimeChange("documents", wake);
     document.addEventListener("visibilitychange", wake);
     window.addEventListener("focus", wake);
     window.addEventListener("online", wake);
     return () => {
       stopped = true;
+      unsubscribe();
       if (timer !== undefined) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
@@ -5068,7 +5107,7 @@ export default function Home() {
     if (!record.audioNote || audioProcessingId) return;
     if (!window.confirm(`Xóa toàn bộ file ghi âm và nội dung đã chuyển thành văn bản của ${customerDisplayName(record)}?`)) return;
     const config = { scriptUrl: driveScriptUrl.trim() };
-    if (!isAppsScriptUrl(config.scriptUrl)) {
+    if (!isWorkspaceEndpoint(config.scriptUrl)) {
       openDriveSettings();
       return;
     }
@@ -5139,8 +5178,8 @@ export default function Home() {
     event.preventDefault();
     if (!isBuiltInAdminLoggedIn) { setNotice("Chỉ admin mới có quyền thiết lập ứng dụng."); return; }
     const config = { scriptUrl: driveScriptUrl.trim(), driveUrl: driveLinkUrl.trim() };
-    if (!isAppsScriptUrl(config.scriptUrl)) {
-      setNotice("Hãy nhập Web app URL hợp lệ từ Google Apps Script.");
+    if (!isWorkspaceEndpoint(config.scriptUrl)) {
+      setNotice("Địa chỉ kết nối máy chủ không hợp lệ.");
       return;
     }
     if (config.driveUrl && !isDriveUrl(config.driveUrl)) {
@@ -5168,7 +5207,7 @@ export default function Home() {
     driveIndexProjectIds.current.clear();
     window.localStorage.setItem(driveSyncConfigKey, JSON.stringify(config));
     setDriveConfigOpen(false);
-    setNotice(config.driveUrl ? "Đã lưu kết nối Google Apps Script và Link Drive trên thiết bị này." : "Đã kết nối Google Apps Script trên thiết bị này.");
+    setNotice(config.driveUrl ? "Đã lưu kết nối máy chủ và link Drive." : "Đã lưu kết nối máy chủ.");
     void loadWorkspaceFromDrive(config, true, { mode: "index", year: selectedYear, month: selectedMonth, force: true });
   };
   const savePancakeConfig = async () => {
@@ -5377,12 +5416,14 @@ export default function Home() {
     const refresh = () => { void poll(); };
     refresh();
     const timer = window.setInterval(refresh, 10_000);
+    const unsubscribe = onRealtimeChange("photos", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      unsubscribe();
       window.removeEventListener("focus", refresh);
       window.removeEventListener("online", refresh);
       document.removeEventListener("visibilitychange", refresh);
@@ -5505,10 +5546,11 @@ export default function Home() {
     void loadAssignments();
     const timer = window.setInterval(() => { void loadAssignments(); }, 10 * 1000);
     const refresh = () => { void loadAssignments(); };
+    const unsubscribe = onRealtimeChange("assignments", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
-    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    return () => { cancelled = true; unsubscribe(); window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [activeFolder, canViewNotesSummary, canManageCustomerWorkflows, currentWorkflowToken, driveScriptUrl, loggedInEmployeeEmail, loggedInEmployeeAssignmentKey, loggedInEmployeeLegacyAssignmentKey, selectedCustomerProjectId, selectedYear, selectedMonth]);
   useEffect(() => {
     if (!canViewCustomerMessages || !driveScriptUrl.trim()) {
@@ -5524,10 +5566,11 @@ export default function Home() {
     };
     refresh();
     const timer = window.setInterval(refresh, 30 * 1000);
+    const unsubscribe = onRealtimeChange("messages", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
-    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    return () => { unsubscribe(); window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [canViewCustomerMessages, driveScriptUrl, selectedCustomerProjectId, customerLocations.length]);
   useEffect(() => {
     if (!canViewCustomerMessages || !driveScriptUrl.trim() || !customerMessages.length) return;
@@ -5599,10 +5642,11 @@ export default function Home() {
     void loadDesignAssignments();
     const timer = window.setInterval(() => { void loadDesignAssignments(); }, 10 * 1000);
     const refresh = () => { void loadDesignAssignments(); };
+    const unsubscribe = onRealtimeChange("assignments", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
-    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    return () => { cancelled = true; unsubscribe(); window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [canViewDesignSummary, canManageCustomerWorkflows, currentWorkflowToken, driveScriptUrl, loggedInEmployeeEmail, loggedInEmployeeAssignmentKey, loggedInEmployeeLegacyAssignmentKey]);
   const visibleAssignedDesignTasks = assignedDesignTasks.filter(canSeeDesignTask);
   const outstandingSidebarNotes = useMemo<OutstandingWorkNote[]>(() => {
@@ -5839,6 +5883,8 @@ export default function Home() {
     finally { setEmployeeAuthBusy(false); }
   };
   const logoutEmployee = () => {
+    signedRealtime?.client.close();
+    signedRealtime = undefined;
     customerDriveSyncContext.current = { ...customerDriveSyncContext.current, ready: false, token: "", scope: "" };
     try { window.localStorage.removeItem(personnelSessionEmailKey); window.localStorage.removeItem(adminSessionStorageKey); window.localStorage.removeItem(workflowSessionStorageKey); } catch { /* Optional device session cleanup. */ }
     workflowClient.current?.resumeForAccount(null);
@@ -5895,10 +5941,11 @@ export default function Home() {
     void refreshPersonnel(false);
     const refresh = () => { void refreshPersonnel(); };
     const timer = window.setInterval(refresh, 10_000);
+    const unsubscribe = onRealtimeChange("personnel", refresh);
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", refresh);
-    return () => { cancelled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
+    return () => { cancelled = true; unsubscribe(); window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); window.removeEventListener("focus", refresh); window.removeEventListener("online", refresh); };
   }, [personnelView, activeFolder, driveScriptUrl, loginOpen, loggedInEmployeeEmail, currentWorkflowToken, canManagePersonnel, personnelAddOpen, editingPersonnelId]);
   useEffect(() => {
     if (activeFolder !== "Ghi chú" || !selectedCustomerLocation) return;
@@ -5913,7 +5960,7 @@ export default function Home() {
       return;
     }
     const config = { scriptUrl: driveScriptUrl.trim() };
-    if (!isAppsScriptUrl(config.scriptUrl)) {
+    if (!isWorkspaceEndpoint(config.scriptUrl)) {
       openDriveSettings();
       return;
     }
@@ -6720,10 +6767,12 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setDriveConfigOpen(false)} aria-label="Đóng">×</button>
             <h2>Thiết lập</h2>
             {renderColorThemeControl()}
-            <p className="eyebrow">Kết nối Drive · Google Apps Script</p>
-            <p className="drive-config-dialog__hint">Dán Web app URL. Kết nối Drive được nhớ trên thiết bị này. Token Pancake được lưu trong Script Properties, không lưu trên GitHub hay trình duyệt.</p>
-            <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
-            <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
+            <p className="eyebrow">Kết nối Drive{realtimeUrl ? "" : " · Google Apps Script"}</p>
+            {!realtimeUrl && <>
+              <p className="drive-config-dialog__hint">Dán Web app URL. Kết nối Drive được nhớ trên thiết bị này. Token Pancake được lưu trong Script Properties, không lưu trên GitHub hay trình duyệt.</p>
+              <a className="script-link" href="gm-crm-drive-script.js" target="_blank" rel="noreferrer">Xem mã Apps Script đang tự động cập nhật ↗</a>
+              <label>Web app URL<input value={driveScriptUrl} onChange={(event) => setDriveScriptUrl(event.target.value)} placeholder="https://script.google.com/macros/s/.../exec" autoFocus /></label>
+            </>}
             {isBuiltInAdminLoggedIn && <label>Link Google Drive của admin<input type="url" value={driveLinkUrl} onChange={(event) => setDriveLinkUrl(event.target.value.trim())} placeholder="https://drive.google.com/drive/folders/..." /><small>Admin có thể thay link này bất cứ lúc nào. Link được lưu trên thiết bị hiện tại.</small></label>}
             {isBuiltInAdminLoggedIn && driveLinkUrl && <a className="script-link" href={driveLinkUrl} target="_blank" rel="noreferrer">Mở Link Drive đã lưu ↗</a>}
             {isBuiltInAdminLoggedIn && <fieldset className="pancake-config">

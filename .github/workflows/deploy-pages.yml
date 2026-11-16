@@ -45,6 +45,7 @@ jobs:
       - run: npm run build:github-pages
         env:
           VITE_APP_VERSION: ${{ steps.source.outputs.version }}
+          VITE_GM_REALTIME_URL: ${{ vars.GM_REALTIME_URL }}
           VITE_WINDOWS_INSTALLER_MIRRORED: ${{ steps.desktop_installer.outputs.windows-installer-mirrored }}
           VITE_MACOS_INSTALLER_MIRRORED: ${{ steps.desktop_installer.outputs.macos-installer-mirrored }}
       - run: cp public/.nojekyll github-pages/.nojekyll
