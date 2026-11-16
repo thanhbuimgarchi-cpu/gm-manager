@@ -105,7 +105,10 @@ const browser = await chromium.launch({
 async function enterGallery(page) {
   await page.locator(".customer-result").filter({ hasText: project.houseId }).click();
   await page.getByRole("button", { name: "Thi công", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "Chụp ảnh", exact: true }).count(), 0);
   const photos = page.getByRole("region", { name: "Ảnh thi công", exact: true });
+  assert.equal(await photos.count(), 0);
+  await page.getByRole("button", { name: "Nhật ký công trình", exact: true }).click();
   await photos.waitFor();
   return photos;
 }

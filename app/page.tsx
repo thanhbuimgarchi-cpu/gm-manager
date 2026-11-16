@@ -25,7 +25,7 @@ function WorkspaceIcon({ name, size = 20 }: { name: string; size?: number }) {
     plus: "M12 5v14M5 12h14",
     calendar: "M8 2v4M16 2v4M3 10h18M3 5h18v17H3Z",
   };
-  const folderNames: Record<string, string> = { "Ghi chú": "note", "Tin nhắn": "message", "Tư vấn": "people", "Thiết kế": "design", "Dự toán": "chart", "Thi công": "tool", "Nghiệm thu": "check", "Bảo hành": "shield", "Tài liệu": "folder", "3D": "cube" };
+  const folderNames: Record<string, string> = { "Ghi chú": "note", "Tin nhắn": "message", "Tư vấn": "people", "Thiết kế": "design", "Dự toán": "chart", "Thi công": "tool", [constructionJournalLabel]: "calendar", "Nghiệm thu": "check", "Bảo hành": "shield", "Tài liệu": "folder", "3D": "cube" };
   return <svg className="workspace-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[folderNames[name] || name] || paths.folder} /></svg>;
 }
 
@@ -938,6 +938,7 @@ function browserAudioMimeType(file: File) {
   return ({ mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", flac: "audio/flac" } as Record<string, string>)[extension ?? ""] ?? "";
 }
 
+const constructionJournalLabel = "Nhật ký công trình";
 const syncedDriveFolders: DriveFolder[] = [
   { label: "-DATA", icon: "◫" },
   { label: "Ghi chú", icon: "✎" },
@@ -946,6 +947,7 @@ const syncedDriveFolders: DriveFolder[] = [
   { label: "Thiết kế", icon: "▣" },
   { label: "Dự toán", icon: "⌁" },
   { label: "Thi công", icon: "♧" },
+  { label: constructionJournalLabel, icon: "◫" },
   { label: "Nghiệm thu", icon: "✓" },
   { label: "Bảo hành", icon: "⚙" },
   { label: "Tài liệu", icon: "▱" },
@@ -2302,6 +2304,7 @@ export default function Home() {
   const canManageCustomerWorkflows = Boolean(loggedInEmployee && (isBuiltInAdminLoggedIn || isPersonnelManager(loggedInEmployee)));
   const canAssignProjectWork = Boolean(currentWorkflowToken && canManageCustomerWorkflows);
   const employeePermissions = isPersonnelManager(loggedInEmployee) ? [...personnelWorkflowPermissionOptions] : loggedInEmployee?.permissions.filter((permission) => permission !== constructionPhotoNotificationPermission) ?? [];
+  const canViewConstructionJournal = employeePermissions.includes("Thi công");
   const wantsConstructionPhotoNotifications = Boolean(!isBuiltInAdminLoggedIn && loggedInEmployee?.permissions.includes(constructionPhotoNotificationPermission));
   const canViewNotesSummary = Boolean(currentWorkflowToken && loggedInEmployee && employeePermissions.includes("Ghi chú"));
   const canViewDesignSummary = Boolean(currentWorkflowToken && loggedInEmployee && employeePermissions.includes("Thiết kế"));
@@ -2831,10 +2834,10 @@ export default function Home() {
       setNotice("Hãy đăng nhập để mở thông báo ảnh thi công.");
       return;
     }
-    if (photoId && !employeePermissions.includes("Thi công")) {
+    if (photoId && !canViewConstructionJournal) {
       for (const key of ["gmcrmProject", "gmcrmConstructionPhoto", "gmcrmYear", "gmcrmMonth", "gmcrmHouse"]) url.searchParams.delete(key);
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-      setNotice("Có ảnh thi công mới. Tài khoản này nhận thông báo nhưng chưa có quyền Thi công để xem ảnh trong hồ sơ.");
+      setNotice("Cần quyền Thi công để xem ảnh trong Nhật ký công trình.");
       return;
     }
     const year = Number(url.searchParams.get("gmcrmYear"));
@@ -2861,7 +2864,7 @@ export default function Home() {
     }
     notificationLocationRequested.current = "";
     if (projectId && photoId && location) {
-      selectCustomerForWorkflow(location, "Thi công");
+      selectCustomerForWorkflow(location, constructionJournalLabel);
       for (const key of ["gmcrmProject", "gmcrmConstructionPhoto", "gmcrmYear", "gmcrmMonth", "gmcrmHouse"]) url.searchParams.delete(key);
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
       return;
@@ -2895,7 +2898,7 @@ export default function Home() {
     url.searchParams.delete("gmcrmMonth");
     url.searchParams.delete("gmcrmHouse");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
-  }, [customerLocations, driveScriptUrl, isCustomerPortal, loggedInEmployee?.id, currentWorkflowToken, employeePermissions.includes("Thi công")]);
+  }, [customerLocations, driveScriptUrl, isCustomerPortal, loggedInEmployee?.id, currentWorkflowToken, canViewConstructionJournal]);
 
   const returnToCustomerSearch = () => {
     const currentDate = getVietnamDate();
@@ -5437,8 +5440,14 @@ export default function Home() {
   // dành cho Admin / Quản lý chung.
   const canViewCustomerMessages = Boolean(loggedInEmployee);
   const canAssignCustomerMessages = canAssignProjectWork;
-  const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && (folder.label === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(folder.label as typeof personnelPermissionOptions[number])));
-  const hasActiveFolderAccess = activeFolder === "Tin nhắn" ? canViewCustomerMessages : !loggedInEmployee || employeePermissions.includes(activeFolder as typeof personnelPermissionOptions[number]);
+  const canAccessWorkspaceFolder = (label: string) => {
+    if (label === "Tin nhắn") return canViewCustomerMessages;
+    if (!loggedInEmployee) return true;
+    if (label === constructionJournalLabel) return canViewConstructionJournal;
+    return employeePermissions.includes(label as typeof personnelPermissionOptions[number]);
+  };
+  const visibleWorkspaceFolders = syncedDriveFolders.filter((folder) => folder.label !== "Nhân lực" && canAccessWorkspaceFolder(folder.label));
+  const hasActiveFolderAccess = canAccessWorkspaceFolder(activeFolder);
   useEffect(() => {
     if (!canViewNotesSummary || !loggedInEmployeeEmail || !driveScriptUrl.trim()) { setAssignedWorkNotes([]); return; }
     let cancelled = false;
@@ -6113,7 +6122,7 @@ export default function Home() {
       </section>)}
     </div>
   </section>;
-  const renderWorkflowCustomerSearch = () => {
+  const renderWorkflowCustomerSearch = (targetFolder?: string) => {
     if (activeFolder === "Ghi chú" && !canAssignProjectWork) return null;
     return <section className="workflow-customer-search" aria-label="Tìm khách hàng trong quy trình">
       <label className="customer-search workflow-customer-search__input">
@@ -6123,7 +6132,7 @@ export default function Home() {
       </label>
       {workflowSearch && <div className="workflow-customer-search__results">
         {workflowSearchResults.length ? workflowSearchResults.map((location) => (
-          <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location)}>
+          <button type="button" key={`${location.year}-${location.month}-${location.record.projectId}`} onClick={() => selectCustomerForWorkflow(location, targetFolder)}>
             <span><b>{customerDisplayName(location.record)}</b></span>
             <em>T{location.month} / {location.year} →</em>
           </button>
@@ -6614,9 +6623,9 @@ export default function Home() {
               {renderWarrantySchedule()}
             </section>
           </section>
-        ) : activeFolder === "Thi công" ? (
+        ) : activeFolder === constructionJournalLabel ? (
           <section className="workflow-page">
-            {renderWorkflowCustomerSearch()}
+            {renderWorkflowCustomerSearch(constructionJournalLabel)}
             {selectedCustomerLocation && (loggedInEmployee && currentWorkflowToken
               ? <ConstructionPhotos
                   key={constructionPhotoScope}
@@ -6633,7 +6642,7 @@ export default function Home() {
                     if (!result.deleted || !result.trashed) throw new Error("Drive chưa xác nhận đã xóa ảnh.");
                   } : undefined}
                 />
-              : <section className="coming-soon"><h1>Ảnh thi công</h1><p>Đăng nhập để xem và lưu ảnh của hồ sơ.</p><button className="add-button" type="button" onClick={() => openEmployeeLogin()}>Đăng nhập</button></section>)}
+              : <section className="coming-soon"><h1>{constructionJournalLabel}</h1><p>Đăng nhập để xem và lưu ảnh của hồ sơ.</p><button className="add-button" type="button" onClick={() => openEmployeeLogin()}>Đăng nhập</button></section>)}
           </section>
         ) : activeFolder === "Tài liệu" ? (
           <section className="document-workspace">

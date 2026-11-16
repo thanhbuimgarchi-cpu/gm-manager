@@ -130,13 +130,14 @@ try {
   assert.equal(notices.filter(item => item.account === reader && item.shown).length, 2, "reload does not repeat delivered events");
   await readerPage.goto(shown[0].url);
   await readerPage.getByRole("region", { name: "Ảnh thi công", exact: true }).waitFor();
+  assert.equal(await readerPage.getByRole("button", { name: "Nhật ký công trình", exact: true }).getAttribute("aria-pressed"), "true");
   await waitUntil(() => loads.some(({ account, payload }) => account === reader && payload.action === "list-construction-photos" && payload.year === 2025 && payload.month === 3));
   assert.equal(loads.some(({ account, payload }) => account === reader && payload.action === "list-construction-photos" && payload.year === 2026), false, "notification opens the historical photo album rather than the current duplicate");
 
   const limitedPage = await openAccount(notifyOnly);
   await waitUntil(() => notices.some(item => item.account === notifyOnly && item.shown));
   await limitedPage.goto(notices.find(item => item.account === notifyOnly).url);
-  await limitedPage.getByText("Có ảnh thi công mới. Tài khoản này nhận thông báo nhưng chưa có quyền Thi công để xem ảnh trong hồ sơ.").waitFor();
+  await limitedPage.getByText("Cần quyền Thi công để xem ảnh trong Nhật ký công trình.").waitFor();
   assert.equal(loads.some(({ account, payload }) => account === notifyOnly && payload.action === "list-construction-photos"), false, "photo subscription does not grant photo access");
 
   await openAccount(reader, "web");

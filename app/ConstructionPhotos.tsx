@@ -577,7 +577,7 @@ export default function ConstructionPhotos({ canCapture, cacheKey, loadPhotos, u
 
   return <section className="construction-photos" aria-label="Ảnh thi công">
     <header className="construction-photos__header">
-      <div><p>Thi công</p><h2><button type="button" className="construction-photos__album" aria-expanded={albumOpen} aria-controls={albumId} onClick={() => setAlbumOpen((open) => !open)}>
+      <div><p>Nhật ký công trình</p><h2><button type="button" className="construction-photos__album" aria-expanded={albumOpen} aria-controls={albumId} onClick={() => setAlbumOpen((open) => !open)}>
         <FolderIcon /> Ảnh thi công <span aria-hidden="true">{albumOpen ? "−" : "+"}</span>
       </button></h2></div>
       <div className="construction-photos__actions">
