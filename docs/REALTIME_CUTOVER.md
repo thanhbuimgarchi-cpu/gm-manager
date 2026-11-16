@@ -31,7 +31,7 @@ Phiên chưa đăng nhập chỉ được thực hiện các thao tác công kha
 
 ## Triển khai trên ChatGPT Sites
 
-ChatGPT Sites hỗ trợ WebSocket, cơ sở dữ liệu D1 và kho tệp R2. Đây là một lựa chọn để chạy máy chủ. Connector hiện chưa tìm thấy dự án Sites theo ID trong `.openai/hosting.json` của workspace này. Cần một dự án truy cập được để thử bản triển khai. [Tài liệu ChatGPT Sites](https://learn.chatgpt.com/docs/sites#understand-limits-and-unsupported-uses).
+ChatGPT Sites hỗ trợ WebSocket, cơ sở dữ liệu D1 và kho tệp R2. Tài khoản hiện tại có quyền chủ sở hữu Site GM-CRM và có thể mở mã nguồn của Site. `.openai/hosting.json` trên nhánh WebSocket trỏ tới Site này. Site hiện công khai và chưa có cơ sở dữ liệu D1. Cần cấu hình D1 và xác minh quyền truy cập trước khi nhận dữ liệu vận hành. [Site GM-CRM](https://orbit-crm-dashboard.thanhbui-mgarchi.chatgpt.site) · [Tài liệu ChatGPT Sites](https://learn.chatgpt.com/docs/sites#understand-limits-and-unsupported-uses).
 
 Nếu dùng Sites cho cả giao diện và máy chủ, kiểm tra đăng nhập và handshake cùng nguồn với đúng quyền truy cập của Site. Nếu giữ GitHub Pages và ứng dụng PC, kiểm tra handshake từ nguồn GitHub Pages và quyền truy cập của từng nhóm người dùng. Quyền vào Site và quyền thao tác GM Manager cần được kiểm tra riêng.
 
